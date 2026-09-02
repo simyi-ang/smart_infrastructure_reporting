@@ -10,14 +10,70 @@ import 'theme/app_colors.dart';
 
 // ============================================================
 // GLOBAL NAVIGATOR KEY
-//
-// Required so authentication events such as password recovery
-// can navigate even when they occur outside a normal screen.
 // ============================================================
 
-final GlobalKey<NavigatorState>
-navigatorKey =
+final GlobalKey<NavigatorState> navigatorKey =
 GlobalKey<NavigatorState>();
+
+// ============================================================
+// PASSWORD RECOVERY COORDINATOR
+//
+// A recovery deep link can be processed extremely early when
+// SmartCity is opened from Gmail.
+//
+// If the Navigator is not ready yet, we remember the recovery
+// request and navigate after Flutter finishes building.
+// ============================================================
+
+class PasswordRecoveryCoordinator {
+  static bool pendingRecovery = false;
+
+  static bool navigationActive = false;
+
+  static void markRecoveryPending() {
+    pendingRecovery = true;
+  }
+
+  static void clearRecovery() {
+    pendingRecovery = false;
+    navigationActive = false;
+  }
+
+  static void tryOpenResetPasswordScreen() {
+    if (!pendingRecovery ||
+        navigationActive) {
+      return;
+    }
+
+    final NavigatorState? navigator =
+        navigatorKey.currentState;
+
+    if (navigator == null) {
+      return;
+    }
+
+    navigationActive = true;
+
+    navigator.pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) =>
+            ResetPasswordScreen(
+              onFinished: () {
+                clearRecovery();
+              },
+            ),
+      ),
+          (route) => false,
+    );
+  }
+}
+
+// ============================================================
+// AUTH SUBSCRIPTION
+// ============================================================
+
+StreamSubscription<AuthState>?
+globalAuthSubscription;
 
 // ============================================================
 // MAIN
@@ -27,16 +83,73 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // ==========================================================
-  // SUPABASE INITIALIZATION
+  // INITIALIZE SUPABASE
   // ==========================================================
 
   await Supabase.initialize(
     url:
     'https://mqdymgkgxshvkzentdmg.supabase.co',
 
-    anonKey:
+    publishableKey:
     'sb_publishable_qGdkpnvxBaOWDs2WvU2xgQ_g98Vv__D',
+
+    // PKCE is the current default for Supabase Flutter,
+    // but declaring it explicitly makes the recovery flow
+    // clear and predictable.
+    authOptions:
+    const FlutterAuthClientOptions(
+      authFlowType:
+      AuthFlowType.pkce,
+    ),
   );
+
+  // ==========================================================
+  // LISTEN BEFORE runApp()
+  //
+  // Important:
+  // The recovery callback may be processed while SmartCity is
+  // starting from the Gmail deep link.
+  //
+  // Listening here means the recovery event cannot be missed
+  // just because SmartCityApp.initState() has not run yet.
+  // ==========================================================
+
+  globalAuthSubscription =
+      Supabase.instance.client.auth
+          .onAuthStateChange
+          .listen(
+            (
+            AuthState authState,
+            ) {
+          final AuthChangeEvent event =
+              authState.event;
+
+          if (event ==
+              AuthChangeEvent
+                  .passwordRecovery) {
+            PasswordRecoveryCoordinator
+                .markRecoveryPending();
+
+            WidgetsBinding.instance
+                .addPostFrameCallback(
+                  (_) {
+                PasswordRecoveryCoordinator
+                    .tryOpenResetPasswordScreen();
+              },
+            );
+          }
+        },
+
+        onError:
+            (
+            Object error,
+            StackTrace stackTrace,
+            ) {
+          debugPrint(
+            'Supabase auth stream error: $error',
+          );
+        },
+      );
 
   runApp(
     const SmartCityApp(),
@@ -60,12 +173,6 @@ class SmartCityApp
 
 class _SmartCityAppState
     extends State<SmartCityApp> {
-  StreamSubscription<AuthState>?
-  authSubscription;
-
-  bool recoveryNavigationActive =
-  false;
-
   // ============================================================
   // INITIALIZATION
   // ============================================================
@@ -74,114 +181,16 @@ class _SmartCityAppState
   void initState() {
     super.initState();
 
-    _listenForAuthenticationEvents();
-  }
-
-  // ============================================================
-  // AUTHENTICATION EVENT LISTENER
-  //
-  // This listener is specifically important for:
-  //
-  // Forgot Password
-  //      ↓
-  // Recovery email
-  //      ↓
-  // User taps Reset Password
-  //      ↓
-  // Supabase verifies recovery request
-  //      ↓
-  // smartcity://reset-password
-  //      ↓
-  // SmartCity opens
-  //      ↓
-  // AuthChangeEvent.passwordRecovery
-  //      ↓
-  // ResetPasswordScreen
-  //
-  // Other normal authentication events continue to be handled
-  // by AuthGate as before.
-  // ============================================================
-
-  void _listenForAuthenticationEvents() {
-    authSubscription =
-        Supabase.instance.client.auth
-            .onAuthStateChange
-            .listen(
-              (
-              AuthState authState,
-              ) {
-            final AuthChangeEvent event =
-                authState.event;
-
-            // ======================================================
-            // PASSWORD RECOVERY
-            // ======================================================
-
-            if (event ==
-                AuthChangeEvent
-                    .passwordRecovery) {
-              _openResetPasswordScreen();
-            }
-          },
-        );
-  }
-
-  // ============================================================
-  // OPEN RESET PASSWORD SCREEN
-  // ============================================================
-
-  void _openResetPasswordScreen() {
-    // Prevent duplicate navigation if Supabase emits/replays
-    // the recovery state while the screen is already opening.
-    if (recoveryNavigationActive) {
-      return;
-    }
-
-    recoveryNavigationActive =
-    true;
-
+    // If the password recovery event happened before the
+    // MaterialApp/Navigator existed, try navigation again once
+    // the first Flutter frame is ready.
     WidgetsBinding.instance
         .addPostFrameCallback(
           (_) {
-        final NavigatorState?
-        navigator =
-            navigatorKey.currentState;
-
-        if (navigator == null) {
-          recoveryNavigationActive =
-          false;
-
-          return;
-        }
-
-        // Remove the normal AuthGate / Welcome route so that
-        // the user cannot accidentally leave password recovery
-        // and expose an authenticated recovery session.
-        navigator.pushAndRemoveUntil(
-          MaterialPageRoute(
-            builder: (_) =>
-                ResetPasswordScreen(
-                  onFinished: () {
-                    recoveryNavigationActive =
-                    false;
-                  },
-                ),
-          ),
-              (route) => false,
-        );
+        PasswordRecoveryCoordinator
+            .tryOpenResetPasswordScreen();
       },
     );
-  }
-
-  // ============================================================
-  // DISPOSE
-  // ============================================================
-
-  @override
-  void dispose() {
-    authSubscription?.cancel();
-
-    super.dispose();
   }
 
   // ============================================================
@@ -192,10 +201,12 @@ class _SmartCityAppState
   Widget build(
       BuildContext context,
       ) {
-    final bool alreadyLoggedIn =
+    final Session? session =
         Supabase.instance.client.auth
-            .currentSession !=
-            null;
+            .currentSession;
+
+    final bool alreadyLoggedIn =
+        session != null;
 
     return MaterialApp(
       // ========================================================
@@ -212,7 +223,7 @@ class _SmartCityAppState
       'SmartCity',
 
       // ========================================================
-      // EXISTING SMARTCITY THEME
+      // THEME
       // ========================================================
 
       theme:
@@ -236,16 +247,15 @@ class _SmartCityAppState
       // ========================================================
       // NORMAL STARTUP
       //
-      // Existing behaviour is preserved:
+      // No normal session:
+      // -> WelcomeScreen
       //
-      // No Supabase session
-      // -> Welcome Screen
-      //
-      // Existing valid session
+      // Existing session:
       // -> AuthGate
       //
-      // Password recovery is handled separately by the
-      // authentication listener above.
+      // Password recovery:
+      // -> coordinator overrides this and opens
+      //    ResetPasswordScreen.
       // ========================================================
 
       home:
