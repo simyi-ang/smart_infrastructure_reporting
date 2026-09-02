@@ -2,8 +2,33 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
 import 'login_screen.dart';
+
+// ================================================================
+// RESET PASSWORD SCREEN
+//
+// Used after Supabase verifies a password-recovery email link.
+//
+// Flow:
+//
+// Recovery email
+//      ↓
+// Supabase verifies recovery token
+//      ↓
+// SmartCity deep link
+//      ↓
+// ResetPasswordScreen
+//      ↓
+// Validate new password
+//      ↓
+// Update Supabase password
+//      ↓
+// End recovery session
+//      ↓
+// Return to Login
+// ================================================================
 
 class ResetPasswordScreen extends StatefulWidget {
   final VoidCallback? onFinished;
@@ -20,16 +45,21 @@ class ResetPasswordScreen extends StatefulWidget {
 
 class _ResetPasswordScreenState
     extends State<ResetPasswordScreen> {
+  // ============================================================
+  // FORM
+  // ============================================================
+
   final GlobalKey<FormState> formKey =
   GlobalKey<FormState>();
 
-  final TextEditingController
-  newPasswordController =
+  final TextEditingController newPasswordController =
   TextEditingController();
 
-  final TextEditingController
-  confirmPasswordController =
+  final TextEditingController confirmPasswordController =
   TextEditingController();
+
+  final AuthService authService =
+  AuthService();
 
   bool loading = false;
 
@@ -38,7 +68,182 @@ class _ResetPasswordScreenState
   bool hideConfirmPassword = true;
 
   // ============================================================
+  // PASSWORD REQUIREMENTS
+  // ============================================================
+
+  bool get hasMinimumLength =>
+      newPasswordController.text.length >= 8;
+
+  bool get hasRecommendedLength =>
+      newPasswordController.text.length >= 12;
+
+  bool get hasUppercase =>
+      RegExp(
+        r'[A-Z]',
+      ).hasMatch(
+        newPasswordController.text,
+      );
+
+  bool get hasLowercase =>
+      RegExp(
+        r'[a-z]',
+      ).hasMatch(
+        newPasswordController.text,
+      );
+
+  bool get hasNumber =>
+      RegExp(
+        r'[0-9]',
+      ).hasMatch(
+        newPasswordController.text,
+      );
+
+  bool get hasSpecialCharacter =>
+      RegExp(
+        r'[!@#$%^&*(),.?":{}|<>]',
+      ).hasMatch(
+        newPasswordController.text,
+      );
+
+  // ============================================================
+  // ALL REQUIRED RULES SATISFIED
+  // ============================================================
+
+  bool get passwordRequirementsSatisfied =>
+      hasMinimumLength &&
+          hasUppercase &&
+          hasLowercase &&
+          hasNumber &&
+          hasSpecialCharacter;
+
+  // ============================================================
+  // PASSWORD STRENGTH SCORE
+  //
+  // This is a USER-FACING strength indicator.
+  //
+  // 0      = Empty
+  // 1 - 2  = Weak
+  // 3 - 4  = Medium
+  // 5+     = Strong
+  //
+  // The actual password acceptance rules are still enforced
+  // separately by validatePassword().
+  // ============================================================
+
+  int get passwordStrengthScore {
+    final String password =
+        newPasswordController.text;
+
+    if (password.isEmpty) {
+      return 0;
+    }
+
+    int score = 0;
+
+    if (password.length >= 8) {
+      score++;
+    }
+
+    if (hasUppercase &&
+        hasLowercase) {
+      score++;
+    }
+
+    if (hasNumber) {
+      score++;
+    }
+
+    if (hasSpecialCharacter) {
+      score++;
+    }
+
+    if (password.length >= 12) {
+      score++;
+    }
+
+    return score;
+  }
+
+  // ============================================================
+  // PASSWORD STRENGTH LABEL
+  // ============================================================
+
+  String get passwordStrengthLabel {
+    final int score =
+        passwordStrengthScore;
+
+    if (score == 0) {
+      return 'Not entered';
+    }
+
+    if (score <= 2) {
+      return 'Weak';
+    }
+
+    if (score <= 4) {
+      return 'Medium';
+    }
+
+    return 'Strong';
+  }
+
+  // ============================================================
+  // PASSWORD STRENGTH COLOR
+  //
+  // Weak   = Red
+  // Medium = Yellow / Amber
+  // Strong = Green
+  // ============================================================
+
+  Color get passwordStrengthColor {
+    final int score =
+        passwordStrengthScore;
+
+    if (score == 0) {
+      return AppColors.textSecondary;
+    }
+
+    if (score <= 2) {
+      return Colors.red;
+    }
+
+    if (score <= 4) {
+      return Colors.amber;
+    }
+
+    return Colors.green;
+  }
+
+  // ============================================================
+  // PASSWORD STRENGTH PROGRESS
+  // ============================================================
+
+  double get passwordStrengthProgress {
+    final int score =
+        passwordStrengthScore;
+
+    if (score == 0) {
+      return 0.0;
+    }
+
+    return score / 5;
+  }
+
+  // ============================================================
+  // CONFIRM PASSWORD STATUS
+  // ============================================================
+
+  bool get passwordsMatch =>
+      confirmPasswordController
+          .text
+          .isNotEmpty &&
+          confirmPasswordController.text ==
+              newPasswordController.text;
+
+  // ============================================================
   // PASSWORD VALIDATION
+  //
+  // These are the mandatory password rules.
   // ============================================================
 
   String? validatePassword(
@@ -91,6 +296,10 @@ class _ResetPasswordScreenState
       return;
     }
 
+    // ==========================================================
+    // VALIDATE FORM
+    // ==========================================================
+
     if (!(formKey.currentState
         ?.validate() ??
         false)) {
@@ -103,10 +312,26 @@ class _ResetPasswordScreenState
     final String confirmPassword =
         confirmPasswordController.text;
 
+    // ==========================================================
+    // PASSWORD CONFIRMATION
+    // ==========================================================
+
     if (newPassword !=
         confirmPassword) {
       showMessage(
         'Passwords do not match.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // REQUIRED PASSWORD RULES
+    // ==========================================================
+
+    if (!passwordRequirementsSatisfied) {
+      showMessage(
+        'Please complete all password requirements.',
       );
 
       return;
@@ -118,23 +343,17 @@ class _ResetPasswordScreenState
 
     try {
       // ========================================================
-      // UPDATE SUPABASE PASSWORD
+      // UPDATE PASSWORD THROUGH AUTH SERVICE
       //
-      // The recovery email establishes a temporary recovery
-      // session. Because that session is already active here,
-      // updateUser() can save the new password.
+      // AuthService verifies the recovery session, updates the
+      // Supabase password and records PASSWORD_CHANGED.
       // ========================================================
 
       final UserResponse response =
-      await Supabase
-          .instance
-          .client
-          .auth
-          .updateUser(
-        UserAttributes(
-          password:
-          newPassword,
-        ),
+      await authService
+          .updateRecoveredPassword(
+        newPassword:
+        newPassword,
       );
 
       if (response.user == null) {
@@ -146,11 +365,11 @@ class _ResetPasswordScreenState
       // ========================================================
       // PASSWORD MANAGER
       //
-      // SmartCity does NOT store the raw password in
+      // SmartCity never stores the raw password in
       // SharedPreferences.
       //
-      // This lets Android/iOS password managers offer to save
-      // or update the credential securely.
+      // Android/iOS password managers may offer to securely
+      // save/update the new credential.
       // ========================================================
 
       TextInput.finishAutofillContext(
@@ -158,7 +377,7 @@ class _ResetPasswordScreenState
       );
 
       // ========================================================
-      // CLEAR INPUTS
+      // CLEAR PASSWORD FIELDS
       // ========================================================
 
       newPasswordController.clear();
@@ -186,13 +405,25 @@ class _ResetPasswordScreenState
             backgroundColor:
             AppColors.surface,
 
+            shape:
+            RoundedRectangleBorder(
+              borderRadius:
+              BorderRadius.circular(
+                18,
+              ),
+            ),
+
             title:
             const Row(
               children: [
                 Icon(
                   Icons.check_circle_outline,
+
                   color:
                   AppColors.success,
+
+                  size:
+                  27,
                 ),
 
                 SizedBox(
@@ -212,7 +443,8 @@ class _ResetPasswordScreenState
             content:
             const Text(
               'Your SmartCity password has been changed successfully. '
-                  'You can now sign in using your new password.',
+                  'For security, your recovery session will now end. '
+                  'Sign in again using your new password.',
             ),
 
             actions: [
@@ -221,6 +453,9 @@ class _ResetPasswordScreenState
                 ElevatedButton.styleFrom(
                   backgroundColor:
                   AppColors.primaryDark,
+
+                  foregroundColor:
+                  Colors.white,
                 ),
 
                 onPressed: () {
@@ -231,7 +466,7 @@ class _ResetPasswordScreenState
 
                 child:
                 const Text(
-                  'Continue',
+                  'Continue to Login',
                 ),
               ),
             ],
@@ -240,22 +475,20 @@ class _ResetPasswordScreenState
       );
 
       // ========================================================
-      // SIGN OUT RECOVERY SESSION
-      //
-      // After password reset, end the temporary recovery
-      // session so the user returns to a normal login state.
+      // END TEMPORARY RECOVERY SESSION
       // ========================================================
 
       try {
-        await Supabase
-            .instance
-            .client
-            .auth
-            .signOut();
+        await authService
+            .endRecoverySession();
       } catch (_) {
-        // Navigation should still continue even if local
-        // recovery-session cleanup fails.
+        // Navigation must still continue even if local
+        // recovery-session cleanup encounters a problem.
       }
+
+      // ========================================================
+      // CLEAR MAIN RECOVERY COORDINATOR
+      // ========================================================
 
       widget.onFinished
           ?.call();
@@ -266,6 +499,8 @@ class _ResetPasswordScreenState
 
       // ========================================================
       // RETURN TO LOGIN
+      //
+      // All previous recovery routes are removed.
       // ========================================================
 
       Navigator.of(context)
@@ -281,7 +516,7 @@ class _ResetPasswordScreenState
         return;
       }
 
-      showMessage(
+      _handleRecoveryError(
         e.message,
       );
     } catch (e) {
@@ -295,7 +530,7 @@ class _ResetPasswordScreenState
         '',
       );
 
-      showMessage(
+      _handleRecoveryError(
         message.trim().isEmpty
             ? 'Unable to update password.'
             : message,
@@ -307,6 +542,128 @@ class _ResetPasswordScreenState
         });
       }
     }
+  }
+
+  // ============================================================
+// BACK TO LOGIN FROM PASSWORD RECOVERY
+//
+// Used when the user presses:
+//
+// - the top-left Back button
+// - Android system Back
+//
+// IMPORTANT:
+//
+// ResetPasswordScreen was already opened by the recovery
+// coordinator using route replacement / route clearing.
+//
+// Therefore we DO NOT use pushAndRemoveUntil here.
+//
+// Using pushReplacement avoids temporarily emptying the
+// Navigator history, which can cause:
+//
+// Navigator assertion:
+// '_history.isNotEmpty': is not true
+//
+// Flow:
+//
+// ResetPasswordScreen
+//      ↓
+// Clear recovery coordinator state
+//      ↓
+// End Supabase recovery session
+//      ↓
+// Replace current screen with LoginScreen
+// ============================================================
+
+  Future<void> backToLogin() async {
+    if (loading) {
+      return;
+    }
+
+    setState(() {
+      loading = true;
+    });
+
+    // ==========================================================
+    // CLEAR RECOVERY COORDINATOR FIRST
+    //
+    // Prevent main.dart from trying to reopen the
+    // ResetPasswordScreen after sign-out.
+    // ==========================================================
+
+    widget.onFinished?.call();
+
+    // ==========================================================
+    // END TEMPORARY RECOVERY SESSION
+    // ==========================================================
+
+    try {
+      await authService.endRecoverySession();
+    } catch (e) {
+      // Recovery-session cleanup failure must not trap the user
+      // inside the Reset Password screen.
+      debugPrint(
+        'Recovery session cleanup failed: $e',
+      );
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    // ==========================================================
+    // REPLACE RESET PASSWORD WITH LOGIN
+    //
+    // Do NOT use:
+    //
+    // pushAndRemoveUntil(... false)
+    //
+    // here because ResetPasswordScreen is already effectively
+    // the root recovery route.
+    // ==========================================================
+
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) =>
+        const LoginScreen(),
+      ),
+    );
+  }
+
+  // ============================================================
+  // RECOVERY ERROR HANDLER
+  // ============================================================
+
+  void _handleRecoveryError(
+      String message,
+      ) {
+    final String normalized =
+    message.toLowerCase();
+
+    if (normalized.contains(
+      'expired',
+    ) ||
+        normalized.contains(
+          'invalid',
+        ) ||
+        normalized.contains(
+          'session',
+        ) ||
+        normalized.contains(
+          'otp_expired',
+        )) {
+      showMessage(
+        'This password reset session has expired or is no longer valid. '
+            'Please request a new password reset link.',
+      );
+
+      return;
+    }
+
+    showMessage(
+      message,
+    );
   }
 
   // ============================================================
@@ -322,6 +679,9 @@ class _ResetPasswordScreenState
     ScaffoldMessenger.of(context)
         .showSnackBar(
       SnackBar(
+        behavior:
+        SnackBarBehavior.floating,
+
         content:
         Text(
           message,
@@ -352,8 +712,28 @@ class _ResetPasswordScreenState
       BuildContext context,
       ) {
     return PopScope(
-      canPop:
-      false,
+      // ==========================================================
+      // ANDROID SYSTEM BACK
+      //
+      // Prevent Flutter from popping the recovery route itself.
+      // SmartCity handles the Back action manually and safely
+      // redirects to LoginScreen.
+      // ==========================================================
+
+      canPop: false,
+
+      onPopInvokedWithResult: (
+          bool didPop,
+          Object? result,
+          ) {
+        if (didPop) {
+          return;
+        }
+
+        if (!loading) {
+          backToLogin();
+        }
+      },
 
       child:
       Scaffold(
@@ -379,17 +759,48 @@ class _ResetPasswordScreenState
                 child:
                 Column(
                   crossAxisAlignment:
-                  CrossAxisAlignment.start,
+                  CrossAxisAlignment
+                      .start,
 
                   children: [
-                    const SizedBox(
-                      height:
-                      30,
+                    // ===========================================
+                    // BACK TO LOGIN
+                    // ===========================================
+
+                    Align(
+                      alignment:
+                      Alignment.centerLeft,
+
+                      child:
+                      IconButton(
+                        tooltip:
+                        'Back to Login',
+
+                        onPressed:
+                        loading
+                            ? null
+                            : () {
+                          backToLogin();
+                        },
+
+                        icon:
+                        const Icon(
+                          Icons.arrow_back_rounded,
+
+                          color:
+                          Colors.white,
+                        ),
+                      ),
                     ),
 
-                    // =================================================
+                    const SizedBox(
+                      height:
+                      18,
+                    ),
+
+                    // ===========================================
                     // ICON
-                    // =================================================
+                    // ===========================================
 
                     Container(
                       width:
@@ -404,29 +815,34 @@ class _ResetPasswordScreenState
                       decoration:
                       BoxDecoration(
                         color:
-                        AppColors.primary
+                        AppColors
+                            .primary
                             .withOpacity(
                           0.10,
                         ),
 
                         borderRadius:
-                        BorderRadius.circular(
+                        BorderRadius
+                            .circular(
                           16,
                         ),
 
                         border:
                         Border.all(
                           color:
-                          AppColors.primaryDark,
+                          AppColors
+                              .primaryDark,
                         ),
                       ),
 
                       child:
                       const Icon(
-                        Icons.lock_reset_outlined,
+                        Icons
+                            .lock_reset_outlined,
 
                         color:
-                        AppColors.primary,
+                        AppColors
+                            .primary,
 
                         size:
                         34,
@@ -438,9 +854,9 @@ class _ResetPasswordScreenState
                       26,
                     ),
 
-                    // =================================================
+                    // ===========================================
                     // TITLE
-                    // =================================================
+                    // ===========================================
 
                     const Text(
                       'Reset Password',
@@ -451,7 +867,8 @@ class _ResetPasswordScreenState
                         29,
 
                         fontWeight:
-                        FontWeight.bold,
+                        FontWeight
+                            .bold,
                       ),
                     ),
 
@@ -461,12 +878,13 @@ class _ResetPasswordScreenState
                     ),
 
                     const Text(
-                      'Create a new password for your SmartCity account.',
+                      'Create a secure new password for your SmartCity account.',
 
                       style:
                       TextStyle(
                         color:
-                        AppColors.textSecondary,
+                        AppColors
+                            .textSecondary,
 
                         fontSize:
                         14,
@@ -478,53 +896,60 @@ class _ResetPasswordScreenState
 
                     const SizedBox(
                       height:
-                      34,
+                      28,
                     ),
 
-                    // =================================================
-                    // SECURITY NOTE
-                    // =================================================
+                    // ===========================================
+                    // SECURITY INFORMATION
+                    // ===========================================
 
                     Container(
                       width:
                       double.infinity,
 
                       padding:
-                      const EdgeInsets.all(
-                        13,
+                      const EdgeInsets
+                          .all(
+                        14,
                       ),
 
                       decoration:
                       BoxDecoration(
                         color:
-                        AppColors.primary
+                        AppColors
+                            .primary
                             .withOpacity(
                           0.06,
                         ),
 
                         borderRadius:
-                        BorderRadius.circular(
+                        BorderRadius
+                            .circular(
                           13,
                         ),
 
                         border:
                         Border.all(
                           color:
-                          AppColors.border,
+                          AppColors
+                              .border,
                         ),
                       ),
 
                       child:
                       const Row(
                         crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                        CrossAxisAlignment
+                            .start,
 
                         children: [
                           Icon(
-                            Icons.shield_outlined,
+                            Icons
+                                .shield_outlined,
 
                             color:
-                            AppColors.primary,
+                            AppColors
+                                .primary,
 
                             size:
                             20,
@@ -538,18 +963,21 @@ class _ResetPasswordScreenState
                           Expanded(
                             child:
                             Text(
-                              'Use at least 8 characters with uppercase, lowercase, number, and special character.',
+                              'Your new password must contain at least '
+                                  '8 characters, including uppercase, lowercase, '
+                                  'a number and a special character.',
 
                               style:
                               TextStyle(
                                 color:
-                                AppColors.textSecondary,
+                                AppColors
+                                    .textSecondary,
 
                                 fontSize:
-                                10,
+                                12,
 
                                 height:
-                                1.4,
+                                1.45,
                               ),
                             ),
                           ),
@@ -562,9 +990,9 @@ class _ResetPasswordScreenState
                       25,
                     ),
 
-                    // =================================================
+                    // ===========================================
                     // NEW PASSWORD
-                    // =================================================
+                    // ===========================================
 
                     const _FieldLabel(
                       'NEW PASSWORD',
@@ -586,12 +1014,22 @@ class _ResetPasswordScreenState
                       hideNewPassword,
 
                       textInputAction:
-                      TextInputAction.next,
+                      TextInputAction
+                          .next,
 
                       autofillHints:
                       const [
-                        AutofillHints.newPassword,
+                        AutofillHints
+                            .newPassword,
                       ],
+
+                      // =========================================
+                      // LIVE STRENGTH UPDATE
+                      // =========================================
+
+                      onChanged: (_) {
+                        setState(() {});
+                      },
 
                       decoration:
                       _inputDecoration(
@@ -599,25 +1037,39 @@ class _ResetPasswordScreenState
                         'Enter new password',
 
                         prefixIcon:
-                        Icons.lock_outline,
+                        Icons
+                            .lock_outline,
 
                         suffix:
                         IconButton(
-                          onPressed: () {
-                            setState(() {
-                              hideNewPassword =
-                              !hideNewPassword;
-                            });
+                          tooltip:
+                          hideNewPassword
+                              ? 'Show password'
+                              : 'Hide password',
+
+                          onPressed:
+                          loading
+                              ? null
+                              : () {
+                            setState(
+                                  () {
+                                hideNewPassword =
+                                !hideNewPassword;
+                              },
+                            );
                           },
 
                           icon:
                           Icon(
                             hideNewPassword
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
+                                ? Icons
+                                .visibility_outlined
+                                : Icons
+                                .visibility_off_outlined,
 
                             color:
-                            AppColors.textSecondary,
+                            AppColors
+                                .textSecondary,
                           ),
                         ),
                       ),
@@ -628,12 +1080,236 @@ class _ResetPasswordScreenState
 
                     const SizedBox(
                       height:
-                      18,
+                      14,
                     ),
 
-                    // =================================================
+                    // ===========================================
+                    // PASSWORD STRENGTH
+                    // ===========================================
+
+                    Row(
+                      children: [
+                        const Text(
+                          'Password strength',
+
+                          style:
+                          TextStyle(
+                            color:
+                            AppColors
+                                .textSecondary,
+
+                            fontSize:
+                            12,
+
+                            fontWeight:
+                            FontWeight
+                                .w500,
+                          ),
+                        ),
+
+                        const Spacer(),
+
+                        AnimatedSwitcher(
+                          duration:
+                          const Duration(
+                            milliseconds:
+                            180,
+                          ),
+
+                          child:
+                          Text(
+                            passwordStrengthLabel,
+
+                            key:
+                            ValueKey<String>(
+                              passwordStrengthLabel,
+                            ),
+
+                            style:
+                            TextStyle(
+                              color:
+                              passwordStrengthColor,
+
+                              fontSize:
+                              12,
+
+                              fontWeight:
+                              FontWeight
+                                  .bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(
+                      height:
+                      8,
+                    ),
+
+                    // ===========================================
+                    // RED / YELLOW / GREEN BAR
+                    // ===========================================
+
+                    ClipRRect(
+                      borderRadius:
+                      BorderRadius
+                          .circular(
+                        20,
+                      ),
+
+                      child:
+                      LinearProgressIndicator(
+                        value:
+                        passwordStrengthProgress,
+
+                        minHeight:
+                        8,
+
+                        backgroundColor:
+                        AppColors.border,
+
+                        valueColor:
+                        AlwaysStoppedAnimation<
+                            Color>(
+                          passwordStrengthColor,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      17,
+                    ),
+
+                    // ===========================================
+                    // LIVE PASSWORD REQUIREMENTS
+                    // ===========================================
+
+                    _PasswordRequirement(
+                      satisfied:
+                      hasMinimumLength,
+
+                      text:
+                      'At least 8 characters',
+                    ),
+
+                    const SizedBox(
+                      height:
+                      8,
+                    ),
+
+                    _PasswordRequirement(
+                      satisfied:
+                      hasUppercase,
+
+                      text:
+                      'One uppercase letter (A-Z)',
+                    ),
+
+                    const SizedBox(
+                      height:
+                      8,
+                    ),
+
+                    _PasswordRequirement(
+                      satisfied:
+                      hasLowercase,
+
+                      text:
+                      'One lowercase letter (a-z)',
+                    ),
+
+                    const SizedBox(
+                      height:
+                      8,
+                    ),
+
+                    _PasswordRequirement(
+                      satisfied:
+                      hasNumber,
+
+                      text:
+                      'One number (0-9)',
+                    ),
+
+                    const SizedBox(
+                      height:
+                      8,
+                    ),
+
+                    _PasswordRequirement(
+                      satisfied:
+                      hasSpecialCharacter,
+
+                      text:
+                      'One special character (!@#\$...)',
+                    ),
+
+                    // ===========================================
+                    // OPTIONAL STRONG PASSWORD RECOMMENDATION
+                    // ===========================================
+
+                    if (passwordRequirementsSatisfied &&
+                        !hasRecommendedLength) ...[
+                      const SizedBox(
+                        height:
+                        12,
+                      ),
+
+                      const Row(
+                        crossAxisAlignment:
+                        CrossAxisAlignment
+                            .start,
+
+                        children: [
+                          Icon(
+                            Icons
+                                .info_outline,
+
+                            size:
+                            16,
+
+                            color:
+                            Colors.amber,
+                          ),
+
+                          SizedBox(
+                            width:
+                            7,
+                          ),
+
+                          Expanded(
+                            child:
+                            Text(
+                              'Your password meets the required rules. '
+                                  'Using 12 or more characters will make it stronger.',
+
+                              style:
+                              TextStyle(
+                                color:
+                                Colors.amber,
+
+                                fontSize:
+                                11,
+
+                                height:
+                                1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+
+                    const SizedBox(
+                      height:
+                      27,
+                    ),
+
+                    // ===========================================
                     // CONFIRM PASSWORD
-                    // =================================================
+                    // ===========================================
 
                     const _FieldLabel(
                       'CONFIRM NEW PASSWORD',
@@ -655,12 +1331,22 @@ class _ResetPasswordScreenState
                       hideConfirmPassword,
 
                       textInputAction:
-                      TextInputAction.done,
+                      TextInputAction
+                          .done,
 
                       autofillHints:
                       const [
-                        AutofillHints.newPassword,
+                        AutofillHints
+                            .newPassword,
                       ],
+
+                      // =========================================
+                      // LIVE MATCH STATUS
+                      // =========================================
+
+                      onChanged: (_) {
+                        setState(() {});
+                      },
 
                       onFieldSubmitted:
                           (_) {
@@ -675,25 +1361,39 @@ class _ResetPasswordScreenState
                         'Confirm new password',
 
                         prefixIcon:
-                        Icons.lock_reset_outlined,
+                        Icons
+                            .lock_reset_outlined,
 
                         suffix:
                         IconButton(
-                          onPressed: () {
-                            setState(() {
-                              hideConfirmPassword =
-                              !hideConfirmPassword;
-                            });
+                          tooltip:
+                          hideConfirmPassword
+                              ? 'Show password'
+                              : 'Hide password',
+
+                          onPressed:
+                          loading
+                              ? null
+                              : () {
+                            setState(
+                                  () {
+                                hideConfirmPassword =
+                                !hideConfirmPassword;
+                              },
+                            );
                           },
 
                           icon:
                           Icon(
                             hideConfirmPassword
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
+                                ? Icons
+                                .visibility_outlined
+                                : Icons
+                                .visibility_off_outlined,
 
                             color:
-                            AppColors.textSecondary,
+                            AppColors
+                                .textSecondary,
                           ),
                         ),
                       ),
@@ -706,7 +1406,8 @@ class _ResetPasswordScreenState
                         }
 
                         if (value !=
-                            newPasswordController.text) {
+                            newPasswordController
+                                .text) {
                           return 'Passwords do not match.';
                         }
 
@@ -714,14 +1415,91 @@ class _ResetPasswordScreenState
                       },
                     ),
 
+                    // ===========================================
+                    // LIVE PASSWORD MATCH
+                    // ===========================================
+
+                    if (confirmPasswordController
+                        .text
+                        .isNotEmpty) ...[
+                      const SizedBox(
+                        height:
+                        10,
+                      ),
+
+                      AnimatedSwitcher(
+                        duration:
+                        const Duration(
+                          milliseconds:
+                          180,
+                        ),
+
+                        child:
+                        Row(
+                          key:
+                          ValueKey<bool>(
+                            passwordsMatch,
+                          ),
+
+                          children: [
+                            Icon(
+                              passwordsMatch
+                                  ? Icons
+                                  .check_circle
+                                  : Icons
+                                  .cancel,
+
+                              size:
+                              17,
+
+                              color:
+                              passwordsMatch
+                                  ? Colors
+                                  .green
+                                  : Colors
+                                  .red,
+                            ),
+
+                            const SizedBox(
+                              width:
+                              7,
+                            ),
+
+                            Text(
+                              passwordsMatch
+                                  ? 'Passwords match'
+                                  : 'Passwords do not match',
+
+                              style:
+                              TextStyle(
+                                color:
+                                passwordsMatch
+                                    ? Colors
+                                    .green
+                                    : Colors
+                                    .red,
+
+                                fontSize:
+                                12,
+
+                                fontWeight:
+                                FontWeight
+                                    .w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+
                     const SizedBox(
                       height:
-                      26,
+                      28,
                     ),
 
-                    // =================================================
+                    // ===========================================
                     // UPDATE PASSWORD
-                    // =================================================
+                    // ===========================================
 
                     SizedBox(
                       width:
@@ -731,24 +1509,38 @@ class _ResetPasswordScreenState
                       56,
 
                       child:
-                      ElevatedButton.icon(
+                      ElevatedButton
+                          .icon(
                         style:
-                        ElevatedButton.styleFrom(
+                        ElevatedButton
+                            .styleFrom(
                           backgroundColor:
-                          AppColors.primaryDark,
+                          AppColors
+                              .primaryDark,
 
                           foregroundColor:
                           Colors.white,
 
+                          disabledBackgroundColor:
+                          AppColors
+                              .primaryDark
+                              .withOpacity(
+                            0.45,
+                          ),
+
                           shape:
                           RoundedRectangleBorder(
                             borderRadius:
-                            BorderRadius.circular(
+                            BorderRadius
+                                .circular(
                               14,
                             ),
                           ),
                         ),
 
+                        // Keep the button enabled until submission
+                        // so Form validation can explain missing
+                        // requirements to the user.
                         onPressed:
                         loading
                             ? null
@@ -773,7 +1565,8 @@ class _ResetPasswordScreenState
                           ),
                         )
                             : const Icon(
-                          Icons.lock_reset,
+                          Icons
+                              .lock_reset,
                         ),
 
                         label:
@@ -788,7 +1581,8 @@ class _ResetPasswordScreenState
                             15,
 
                             fontWeight:
-                            FontWeight.bold,
+                            FontWeight
+                                .bold,
                           ),
                         ),
                       ),
@@ -796,7 +1590,64 @@ class _ResetPasswordScreenState
 
                     const SizedBox(
                       height:
-                      20,
+                      16,
+                    ),
+
+                    // ===========================================
+                    // SECURITY FOOTNOTE
+                    // ===========================================
+
+                    const Center(
+                      child:
+                      Row(
+                        mainAxisSize:
+                        MainAxisSize.min,
+
+                        children: [
+                          Icon(
+                            Icons
+                                .verified_user_outlined,
+
+                            size:
+                            14,
+
+                            color:
+                            AppColors
+                                .textSecondary,
+                          ),
+
+                          SizedBox(
+                            width:
+                            6,
+                          ),
+
+                          Flexible(
+                            child:
+                            Text(
+                              'SmartCity never stores your raw password.',
+
+                              textAlign:
+                              TextAlign
+                                  .center,
+
+                              style:
+                              TextStyle(
+                                color:
+                                AppColors
+                                    .textSecondary,
+
+                                fontSize:
+                                10,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      25,
                     ),
                   ],
                 ),
@@ -804,6 +1655,124 @@ class _ResetPasswordScreenState
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ================================================================
+// PASSWORD REQUIREMENT
+//
+// Displays live password-rule feedback.
+// ================================================================
+
+class _PasswordRequirement
+    extends StatelessWidget {
+  final bool satisfied;
+
+  final String text;
+
+  const _PasswordRequirement({
+    required this.satisfied,
+    required this.text,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return AnimatedContainer(
+      duration:
+      const Duration(
+        milliseconds:
+        180,
+      ),
+
+      child:
+      Row(
+        children: [
+          Container(
+            width:
+            20,
+
+            height:
+            20,
+
+            alignment:
+            Alignment.center,
+
+            decoration:
+            BoxDecoration(
+              shape:
+              BoxShape.circle,
+
+              color:
+              satisfied
+                  ? Colors.green
+                  .withOpacity(
+                0.12,
+              )
+                  : Colors
+                  .transparent,
+
+              border:
+              Border.all(
+                color:
+                satisfied
+                    ? Colors.green
+                    : AppColors
+                    .border,
+              ),
+            ),
+
+            child:
+            Icon(
+              satisfied
+                  ? Icons.check
+                  : Icons.close,
+
+              size:
+              13,
+
+              color:
+              satisfied
+                  ? Colors.green
+                  : AppColors
+                  .textSecondary,
+            ),
+          ),
+
+          const SizedBox(
+            width:
+            9,
+          ),
+
+          Expanded(
+            child:
+            Text(
+              text,
+
+              style:
+              TextStyle(
+                color:
+                satisfied
+                    ? Colors.green
+                    : AppColors
+                    .textSecondary,
+
+                fontSize:
+                12,
+
+                fontWeight:
+                satisfied
+                    ? FontWeight
+                    .w600
+                    : FontWeight
+                    .normal,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

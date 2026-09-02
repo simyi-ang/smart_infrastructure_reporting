@@ -4,10 +4,19 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/user_profile.dart';
+import 'password_reset_security_service.dart';
+import 'security_service.dart';
 
 class AuthService {
   final SupabaseClient _supabase =
       Supabase.instance.client;
+
+  final PasswordResetSecurityService
+  _passwordResetSecurityService =
+  PasswordResetSecurityService();
+
+  final SecurityService _securityService =
+  SecurityService();
 
   // ============================================================
   // CONFIG
@@ -397,10 +406,21 @@ class AuthService {
   }
 
   // ============================================================
-  // FORGOT PASSWORD
-  // ============================================================
+// FORGOT PASSWORD
+//
+// SECURITY CONTROLS:
+//
+// - Recovery email expires according to Supabase Auth settings.
+// - SmartCity recovery callback uses PKCE.
+// - Supabase Auth rate limits remain active.
+// - SmartCity additionally monitors repeated reset requests.
+// - Repeated abuse can cause temporary recovery restriction.
+// - Generic UI responses prevent account enumeration.
+// - Security events are logged where a user identity is
+//   available.
+// ============================================================
 
-  Future<void> forgotPassword(
+  Future<PasswordResetSecurityResult> forgotPassword(
       String email,
       ) async {
     final String cleanEmail =
@@ -412,19 +432,95 @@ class AuthService {
       );
     }
 
-    try {
-      await _supabase.auth
-          .resetPasswordForEmail(
-        cleanEmail,
+    // ==========================================================
+    // SMARTCITY PASSWORD-RESET SECURITY CHECK
+    // ==========================================================
 
-        // IMPORTANT:
-        // After the user verifies the recovery link,
-        // Supabase redirects back into the SmartCity app
-        // instead of localhost:3000.
+    final PasswordResetSecurityResult securityResult =
+    await _passwordResetSecurityService
+        .checkAndRecordRequest(
+      cleanEmail,
+    );
+
+    // ==========================================================
+    // TEMPORARY SECURITY BLOCK
+    // ==========================================================
+
+    if (!securityResult.allowed) {
+      await _safeSecurityLog(
+        'PASSWORD_RESET_RATE_LIMITED',
+        'Repeated password reset requests were temporarily restricted.',
+      );
+
+      return securityResult;
+    }
+
+    try {
+      // ========================================================
+      // SEND RECOVERY EMAIL
+      // ========================================================
+
+      await _supabase.auth.resetPasswordForEmail(
+        cleanEmail,
         redirectTo:
         'smartcity://reset-password',
       );
+
+      // ========================================================
+      // PASSWORD RESET REQUEST AUDIT
+      //
+      // Forgot Password normally happens while signed out.
+      // SecurityService safely ignores this event if there is no
+      // authenticated user available for account_activity.
+      // ========================================================
+
+      await _safeSecurityLog(
+        'PASSWORD_RESET_REQUESTED',
+        'A password reset was requested.',
+      );
+
+      // ========================================================
+      // SMARTCITY PROTECTION ACTIVATED
+      // ========================================================
+
+      if (securityResult.protectionActivated) {
+        await _safeSecurityLog(
+          'PASSWORD_RESET_PROTECTION_ACTIVATED',
+          'Password reset protection was activated after repeated requests.',
+        );
+      }
+
+      return securityResult;
     } on AuthException catch (e) {
+      final String normalized =
+      e.message.toLowerCase();
+
+      // ========================================================
+      // SUPABASE RATE LIMIT
+      // ========================================================
+
+      if (normalized.contains(
+        'rate',
+      ) ||
+          normalized.contains(
+            'too many',
+          )) {
+        await _safeSecurityLog(
+          'PASSWORD_RESET_RATE_LIMITED',
+          'Supabase temporarily restricted repeated password reset requests.',
+        );
+
+        throw Exception(
+          'Too many password reset requests. '
+              'Please wait before requesting another email.',
+        );
+      }
+
+      await _safeSecurityLog(
+        'PASSWORD_RESET_REQUEST_FAILED',
+        'A password reset request could not be completed.',
+      );
+
       throw Exception(
         e.message,
       );
@@ -435,15 +531,173 @@ class AuthService {
         '',
       );
 
+      await _safeSecurityLog(
+        'PASSWORD_RESET_REQUEST_FAILED',
+        'A password reset request could not be completed.',
+      );
+
       if (message.trim().isEmpty) {
         throw Exception(
-          'Unable to send password reset email.',
+          'Unable to process the password reset request.',
         );
       }
 
       throw Exception(
         message,
       );
+    }
+  }
+
+// ============================================================
+// UPDATE PASSWORD DURING RECOVERY
+//
+// This keeps password-recovery business logic inside
+// AuthService instead of directly inside the UI.
+// ============================================================
+
+  Future<UserResponse> updateRecoveredPassword({
+    required String newPassword,
+  }) async {
+    final Session? recoverySession =
+        _supabase.auth.currentSession;
+
+    if (recoverySession == null) {
+      throw Exception(
+        'Your password reset session is no longer valid. '
+            'Please request a new password reset link.',
+      );
+    }
+
+    if (newPassword.trim().isEmpty) {
+      throw Exception(
+        'New password is required.',
+      );
+    }
+
+    try {
+      final UserResponse response =
+      await _supabase.auth.updateUser(
+        UserAttributes(
+          password:
+          newPassword,
+        ),
+      );
+
+      if (response.user == null) {
+        throw Exception(
+          'Unable to update password.',
+        );
+      }
+
+      // ========================================================
+      // AUDIT PASSWORD CHANGE BEFORE RECOVERY SESSION ENDS
+      // ========================================================
+
+      await _safeSecurityLog(
+        'PASSWORD_CHANGED',
+        'The account password was changed successfully.',
+      );
+
+      return response;
+    } on AuthException catch (e) {
+      final String normalized =
+      e.message.toLowerCase();
+
+      if (normalized.contains(
+        'expired',
+      ) ||
+          normalized.contains(
+            'invalid',
+          ) ||
+          normalized.contains(
+            'session',
+          ) ||
+          normalized.contains(
+            'otp_expired',
+          )) {
+        await _safeSecurityLog(
+          'PASSWORD_RESET_FAILED',
+          'Password recovery failed because the recovery session was invalid or expired.',
+        );
+
+        throw Exception(
+          'This password reset session is invalid or has expired. '
+              'Please request a new password reset link.',
+        );
+      }
+
+      await _safeSecurityLog(
+        'PASSWORD_RESET_FAILED',
+        'The password could not be changed during recovery.',
+      );
+
+      throw Exception(
+        e.message,
+      );
+    } catch (e) {
+      final String message =
+      e.toString().replaceFirst(
+        'Exception: ',
+        '',
+      );
+
+      await _safeSecurityLog(
+        'PASSWORD_RESET_FAILED',
+        'The password could not be changed during recovery.',
+      );
+
+      if (message.trim().isEmpty) {
+        throw Exception(
+          'Unable to update password.',
+        );
+      }
+
+      throw Exception(
+        message,
+      );
+    }
+  }
+
+  // ============================================================
+  // END PASSWORD RECOVERY SESSION
+  //
+  // After recovery succeeds, the temporary authenticated
+  // recovery session is ended so the user must sign in normally
+  // using the new password.
+  // ============================================================
+
+  Future<void> endRecoverySession() async {
+    try {
+      await _supabase.auth.signOut();
+    } on AuthException catch (e) {
+      throw Exception(
+        e.message,
+      );
+    } catch (_) {
+      throw Exception(
+        'Unable to end the password recovery session.',
+      );
+    }
+  }
+
+  // ============================================================
+  // SAFE SECURITY LOG
+  //
+  // Authentication must never fail because activity logging
+  // failed.
+  // ============================================================
+
+  Future<void> _safeSecurityLog(
+      String activityType,
+      String description,
+      ) async {
+    try {
+      await _securityService.logActivity(
+        activityType,
+        description,
+      );
+    } catch (_) {
+      // Logging failure intentionally ignored.
     }
   }
 

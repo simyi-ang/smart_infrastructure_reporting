@@ -1,49 +1,155 @@
 plugins {
+    // =========================================================
+    // ANDROID APPLICATION
+    // =========================================================
+
     id("com.android.application")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+
+    // =========================================================
+    // KOTLIN ANDROID
+    //
+    // Required because MainActivity is written in Kotlin:
+    //
+    // android/app/src/main/kotlin/
+    // com/smartcity/smartcity_infrastructure/MainActivity.kt
+    // =========================================================
+
+    id("org.jetbrains.kotlin.android")
+
+    // =========================================================
+    // FLUTTER
+    //
+    // Keep the Flutter Gradle plugin after Android and Kotlin.
+    // =========================================================
+
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// ============================================================
+// ANDROID CONFIGURATION
+// ============================================================
+
 android {
-    namespace = "com.smartcity.smartcity_infrastructure"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // =========================================================
+    // PACKAGE / NAMESPACE
+    //
+    // Must match:
+    //
+    // MainActivity.kt:
+    // package com.smartcity.smartcity_infrastructure
+    //
+    // AndroidManifest.xml:
+    // android:name=".MainActivity"
+    // =========================================================
+
+    namespace =
+        "com.smartcity.smartcity_infrastructure"
+
+    // =========================================================
+    // SDK CONFIGURATION
+    // =========================================================
+
+    compileSdk =
+        flutter.compileSdkVersion
+
+    ndkVersion =
+        flutter.ndkVersion
+
+    // =========================================================
+    // JAVA COMPATIBILITY
+    // =========================================================
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility =
+            JavaVersion.VERSION_17
+
+        targetCompatibility =
+            JavaVersion.VERSION_17
     }
 
+    // =========================================================
+    // DEFAULT APPLICATION CONFIGURATION
+    // =========================================================
+
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.smartcity.smartcity_infrastructure"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
-        // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
-        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
-        // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
-        // flag during build.
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        // =====================================================
+        // APPLICATION ID
+        //
+        // This is the actual Android package identifier used
+        // when installing and launching SmartCity.
+        // =====================================================
+
+        applicationId =
+            "com.smartcity.smartcity_infrastructure"
+
+        // =====================================================
+        // ANDROID SDK LEVELS
+        // =====================================================
+
+        minSdk =
+            flutter.minSdkVersion
+
+        targetSdk =
+            flutter.targetSdkVersion
+
+        // =====================================================
+        // FLUTTER VERSION INFORMATION
+        //
+        // Read automatically from pubspec.yaml.
+        // =====================================================
+
+        versionCode =
+            flutter.versionCode
+
+        versionName =
+            flutter.versionName
     }
+
+    // =========================================================
+    // BUILD TYPES
+    // =========================================================
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // =================================================
+            // TEMPORARY RELEASE SIGNING
+            //
+            // Uses the debug signing configuration so release
+            // builds can still be tested during development.
+            //
+            // For actual production/Play Store deployment,
+            // replace this with a dedicated release keystore.
+            // =================================================
+
+            signingConfig =
+                signingConfigs.getByName(
+                    "debug"
+                )
         }
     }
 }
 
+// ============================================================
+// KOTLIN CONFIGURATION
+//
+// Keep Kotlin and Java targeting the same JVM version.
+// ============================================================
+
 kotlin {
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        jvmTarget =
+            org.jetbrains.kotlin.gradle.dsl
+                .JvmTarget.JVM_17
     }
 }
 
+// ============================================================
+// FLUTTER PROJECT ROOT
+//
+// android/app is two directories below the Flutter project root.
+// ============================================================
+
 flutter {
-    source = "../.."
+    source =
+        "../.."
 }
