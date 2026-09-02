@@ -1,0 +1,187 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ===================================================== -->
+    <!-- BIOMETRICS                                            -->
+    <!-- Required for fingerprint / face / device biometric    -->
+    <!-- authentication used by SmartCity security features.   -->
+    <!-- ===================================================== -->
+
+    <uses-permission
+        android:name="android.permission.USE_BIOMETRIC" />
+
+
+    <!-- ===================================================== -->
+    <!-- INTERNET                                              -->
+    <!-- Required for Supabase, Google authentication, maps,   -->
+    <!-- reports, password recovery and other online services. -->
+    <!-- ===================================================== -->
+
+    <uses-permission
+        android:name="android.permission.INTERNET" />
+
+
+    <!-- ===================================================== -->
+    <!-- LOCATION                                              -->
+    <!-- Used by SmartCity reporting and map features.         -->
+    <!-- ===================================================== -->
+
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+
+    <!-- ===================================================== -->
+    <!-- CAMERA                                                -->
+    <!-- Used for capturing report evidence.                   -->
+    <!-- Camera is optional so devices without a camera can    -->
+    <!-- still install the application.                        -->
+    <!-- ===================================================== -->
+
+    <uses-permission
+        android:name="android.permission.CAMERA" />
+
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+
+    <!-- ===================================================== -->
+    <!-- APPLICATION                                           -->
+    <!-- ===================================================== -->
+
+    <application
+        android:label="SmartCity"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+
+
+        <!-- ================================================= -->
+        <!-- GOOGLE MAPS API                                   -->
+        <!--                                                   -->
+        <!-- Replace YOUR_GOOGLE_MAPS_API_KEY with your actual -->
+        <!-- restricted Google Maps API key locally.           -->
+        <!-- Do not publish the unrestricted key.              -->
+        <!-- ================================================= -->
+
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="YOUR_GOOGLE_MAPS_API_KEY" />
+
+
+        <!-- ================================================= -->
+        <!-- FLUTTER MAIN ACTIVITY                             -->
+        <!--                                                   -->
+        <!-- singleTask is used so an existing SmartCity       -->
+        <!-- activity can receive incoming recovery deep links -->
+        <!-- instead of unnecessarily creating another copy.   -->
+        <!-- ================================================= -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+
+
+            <!-- ============================================= -->
+            <!-- NORMAL FLUTTER THEME                          -->
+            <!-- ============================================= -->
+
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+
+
+            <!-- ============================================= -->
+            <!-- NORMAL APPLICATION LAUNCH                     -->
+            <!--                                               -->
+            <!-- This allows SmartCity to appear in the        -->
+            <!-- Android launcher and open normally when the   -->
+            <!-- user taps the SmartCity application icon.     -->
+            <!-- ============================================= -->
+
+            <intent-filter>
+                <action
+                    android:name="android.intent.action.MAIN" />
+
+                <category
+                    android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+
+            <!-- ============================================= -->
+            <!-- PASSWORD RECOVERY DEEP LINK                   -->
+            <!--                                               -->
+            <!-- This tells Android that SmartCity can handle: -->
+            <!--                                               -->
+            <!-- smartcity://reset-password                    -->
+            <!--                                               -->
+            <!-- Password recovery flow:                       -->
+            <!--                                               -->
+            <!-- Forgot Password                               -->
+            <!--       ↓                                       -->
+            <!-- Supabase sends recovery email                 -->
+            <!--       ↓                                       -->
+            <!-- User taps Reset Password                      -->
+            <!--       ↓                                       -->
+            <!-- Supabase verifies recovery request            -->
+            <!--       ↓                                       -->
+            <!-- smartcity://reset-password                    -->
+            <!--       ↓                                       -->
+            <!-- Android opens SmartCity                       -->
+            <!--       ↓                                       -->
+            <!-- Reset Password Screen                         -->
+            <!-- ============================================= -->
+
+            <intent-filter>
+                <action
+                    android:name="android.intent.action.VIEW" />
+
+                <category
+                    android:name="android.intent.category.DEFAULT" />
+
+                <category
+                    android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="smartcity"
+                    android:host="reset-password" />
+            </intent-filter>
+
+        </activity>
+
+
+        <!-- ================================================= -->
+        <!-- FLUTTER EMBEDDING                                 -->
+        <!-- Required by Flutter Android embedding version 2.  -->
+        <!-- ================================================= -->
+
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+    </application>
+
+
+    <!-- ===================================================== -->
+    <!-- PROCESS TEXT                                          -->
+    <!-- Used by Flutter for Android text-processing intents.  -->
+    <!-- ===================================================== -->
+
+    <queries>
+        <intent>
+            <action
+                android:name="android.intent.action.PROCESS_TEXT" />
+
+            <data
+                android:mimeType="text/plain" />
+        </intent>
+    </queries>
+
+</manifest>
