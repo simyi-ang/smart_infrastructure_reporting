@@ -225,6 +225,262 @@ class _RegisterScreenState
       confirmPasswordController.text.isNotEmpty;
 
   // ============================================================
+// FULL NAME VALIDATION
+// ============================================================
+
+  String? validateFullName(
+      String? value,
+      ) {
+    final String name =
+        value?.trim() ?? '';
+
+    if (name.isEmpty) {
+      return 'Full name is required.';
+    }
+
+    if (name.length < 3) {
+      return 'Please enter your full name.';
+    }
+
+    if (name.length > 80) {
+      return 'Full name is too long.';
+    }
+
+    // Must contain at least 2 alphabetic characters.
+    final int letterCount =
+        RegExp(
+          r'[A-Za-z]',
+        ).allMatches(
+          name,
+        ).length;
+
+    if (letterCount < 2) {
+      return 'Please enter a valid name.';
+    }
+
+    // Allow:
+    // letters
+    // spaces
+    // apostrophes
+    // hyphens
+    // periods
+    //
+    // Examples:
+    // Ahmad Razif bin Abdullah
+    // Lee Wei-Jian
+    // O'Connor
+    // S. Kumar
+    final RegExp allowedNamePattern =
+    RegExp(
+      r"^[A-Za-z][A-Za-z .'-]*[A-Za-z.]$",
+    );
+
+    if (
+    !allowedNamePattern.hasMatch(
+      name,
+    )
+    ) {
+      return 'Name can only contain letters, spaces, '
+          'apostrophes, periods and hyphens.';
+    }
+
+    // Reject excessive repeated characters.
+    if (
+    RegExp(
+      r'(.)\1{4,}',
+      caseSensitive:
+      false,
+    ).hasMatch(
+      name,
+    )
+    ) {
+      return 'Please enter a meaningful name.';
+    }
+
+    return null;
+  }
+
+// ============================================================
+// EMAIL VALIDATION
+// ============================================================
+
+  String? validateEmail(
+      String? value,
+      ) {
+    final String email =
+        value
+            ?.trim()
+            .toLowerCase() ??
+            '';
+
+    if (email.isEmpty) {
+      return 'Email is required.';
+    }
+
+    if (
+    email.contains(
+      ' ',
+    )
+    ) {
+      return 'Email address cannot contain spaces.';
+    }
+
+    if (
+    email.length >
+        254
+    ) {
+      return 'Email address is too long.';
+    }
+
+    final RegExp emailPattern =
+    RegExp(
+      r'^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@'
+      r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+      r'(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$',
+    );
+
+    if (
+    !emailPattern.hasMatch(
+      email,
+    )
+    ) {
+      return 'Enter a valid email address.';
+    }
+
+    return null;
+  }
+
+// ============================================================
+// MALAYSIA PHONE NORMALIZATION
+//
+// Accepted examples:
+//
+// 0123456789
+// 012-3456789
+// 012 345 6789
+// +60123456789
+// +60 12-345 6789
+// 60123456789
+//
+// Saved format:
+//
+// +60123456789
+// ============================================================
+
+  String normalizeMalaysiaPhone(
+      String value,
+      ) {
+    String phone =
+    value
+        .trim()
+        .replaceAll(
+      RegExp(
+        r'[\s()-]',
+      ),
+      '',
+    );
+
+    if (
+    phone.startsWith(
+      '+60',
+    )
+    ) {
+      phone =
+      '0${phone.substring(3)}';
+    } else if (
+    phone.startsWith(
+      '60',
+    )
+    ) {
+      phone =
+      '0${phone.substring(2)}';
+    }
+
+    if (
+    phone.startsWith(
+      '0',
+    )
+    ) {
+      return '+60${phone.substring(1)}';
+    }
+
+    return phone;
+  }
+
+// ============================================================
+// MALAYSIA PHONE VALIDATION
+// ============================================================
+
+  String? validateMalaysiaPhone(
+      String? value,
+      ) {
+    final String raw =
+        value?.trim() ?? '';
+
+    if (raw.isEmpty) {
+      return 'Phone number is required.';
+    }
+
+    // Only allow digits, spaces, +, -, and parentheses.
+    if (
+    !RegExp(
+      r'^[0-9+\-\s()]+$',
+    ).hasMatch(
+      raw,
+    )
+    ) {
+      return 'Phone number contains invalid characters.';
+    }
+
+    String cleaned =
+    raw.replaceAll(
+      RegExp(
+        r'[\s()-]',
+      ),
+      '',
+    );
+
+    // Convert +60 / 60 to local format for validation.
+    if (
+    cleaned.startsWith(
+      '+60',
+    )
+    ) {
+      cleaned =
+      '0${cleaned.substring(3)}';
+    } else if (
+    cleaned.startsWith(
+      '60',
+    )
+    ) {
+      cleaned =
+      '0${cleaned.substring(2)}';
+    }
+
+    // Malaysia mobile number:
+    //
+    // Starts with 01
+    // followed by 8 or 9 digits.
+    //
+    // Total local length:
+    // 10 or 11 digits.
+    final RegExp malaysiaMobilePattern =
+    RegExp(
+      r'^01\d{8,9}$',
+    );
+
+    if (
+    !malaysiaMobilePattern.hasMatch(
+      cleaned,
+    )
+    ) {
+      return 'Enter a valid Malaysia mobile number.';
+    }
+
+    return null;
+  }
+
+  // ============================================================
   // PASSWORD VALIDATION
   // ============================================================
 
@@ -1175,27 +1431,7 @@ class _RegisterScreenState
                       Icons.person_outline,
                     ),
                   ),
-                  validator: (
-                      value,
-                      ) {
-                    if (
-                    value == null ||
-                        value.trim().isEmpty
-                    ) {
-                      return 'Full name is required.';
-                    }
-
-                    if (
-                    value
-                        .trim()
-                        .length <
-                        3
-                    ) {
-                      return 'Please enter a valid name.';
-                    }
-
-                    return null;
-                  },
+                  validator: validateFullName,
                 ),
 
                 const SizedBox(
@@ -1234,31 +1470,7 @@ class _RegisterScreenState
                       Icons.email_outlined,
                     ),
                   ),
-                  validator: (
-                      value,
-                      ) {
-                    if (
-                    value == null ||
-                        value.trim().isEmpty
-                    ) {
-                      return 'Email is required.';
-                    }
-
-                    final RegExp emailRegex =
-                    RegExp(
-                      r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
-                    );
-
-                    if (
-                    !emailRegex.hasMatch(
-                      value.trim(),
-                    )
-                    ) {
-                      return 'Enter a valid email address.';
-                    }
-
-                    return null;
-                  },
+                  validator: validateEmail,
                 ),
 
                 const SizedBox(
@@ -1296,32 +1508,7 @@ class _RegisterScreenState
                       Icons.phone_outlined,
                     ),
                   ),
-                  validator: (
-                      value,
-                      ) {
-                    if (
-                    value == null ||
-                        value.trim().isEmpty
-                    ) {
-                      return 'Phone number is required.';
-                    }
-
-                    final String digits =
-                    value.replaceAll(
-                      RegExp(
-                        r'[^0-9]',
-                      ),
-                      '',
-                    );
-
-                    if (
-                    digits.length < 8
-                    ) {
-                      return 'Enter a valid phone number.';
-                    }
-
-                    return null;
-                  },
+                  validator: validateMalaysiaPhone,
                 ),
 
                 const SizedBox(

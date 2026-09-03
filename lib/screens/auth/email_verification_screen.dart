@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/email_verification_security_service.dart';
 
 import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
