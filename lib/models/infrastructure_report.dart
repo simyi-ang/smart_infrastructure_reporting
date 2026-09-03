@@ -18,6 +18,10 @@ class InfrastructureReport {
 
   final String? assignedDepartment;
 
+  // Added from friend's version
+  final String? assignedWorkerId;
+  final DateTime? assignedAt;
+
   final int progressPercentage;
 
   final DateTime? estimatedCompletion;
@@ -39,6 +43,11 @@ class InfrastructureReport {
     this.longitude,
     required this.status,
     this.assignedDepartment,
+
+    // Added from friend's version
+    this.assignedWorkerId,
+    this.assignedAt,
+
     required this.progressPercentage,
     this.estimatedCompletion,
     required this.createdAt,
@@ -106,6 +115,20 @@ class InfrastructureReport {
       assignedDepartment:
       map['assigned_department']
           ?.toString(),
+
+      // Added from friend's version
+      assignedWorkerId:
+      map['assigned_worker_id']
+          ?.toString(),
+
+      // Added from friend's version
+      assignedAt:
+      map['assigned_at'] != null
+          ? DateTime.tryParse(
+        map['assigned_at']
+            .toString(),
+      )
+          : null,
 
       progressPercentage:
       map['progress_percentage']

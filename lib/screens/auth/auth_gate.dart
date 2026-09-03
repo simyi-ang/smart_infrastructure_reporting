@@ -4,13 +4,19 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../services/auth_service.dart';
+
+// Added from friend's version
 import '../../services/quick_lock_service.dart';
 
 import '../admin/admin_dashboard_screen.dart';
 import '../citizen/citizen_dashboard_screen.dart';
-import '../worker/worker_dashboard_screen.dart';
 
+// KEEP YOUR VERSION
+import '../worker/worker_main_screen.dart';
+
+// Added from friend's version
 import 'biometric_lock_screen.dart';
+
 import 'login_screen.dart';
 
 class AuthGate extends StatefulWidget {
@@ -28,6 +34,7 @@ class _AuthGateState
   final AuthService authService =
   AuthService();
 
+  // Added from friend's version
   final QuickLockService
   quickLockService =
   QuickLockService();
@@ -37,25 +44,13 @@ class _AuthGateState
 
   int authRefreshKey = 0;
 
-  // ============================================================
-  // INITIALIZATION
-  // ============================================================
-
   @override
   void initState() {
     super.initState();
 
-    // Rebuild the authentication gate whenever Supabase:
-    //
-    // - signs a user in
-    // - signs a user out
-    // - refreshes a session
-    // - changes the authenticated user
-    //
-    // This works for BOTH:
-    //
-    // Email / Password
-    // Google Sign-In
+    // IMPORTANT:
+    // Rebuild this gate whenever Supabase signs in, signs out,
+    // refreshes the session, or changes the authenticated user.
     authSubscription =
         Supabase.instance.client.auth
             .onAuthStateChange
@@ -74,20 +69,12 @@ class _AuthGateState
         );
   }
 
-  // ============================================================
-  // DISPOSE
-  // ============================================================
-
   @override
   void dispose() {
     authSubscription?.cancel();
 
     super.dispose();
   }
-
-  // ============================================================
-  // BUILD
-  // ============================================================
 
   @override
   Widget build(
@@ -97,15 +84,7 @@ class _AuthGateState
         authService.currentUser;
 
     // ==========================================================
-    // NO AUTHENTICATED SUPABASE SESSION
-    //
-    // FIRST-TIME USER:
-    //
-    // Welcome
-    // -> Login
-    // -> Email / Password OR Google
-    //
-    // No biometric login is forced here.
+    // NOT LOGGED IN
     // ==========================================================
 
     if (user == null) {
@@ -113,7 +92,7 @@ class _AuthGateState
     }
 
     // ==========================================================
-    // AUTHENTICATED USER -> LOAD PROFILE
+    // LOGGED IN -> LOAD PROFILE + ROLE
     // ==========================================================
 
     return FutureBuilder(
@@ -129,10 +108,6 @@ class _AuthGateState
           context,
           snapshot,
           ) {
-        // ======================================================
-        // PROFILE LOADING
-        // ======================================================
-
         if (snapshot.connectionState ==
             ConnectionState.waiting) {
           return const Scaffold(
@@ -143,10 +118,6 @@ class _AuthGateState
           );
         }
 
-        // ======================================================
-        // PROFILE LOAD ERROR
-        // ======================================================
-
         if (snapshot.hasError) {
           return Scaffold(
             body: Center(
@@ -155,37 +126,26 @@ class _AuthGateState
                 const EdgeInsets.all(
                   25,
                 ),
-
                 child: Column(
                   mainAxisSize:
                   MainAxisSize.min,
-
                   children: [
                     const Icon(
                       Icons.error_outline,
-
-                      size:
-                      42,
+                      size: 42,
                     ),
-
                     const SizedBox(
-                      height:
-                      12,
+                      height: 12,
                     ),
-
                     Text(
                       'Unable to load account.\n\n'
                           '${snapshot.error}',
-
                       textAlign:
                       TextAlign.center,
                     ),
-
                     const SizedBox(
-                      height:
-                      16,
+                      height: 16,
                     ),
-
                     OutlinedButton.icon(
                       onPressed: () {
                         if (!mounted) {
@@ -196,12 +156,10 @@ class _AuthGateState
                           authRefreshKey++;
                         });
                       },
-
                       icon:
                       const Icon(
                         Icons.refresh,
                       ),
-
                       label:
                       const Text(
                         'Retry',
@@ -229,41 +187,31 @@ class _AuthGateState
                 const EdgeInsets.all(
                   25,
                 ),
-
                 child: Column(
                   mainAxisSize:
                   MainAxisSize.min,
-
                   children: [
                     const Icon(
                       Icons
                           .person_off_outlined,
-
-                      size:
-                      42,
+                      size: 42,
                     ),
-
                     const SizedBox(
-                      height:
-                      12,
+                      height: 12,
                     ),
-
                     const Text(
                       'Unable to find your SmartCity profile.',
-
                       textAlign:
                       TextAlign.center,
                     ),
-
                     const SizedBox(
-                      height:
-                      16,
+                      height: 16,
                     ),
-
                     OutlinedButton(
                       onPressed:
                           () async {
                         try {
+                          // Added from friend's version
                           await quickLockService
                               .clearForFullSignOut();
 
@@ -271,7 +219,6 @@ class _AuthGateState
                               .logout();
                         } catch (_) {}
                       },
-
                       child:
                       const Text(
                         'Return to Login',
@@ -296,40 +243,30 @@ class _AuthGateState
                 const EdgeInsets.all(
                   25,
                 ),
-
                 child: Column(
                   mainAxisSize:
                   MainAxisSize.min,
-
                   children: [
                     const Icon(
                       Icons.block_outlined,
-
-                      size:
-                      42,
+                      size: 42,
                     ),
-
                     const SizedBox(
-                      height:
-                      12,
+                      height: 12,
                     ),
-
                     const Text(
                       'This account is currently unavailable.',
-
                       textAlign:
                       TextAlign.center,
                     ),
-
                     const SizedBox(
-                      height:
-                      16,
+                      height: 16,
                     ),
-
                     OutlinedButton(
                       onPressed:
                           () async {
                         try {
+                          // Added from friend's version
                           await quickLockService
                               .clearForFullSignOut();
 
@@ -337,7 +274,6 @@ class _AuthGateState
                               .logout();
                         } catch (_) {}
                       },
-
                       child:
                       const Text(
                         'Return to Login',
@@ -354,45 +290,29 @@ class _AuthGateState
         // ROLE-BASED ROUTING
         // ======================================================
 
+        // Changed slightly so we can apply the biometric/
+        // quick-lock security screen AFTER deciding dashboard.
         late final Widget dashboard;
 
         switch (
         profile.role
             .trim()
             .toLowerCase()) {
-        // ====================================================
-        // ADMIN
-        // ====================================================
-
           case 'admin':
             dashboard =
             const AdminDashboardScreen();
-
             break;
-
-        // ====================================================
-        // WORKER
-        // ====================================================
 
           case 'worker':
+          // KEEP YOUR VERSION
             dashboard =
-            const WorkerDashboardScreen();
-
+                WorkerMainScreen();
             break;
-
-        // ====================================================
-        // CITIZEN
-        // ====================================================
 
           case 'citizen':
             dashboard =
             const CitizenDashboardScreen();
-
             break;
-
-        // ====================================================
-        // INVALID ROLE
-        // ====================================================
 
           default:
             return Scaffold(
@@ -402,42 +322,32 @@ class _AuthGateState
                   const EdgeInsets.all(
                     25,
                   ),
-
                   child: Column(
                     mainAxisSize:
                     MainAxisSize.min,
-
                     children: [
                       const Icon(
                         Icons
                             .warning_amber_rounded,
-
-                        size:
-                        42,
+                        size: 42,
                       ),
-
                       const SizedBox(
-                        height:
-                        12,
+                        height: 12,
                       ),
-
                       Text(
                         'Invalid user role: '
                             '${profile.role}',
-
                         textAlign:
                         TextAlign.center,
                       ),
-
                       const SizedBox(
-                        height:
-                        16,
+                        height: 16,
                       ),
-
                       OutlinedButton(
                         onPressed:
                             () async {
                           try {
+                            // Added from friend's version
                             await quickLockService
                                 .clearForFullSignOut();
 
@@ -445,7 +355,6 @@ class _AuthGateState
                                 .logout();
                           } catch (_) {}
                         },
-
                         child:
                         const Text(
                           'Return to Login',
@@ -459,26 +368,8 @@ class _AuthGateState
         }
 
         // ======================================================
-        // QUICK LOGIN SECURITY CHECK
-        //
-        // IMPORTANT:
-        //
-        // This check happens only AFTER Supabase already has
-        // an authenticated user.
-        //
-        // Therefore:
-        //
-        // Email Login success
-        // -> markVerifiedForCurrentRun()
-        // -> AuthGate
-        // -> Dashboard
-        //
-        // Google Login success
-        // -> markVerifiedForCurrentRun()
-        // -> AuthGate
-        // -> Dashboard
-        //
-        // NO second biometric prompt.
+        // QUICK LOGIN / QUICK LOCK SECURITY CHECK
+        // Added from friend's version
         // ======================================================
 
         return FutureBuilder<List<dynamic>>(
@@ -545,12 +436,6 @@ class _AuthGateState
 
             // ==================================================
             // MANUAL QUICK LOCK
-            //
-            // User explicitly pressed:
-            //
-            // Security -> Quick Lock
-            //
-            // Back navigation must NOT bypass the lock.
             // ==================================================
 
             final bool manualQuickLock =
@@ -560,17 +445,7 @@ class _AuthGateState
                             .manualLockReason;
 
             // ==================================================
-            // SIGN OUT TO LOGIN
-            //
-            // Supabase session remains alive.
-            //
-            // Login page can offer:
-            //
-            // - Quick Login
-            // - Email / Password
-            // - Google
-            //
-            // Login back button may return to WelcomeScreen.
+            // RETURN TO LOGIN
             // ==================================================
 
             final bool returnToLogin =
@@ -580,15 +455,7 @@ class _AuthGateState
                             .returnToLoginReason;
 
             // ==================================================
-            // APP REOPEN
-            //
-            // When the application process is restarted:
-            //
-            // _verifiedForCurrentRun = false
-            //
-            // If Quick Login is enabled and the existing
-            // Supabase session remains available, require
-            // identity verification before showing dashboard.
+            // APP REOPEN / STARTUP QUICK LOGIN
             // ==================================================
 
             final bool startupQuickLogin =
@@ -597,7 +464,7 @@ class _AuthGateState
                         .isVerifiedForCurrentRun;
 
             // ==================================================
-            // REQUIRE LOGIN / QUICK LOGIN SCREEN
+            // REQUIRE LOGIN / QUICK LOGIN
             // ==================================================
 
             if (manualQuickLock ||
@@ -607,15 +474,6 @@ class _AuthGateState
                 quickLockMode:
                 true,
 
-                // We will add this parameter in the next
-                // LoginScreen update.
-                //
-                // true:
-                // Login Back -> Welcome Screen
-                //
-                // false:
-                // Back disabled because manual Quick Lock
-                // must not be bypassed.
                 allowBackToWelcome:
                 !manualQuickLock,
               );
@@ -623,8 +481,6 @@ class _AuthGateState
 
             // ==================================================
             // AUTHENTICATED + VERIFIED
-            //
-            // Existing biometric auto-lock remains unchanged.
             // ==================================================
 
             return BiometricLockScreen(
