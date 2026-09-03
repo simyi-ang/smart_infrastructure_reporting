@@ -12,6 +12,7 @@ import '../../services/remembered_account_service.dart';
 import '../../theme/app_colors.dart';
 
 import '../welcome_screen.dart';
+import 'email_verification_screen.dart';
 
 import 'auth_gate.dart';
 import 'forgot_password_screen.dart';
@@ -465,7 +466,8 @@ class _LoginScreenState
       }
 
       setState(() {
-        blocked = true;
+        blocked =
+        true;
 
         blockedUntil =
             status.blockedUntil;
@@ -485,7 +487,8 @@ class _LoginScreenState
     }
 
     setState(() {
-      loading = true;
+      loading =
+      true;
     });
 
     try {
@@ -498,10 +501,53 @@ class _LoginScreenState
         passwordController.text,
       );
 
-      if (response.user == null) {
+      final user =
+          response.user;
+
+      if (user == null) {
         throw Exception(
           'Unable to sign in.',
         );
+      }
+
+      // ========================================================
+      // SECOND UI-LEVEL VERIFICATION CHECK
+      // ========================================================
+
+      final bool hasEmailIdentity =
+          user.identities?.any(
+                (
+                identity,
+                ) =>
+            identity.provider ==
+                'email',
+          ) ??
+              false;
+
+      if (
+      hasEmailIdentity &&
+          user.emailConfirmedAt ==
+              null
+      ) {
+        await authService.logout();
+
+        if (!mounted) {
+          return;
+        }
+
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder:
+                (_) =>
+                EmailVerificationScreen(
+                  email:
+                  email,
+                ),
+          ),
+        );
+
+        return;
       }
 
       // ========================================================
@@ -531,16 +577,15 @@ class _LoginScreenState
 
       // ========================================================
       // PASSWORD MANAGER
-      //
-      // SmartCity itself does not store the password.
       // ========================================================
 
       TextInput.finishAutofillContext(
-        shouldSave: true,
+        shouldSave:
+        true,
       );
 
       // ========================================================
-      // CLEAR LOCK ONLY AFTER SUCCESS
+      // CLEAR QUICK LOCK ONLY AFTER SUCCESS
       // ========================================================
 
       if (widget.quickLockMode) {
@@ -548,8 +593,6 @@ class _LoginScreenState
             .clearQuickLockState();
       }
 
-      // Email / Password is already a complete authentication.
-      // Do NOT ask for biometric again after this.
       quickLockService
           .markVerifiedForCurrentRun();
 
@@ -569,6 +612,63 @@ class _LoginScreenState
 
       goToAuthGate();
     } catch (e) {
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
+        'Exception: ',
+        '',
+      )
+          .trim();
+
+      // ========================================================
+      // EMAIL NOT VERIFIED
+      //
+      // IMPORTANT:
+      // This is NOT a failed password attempt.
+      // Do NOT increment login-security failures.
+      // ========================================================
+
+      if (
+      message ==
+          'EMAIL_NOT_VERIFIED' ||
+          message
+              .toLowerCase()
+              .contains(
+            'email not confirmed',
+          )
+      ) {
+        try {
+          await authService.logout();
+        } catch (_) {}
+
+        if (!mounted) {
+          return;
+        }
+
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder:
+                (_) =>
+                EmailVerificationScreen(
+                  email:
+                  email,
+                ),
+          ),
+        );
+
+        showMessage(
+          'Please verify your email before signing in.',
+        );
+
+        return;
+      }
+
+      // ========================================================
+      // REAL FAILED LOGIN
+      // ========================================================
+
       final failedStatus =
       await loginSecurityService
           .recordFailedAttempt(
@@ -613,7 +713,8 @@ class _LoginScreenState
     } finally {
       if (mounted) {
         setState(() {
-          loading = false;
+          loading =
+          false;
         });
       }
     }

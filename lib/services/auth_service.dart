@@ -7,6 +7,16 @@ import '../models/user_profile.dart';
 import 'password_reset_security_service.dart';
 import 'security_service.dart';
 
+class RegistrationEmailCheckResult {
+  final bool exists;
+  final bool emailConfirmed;
+
+  const RegistrationEmailCheckResult({
+    required this.exists,
+    required this.emailConfirmed,
+  });
+}
+
 class AuthService {
   final SupabaseClient _supabase =
       Supabase.instance.client;
@@ -47,7 +57,162 @@ class AuthService {
       _supabase.auth.onAuthStateChange;
 
   // ============================================================
+// CHECK REGISTRATION EMAIL
+//
+// Calls the server-side Edge Function.
+//
+// IMPORTANT:
+// Flutter never receives SUPABASE_SERVICE_ROLE_KEY.
+// The privileged auth.users lookup stays on the server.
+//
+// RESULT:
+//
+// exists == false
+// → registration may continue.
+//
+// exists == true
+// → do NOT call signUp() again.
+// → RegisterScreen will show AccountAlreadyExistsScreen.
+// ============================================================
+
+  Future<RegistrationEmailCheckResult>
+  checkRegistrationEmail(
+      String email,
+      ) async {
+    final String cleanEmail =
+    email
+        .trim()
+        .toLowerCase();
+
+    if (cleanEmail.isEmpty) {
+      throw Exception(
+        'Email address is required.',
+      );
+    }
+
+    try {
+      final FunctionResponse response =
+      await _supabase.functions.invoke(
+        'check-registration-email',
+        body: {
+          'email':
+          cleanEmail,
+        },
+      );
+
+      // ==========================================================
+      // EDGE FUNCTION ERROR
+      // ==========================================================
+
+      if (
+      response.status <
+          200 ||
+          response.status >=
+              300
+      ) {
+        final dynamic data =
+            response.data;
+
+        if (
+        data is Map &&
+            data['error'] !=
+                null
+        ) {
+          throw Exception(
+            data['error']
+                .toString(),
+          );
+        }
+
+        throw Exception(
+          'Unable to check this email address. '
+              'Please try again.',
+        );
+      }
+
+      // ==========================================================
+      // VALIDATE RESPONSE
+      // ==========================================================
+
+      final dynamic data =
+          response.data;
+
+      if (data is! Map) {
+        throw Exception(
+          'Unable to validate this email address.',
+        );
+      }
+
+      // ==========================================================
+      // RESULT
+      // ==========================================================
+
+      return RegistrationEmailCheckResult(
+        exists:
+        data['exists'] ==
+            true,
+
+        emailConfirmed:
+        data['email_confirmed'] ==
+            true,
+      );
+    } on FunctionException catch (e) {
+      // ==========================================================
+      // SUPABASE EDGE FUNCTION ERROR
+      // ==========================================================
+
+      final dynamic details =
+          e.details;
+
+      if (
+      details is Map &&
+          details['error'] !=
+              null
+      ) {
+        throw Exception(
+          details['error']
+              .toString(),
+        );
+      }
+
+      throw Exception(
+        'Unable to check whether this email is already registered. '
+            'Please try again.',
+      );
+    } catch (e) {
+      // ==========================================================
+      // PRESERVE OUR OWN FRIENDLY EXCEPTIONS
+      // ==========================================================
+
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
+        'Exception: ',
+        '',
+      )
+          .trim();
+
+      if (message.isNotEmpty) {
+        throw Exception(
+          message,
+        );
+      }
+
+      throw Exception(
+        'Unable to check whether this email is already registered. '
+            'Please try again.',
+      );
+    }
+  }
+
+  // ============================================================
   // REGISTER
+  //
+  // Supabase "Confirm Email" MUST be enabled.
+  //
+  // The account is created but cannot enter SmartCity until the
+  // verification link has been completed.
   // ============================================================
 
   Future<AuthResponse> register({
@@ -56,10 +221,17 @@ class AuthService {
     required String phone,
     required String password,
   }) async {
+    final String cleanEmail =
+    email
+        .trim()
+        .toLowerCase();
+
     try {
-      return await _supabase.auth.signUp(
+      final AuthResponse response =
+      await _supabase.auth
+          .signUp(
         email:
-        email.trim().toLowerCase(),
+        cleanEmail,
 
         password:
         password,
@@ -72,39 +244,211 @@ class AuthService {
           phone.trim(),
         },
       );
+
+      if (
+      response.user ==
+          null
+      ) {
+        throw Exception(
+          'Unable to create account.',
+        );
+      }
+
+      // ==========================================================
+      // IMPORTANT
+      //
+      // With Confirm Email enabled:
+      //
+      // response.user    -> exists
+      // response.session -> normally null
+      //
+      // The citizen is therefore NOT authenticated yet.
+      // ==========================================================
+
+      if (
+      response.session !=
+          null &&
+          response.user
+              ?.emailConfirmedAt ==
+              null
+      ) {
+        // Defensive protection in case project Auth settings are
+        // changed accidentally.
+        await _supabase.auth
+            .signOut();
+      }
+
+      return response;
     } on AuthException catch (e) {
+      final String normalized =
+      e.message
+          .toLowerCase();
+
+      if (
+      normalized.contains(
+        'already registered',
+      ) ||
+          normalized.contains(
+            'already exists',
+          )
+      ) {
+        throw Exception(
+          'This email address is already registered. '
+              'Please sign in or use Forgot Password.',
+        );
+      }
+
       throw Exception(
         e.message,
       );
-    } catch (_) {
+    } catch (e) {
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
+        'Exception: ',
+        '',
+      )
+          .trim();
+
+      if (message.isNotEmpty) {
+        throw Exception(
+          message,
+        );
+      }
+
       throw Exception(
         'Unable to create account.',
       );
     }
   }
 
-  // ============================================================
-  // LOGIN
-  // ============================================================
+// ============================================================
+// LOGIN
+//
+// EMAIL/PASSWORD USERS MUST HAVE VERIFIED THEIR EMAIL.
+//
+// This is an application-level second check in addition to
+// Supabase Confirm Email.
+// ============================================================
 
   Future<AuthResponse> login({
     required String email,
     required String password,
   }) async {
+    final String cleanEmail =
+    email
+        .trim()
+        .toLowerCase();
+
     try {
-      return await _supabase.auth
+      final AuthResponse response =
+      await _supabase.auth
           .signInWithPassword(
         email:
-        email.trim().toLowerCase(),
+        cleanEmail,
 
         password:
         password,
       );
+
+      final User? user =
+          response.user;
+
+      if (user == null) {
+        throw Exception(
+          'Unable to sign in.',
+        );
+      }
+
+      // ==========================================================
+      // CHECK EMAIL/PASSWORD IDENTITY
+      // ==========================================================
+
+      final bool hasEmailIdentity =
+          user.identities?.any(
+                (
+                identity,
+                ) =>
+            identity.provider ==
+                'email',
+          ) ??
+              false;
+
+      // ==========================================================
+      // EMAIL VERIFICATION REQUIRED
+      //
+      // Google identity is handled by Google authentication and is
+      // not blocked by this email/password-specific check.
+      // ==========================================================
+
+      if (
+      hasEmailIdentity &&
+          user.emailConfirmedAt ==
+              null
+      ) {
+        await _supabase.auth
+            .signOut();
+
+        throw Exception(
+          'EMAIL_NOT_VERIFIED',
+        );
+      }
+
+      return response;
     } on AuthException catch (e) {
+      final String normalized =
+      e.message
+          .toLowerCase();
+
+      // Supabase normally returns this before creating a session
+      // when Confirm Email is enabled.
+      if (
+      normalized.contains(
+        'email not confirmed',
+      ) ||
+          normalized.contains(
+            'email_not_confirmed',
+          )
+      ) {
+        try {
+          await _supabase.auth
+              .signOut();
+        } catch (_) {}
+
+        throw Exception(
+          'EMAIL_NOT_VERIFIED',
+        );
+      }
+
       throw Exception(
         e.message,
       );
-    } catch (_) {
+    } catch (e) {
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
+        'Exception: ',
+        '',
+      )
+          .trim();
+
+      if (
+      message ==
+          'EMAIL_NOT_VERIFIED'
+      ) {
+        throw Exception(
+          'EMAIL_NOT_VERIFIED',
+        );
+      }
+
+      if (message.isNotEmpty) {
+        throw Exception(
+          message,
+        );
+      }
+
       throw Exception(
         'Unable to sign in.',
       );

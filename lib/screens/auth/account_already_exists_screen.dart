@@ -1,196 +1,34 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_colors.dart';
+import 'forgot_password_screen.dart';
 import 'login_screen.dart';
 
-class EmailVerificationScreen
-    extends StatefulWidget {
+// ============================================================
+// ACCOUNT ALREADY EXISTS SCREEN
+//
+// Shown when registration detects that the email address is
+// already registered.
+//
+// This screen DOES NOT create another account.
+// ============================================================
+
+class AccountAlreadyExistsScreen
+    extends StatelessWidget {
   final String email;
 
-  const EmailVerificationScreen({
+  const AccountAlreadyExistsScreen({
     super.key,
     required this.email,
   });
 
-  @override
-  State<EmailVerificationScreen>
-  createState() =>
-      _EmailVerificationScreenState();
-}
+  // ==========================================================
+  // GO TO LOGIN
+  // ==========================================================
 
-class _EmailVerificationScreenState
-    extends State<EmailVerificationScreen> {
-  bool sending =
-  false;
-
-  int resendCooldownSeconds =
-  0;
-
-  Timer? resendTimer;
-
-  // ============================================================
-  // CLEAN EMAIL
-  // ============================================================
-
-  String get cleanEmail =>
-      widget.email
-          .trim()
-          .toLowerCase();
-
-  // ============================================================
-  // RESEND VERIFICATION EMAIL
-  // ============================================================
-
-  Future<void> resendEmail() async {
-    if (
-    sending ||
-        resendCooldownSeconds >
-            0
-    ) {
-      return;
-    }
-
-    try {
-      setState(() {
-        sending =
-        true;
-      });
-
-      await Supabase.instance.client.auth
-          .resend(
-        type:
-        OtpType.signup,
-
-        email:
-        cleanEmail,
-      );
-
-      if (!mounted) {
-        return;
-      }
-
-      _startResendCooldown();
-
-      showMessage(
-        'Verification email sent. Please check your inbox.',
-      );
-    } on AuthException catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      final String message =
-      _formatAuthError(
-        e.message,
-      );
-
-      showMessage(
-        message,
-      );
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-
-      showMessage(
-        'Unable to resend the verification email. '
-            'Please try again later.',
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          sending =
-          false;
-        });
-      }
-    }
-  }
-
-  // ============================================================
-  // RESEND COOLDOWN
-  //
-  // Prevents repeated taps from consuming Supabase email quota.
-  // ============================================================
-
-  void _startResendCooldown() {
-    resendTimer?.cancel();
-
-    setState(() {
-      resendCooldownSeconds =
-      60;
-    });
-
-    resendTimer =
-        Timer.periodic(
-          const Duration(
-            seconds:
-            1,
-          ),
-              (
-              timer,
-              ) {
-            if (!mounted) {
-              timer.cancel();
-
-              return;
-            }
-
-            if (
-            resendCooldownSeconds <=
-                1
-            ) {
-              timer.cancel();
-
-              setState(() {
-                resendCooldownSeconds =
-                0;
-              });
-
-              return;
-            }
-
-            setState(() {
-              resendCooldownSeconds--;
-            });
-          },
-        );
-  }
-
-  // ============================================================
-  // CONTINUE TO LOGIN
-  //
-  // This does NOT grant access.
-  //
-  // LoginScreen + AuthService will still reject an unverified
-  // email/password account.
-  // ============================================================
-
-  Future<void> goToLogin() async {
-    try {
-      // Registration should normally have no active session when
-      // Supabase Confirm Email is enabled.
-      //
-      // Sign out defensively so this screen can never accidentally
-      // carry a registration session into the application.
-      if (
-      Supabase.instance.client.auth
-          .currentSession !=
-          null
+  void goToLogin(
+      BuildContext context,
       ) {
-        await Supabase.instance.client.auth
-            .signOut();
-      }
-    } catch (_) {
-      // Navigation should still be allowed.
-    }
-
-    if (!mounted) {
-      return;
-    }
-
     Navigator.pushAndRemoveUntil(
       context,
       MaterialPageRoute(
@@ -205,86 +43,35 @@ class _EmailVerificationScreenState
     );
   }
 
-  // ============================================================
-  // AUTH ERROR
-  // ============================================================
+  // ==========================================================
+  // GO TO FORGOT PASSWORD
+  // ==========================================================
 
-  String _formatAuthError(
-      String message,
+  void goToForgotPassword(
+      BuildContext context,
       ) {
-    final String lower =
-    message.toLowerCase();
-
-    if (
-    lower.contains(
-      'rate',
-    ) ||
-        lower.contains(
-          'too many',
-        )
-    ) {
-      return 'Too many verification emails were requested. '
-          'Please wait before trying again.';
-    }
-
-    if (
-    lower.contains(
-      'already',
-    )
-    ) {
-      return 'This email is already associated with an account. '
-          'Please sign in instead.';
-    }
-
-    return message;
-  }
-
-  // ============================================================
-  // MESSAGE
-  // ============================================================
-
-  void showMessage(
-      String message,
-      ) {
-    ScaffoldMessenger.of(
+    Navigator.push(
       context,
-    ).hideCurrentSnackBar();
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content:
-        Text(
-          message,
-        ),
+      MaterialPageRoute(
+        builder:
+            (_) =>
+        const ForgotPasswordScreen(),
       ),
     );
   }
 
-  // ============================================================
-  // DISPOSE
-  // ============================================================
-
-  @override
-  void dispose() {
-    resendTimer?.cancel();
-
-    super.dispose();
-  }
-
-  // ============================================================
+  // ==========================================================
   // BUILD
-  // ============================================================
+  // ==========================================================
 
   @override
   Widget build(
       BuildContext context,
       ) {
-    final bool canResend =
-        !sending &&
-            resendCooldownSeconds ==
-                0;
+    final String cleanEmail =
+    email
+        .trim()
+        .toLowerCase();
 
     return Scaffold(
       backgroundColor:
@@ -318,9 +105,9 @@ class _EmailVerificationScreenState
                 decoration:
                 BoxDecoration(
                   color:
-                  AppColors.primary
+                  AppColors.danger
                       .withOpacity(
-                    0.12,
+                    0.10,
                   ),
 
                   borderRadius:
@@ -331,14 +118,13 @@ class _EmailVerificationScreenState
 
                 child:
                 const Icon(
-                  Icons
-                      .mark_email_read_outlined,
+                  Icons.person_off_outlined,
 
                   size:
                   48,
 
                   color:
-                  AppColors.primary,
+                  AppColors.danger,
                 ),
               ),
 
@@ -352,12 +138,15 @@ class _EmailVerificationScreenState
               // =================================================
 
               const Text(
-                'Verify Your Email',
+                'Account Already Exists',
+
+                textAlign:
+                TextAlign.center,
 
                 style:
                 TextStyle(
                   fontSize:
-                  29,
+                  28,
 
                   fontWeight:
                   FontWeight.bold,
@@ -370,7 +159,7 @@ class _EmailVerificationScreenState
               ),
 
               const Text(
-                'We sent a confirmation email to',
+                'An account is already registered with',
 
                 style:
                 TextStyle(
@@ -383,6 +172,10 @@ class _EmailVerificationScreenState
                 height:
                 8,
               ),
+
+              // =================================================
+              // EMAIL
+              // =================================================
 
               Text(
                 cleanEmail,
@@ -397,6 +190,9 @@ class _EmailVerificationScreenState
 
                   fontWeight:
                   FontWeight.bold,
+
+                  fontSize:
+                  15,
                 ),
               ),
 
@@ -406,7 +202,7 @@ class _EmailVerificationScreenState
               ),
 
               // =================================================
-              // SECURITY INFORMATION
+              // INFORMATION CARD
               // =================================================
 
               Container(
@@ -440,13 +236,13 @@ class _EmailVerificationScreenState
                   children: [
                     Icon(
                       Icons
-                          .verified_user_outlined,
+                          .info_outline,
 
                       color:
                       AppColors.primary,
 
                       size:
-                      25,
+                      24,
                     ),
 
                     SizedBox(
@@ -455,8 +251,8 @@ class _EmailVerificationScreenState
                     ),
 
                     Text(
-                      'Email verification is required before '
-                          'you can use SmartCity.',
+                      'You cannot create another SmartCity account '
+                          'using the same email address.',
 
                       textAlign:
                       TextAlign.center,
@@ -465,6 +261,9 @@ class _EmailVerificationScreenState
                       TextStyle(
                         fontWeight:
                         FontWeight.bold,
+
+                        height:
+                        1.4,
                       ),
                     ),
 
@@ -474,9 +273,9 @@ class _EmailVerificationScreenState
                     ),
 
                     Text(
-                      'Open your email and click the verification '
-                          'link. After verification, return to SmartCity '
-                          'and sign in using your email and password.',
+                      'Please sign in using your existing account. '
+                          'If you cannot remember your password, use '
+                          'Forgot Password to recover access.',
 
                       textAlign:
                       TextAlign.center,
@@ -500,7 +299,7 @@ class _EmailVerificationScreenState
               ),
 
               // =================================================
-              // NOTE
+              // SECURITY NOTE
               // =================================================
 
               Container(
@@ -515,7 +314,7 @@ class _EmailVerificationScreenState
                 decoration:
                 BoxDecoration(
                   color:
-                  AppColors.primary
+                  AppColors.warning
                       .withOpacity(
                     0.06,
                   ),
@@ -523,6 +322,15 @@ class _EmailVerificationScreenState
                   borderRadius:
                   BorderRadius.circular(
                     12,
+                  ),
+
+                  border:
+                  Border.all(
+                    color:
+                    AppColors.warning
+                        .withOpacity(
+                      0.35,
+                    ),
                   ),
                 ),
 
@@ -533,10 +341,11 @@ class _EmailVerificationScreenState
 
                   children: [
                     Icon(
-                      Icons.info_outline,
+                      Icons
+                          .security_outlined,
 
                       color:
-                      AppColors.primary,
+                      AppColors.warning,
 
                       size:
                       18,
@@ -550,8 +359,9 @@ class _EmailVerificationScreenState
                     Expanded(
                       child:
                       Text(
-                        'If you do not see the email, check your '
-                            'Spam or Junk folder before requesting another one.',
+                        'For account security, SmartCity does not '
+                            'allow duplicate registration using the same '
+                            'email address.',
 
                         style:
                         TextStyle(
@@ -573,7 +383,7 @@ class _EmailVerificationScreenState
               const Spacer(),
 
               // =================================================
-              // LOGIN
+              // LOGIN BUTTON
               // =================================================
 
               SizedBox(
@@ -592,7 +402,11 @@ class _EmailVerificationScreenState
                   ),
 
                   onPressed:
-                  goToLogin,
+                      () {
+                    goToLogin(
+                      context,
+                    );
+                  },
 
                   icon:
                   const Icon(
@@ -601,7 +415,7 @@ class _EmailVerificationScreenState
 
                   label:
                   const Text(
-                    'Continue to Login',
+                    'Go to Login',
 
                     style:
                     TextStyle(
@@ -618,43 +432,35 @@ class _EmailVerificationScreenState
               ),
 
               // =================================================
-              // RESEND
+              // FORGOT PASSWORD BUTTON
               // =================================================
 
-              TextButton.icon(
-                onPressed:
-                canResend
-                    ? resendEmail
-                    : null,
+              SizedBox(
+                width:
+                double.infinity,
 
-                icon:
-                sending
-                    ? const SizedBox(
-                  width:
-                  16,
+                height:
+                50,
 
-                  height:
-                  16,
+                child:
+                OutlinedButton.icon(
+                  onPressed:
+                      () {
+                    goToForgotPassword(
+                      context,
+                    );
+                  },
 
-                  child:
-                  CircularProgressIndicator(
-                    strokeWidth:
-                    2,
+                  icon:
+                  const Icon(
+                    Icons
+                        .lock_reset_outlined,
                   ),
-                )
-                    : const Icon(
-                  Icons
-                      .forward_to_inbox_outlined,
-                ),
 
-                label:
-                Text(
-                  sending
-                      ? 'Sending...'
-                      : resendCooldownSeconds >
-                      0
-                      ? 'Resend in ${resendCooldownSeconds}s'
-                      : 'Resend verification email',
+                  label:
+                  const Text(
+                    'Forgot Password',
+                  ),
                 ),
               ),
 

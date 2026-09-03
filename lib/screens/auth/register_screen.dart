@@ -7,6 +7,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
 import 'email_verification_screen.dart';
+import 'account_already_exists_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -260,6 +261,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
 
       final user = response.user;
+
+      // ============================================================
+      // EMAIL VERIFICATION REQUIRED
+      //
+      // Registration must never grant access to the app.
+      // ============================================================
+
+      if (
+      response.session != null &&
+          user?.emailConfirmedAt ==
+              null
+      ) {
+        await Supabase.instance.client.auth
+            .signOut();
+      }
 
       if (user == null) {
         throw Exception(
