@@ -1417,58 +1417,179 @@ class AuthService {
   // ACCOUNT DELETION AFTER RE-AUTH
   // ============================================================
 
+  // ============================================================
+// PERMANENT ACCOUNT DELETION — EMAIL/PASSWORD
+// ============================================================
+
   Future<void>
-  requestAccountDeletionAfterPassword({
+  deleteAccountAfterPassword({
     required String currentPassword,
   }) async {
+    // ==========================================================
+    // RE-AUTHENTICATE FIRST
+    // ==========================================================
+
     await reauthenticateWithPassword(
       currentPassword:
       currentPassword,
     );
 
-    await _markAccountForDeletion();
+    await _permanentlyDeleteCurrentAccount();
   }
 
+// ============================================================
+// PERMANENT ACCOUNT DELETION — GOOGLE
+// ============================================================
+
   Future<void>
-  requestAccountDeletionAfterGoogle() async {
+  deleteAccountAfterGoogle() async {
+    // ==========================================================
+    // RE-AUTHENTICATE GOOGLE ACCOUNT FIRST
+    // ==========================================================
+
     await reauthenticateGoogle();
 
-    await _markAccountForDeletion();
+    await _permanentlyDeleteCurrentAccount();
   }
 
+// ============================================================
+// PERMANENTLY DELETE CURRENT ACCOUNT
+// ============================================================
+
   Future<void>
-  _markAccountForDeletion() async {
+  _permanentlyDeleteCurrentAccount() async {
     final User? user =
         currentUser;
 
-    if (user == null) {
+    final Session? session =
+        currentSession;
+
+    if (
+    user == null ||
+        session == null
+    ) {
       throw Exception(
-        'You must be logged in.',
+        'You must be signed in before deleting your account.',
       );
     }
 
     try {
-      await _supabase
-          .from(
-        'profiles',
-      )
-          .update({
-        'account_status':
-        'pending_deletion',
+      // ========================================================
+      // CALL PRIVILEGED EDGE FUNCTION
+      //
+      // The JWT identifies the current user.
+      // The service-role key remains only inside the Edge Function.
+      // ========================================================
 
-        'updated_at':
-        DateTime.now()
-            .toIso8601String(),
-      })
-          .eq(
-        'id',
-        user.id,
+      final FunctionResponse response =
+      await _supabase.functions.invoke(
+        'delete-account',
+
+        headers: {
+          'Authorization':
+          'Bearer ${session.accessToken}',
+        },
       );
 
-      await logout();
-    } catch (e) {
+      // ========================================================
+      // RESPONSE VALIDATION
+      // ========================================================
+
+      if (
+      response.status <
+          200 ||
+          response.status >=
+              300
+      ) {
+        final dynamic data =
+            response.data;
+
+        if (
+        data is Map &&
+            data['error'] !=
+                null
+        ) {
+          throw Exception(
+            data['error']
+                .toString(),
+          );
+        }
+
+        throw Exception(
+          'Unable to permanently delete your account.',
+        );
+      }
+
+      final dynamic data =
+          response.data;
+
+      if (
+      data is! Map ||
+          data['success'] !=
+              true
+      ) {
+        throw Exception(
+          'The server did not confirm account deletion.',
+        );
+      }
+
+      // ========================================================
+      // LOCAL SESSION CLEANUP
+      //
+      // After admin.deleteUser(), the server-side user no longer
+      // exists. Local tokens may still temporarily remain in the
+      // Flutter client until cleared.
+      // ========================================================
+
+      try {
+        await _supabase.auth
+            .signOut(
+          scope:
+          SignOutScope.local,
+        );
+      } catch (_) {
+        // The remote auth user may already be gone.
+        // Local UI cleanup should still continue.
+      }
+
+      try {
+        await _initializeGoogle();
+
+        await GoogleSignIn.instance
+            .signOut();
+      } catch (_) {}
+    } on FunctionException catch (e) {
+      final dynamic details =
+          e.details;
+
+      if (
+      details is Map &&
+          details['error'] !=
+              null
+      ) {
+        throw Exception(
+          details['error']
+              .toString(),
+        );
+      }
+
       throw Exception(
-        'Unable to request account deletion: $e',
+        'Unable to permanently delete your account.',
+      );
+    } catch (e) {
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
+        'Exception: ',
+        '',
+      )
+          .trim();
+
+      throw Exception(
+        message.isEmpty
+            ? 'Unable to permanently delete your account.'
+            : message,
       );
     }
   }

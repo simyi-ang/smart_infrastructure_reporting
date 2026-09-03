@@ -11,6 +11,7 @@ import '../../theme/app_colors.dart';
 
 import '../auth/auth_gate.dart';
 import 'account_activity_screen.dart';
+import '../auth/account_deleted_success_screen.dart';
 
 class SecurityScreen extends StatefulWidget {
   const SecurityScreen({
@@ -983,23 +984,33 @@ class _SecurityScreenState
   }
 
   // ============================================================
-  // DELETE ACCOUNT
-  // ============================================================
+// DELETE ACCOUNT
+//
+// PERMANENTLY removes:
+//
+// - Supabase Authentication user
+// - SmartCity profile
+// - related account data handled by delete-account Edge Function
+//
+// User must re-authenticate before deletion.
+// ============================================================
 
-  Future<void>
-  requestAccountDeletion() async {
+  Future<void> requestAccountDeletion() async {
+    if (loading) {
+      return;
+    }
+
     final bool verified =
     await _verifySensitiveAction(
       reason:
-      'Verify your identity before requesting SmartCity account deletion',
+      'Verify your identity before permanently deleting your SmartCity account',
     );
 
     if (!verified) {
       return;
     }
 
-    if (authService
-        .hasEmailPasswordIdentity) {
+    if (authService.hasEmailPasswordIdentity) {
       await _passwordDeletionDialog();
       return;
     }
@@ -1014,27 +1025,26 @@ class _SecurityScreenState
     );
   }
 
-  Future<void>
-  _passwordDeletionDialog() async {
-    final TextEditingController
-    passwordController =
+// ============================================================
+// PASSWORD ACCOUNT DELETION
+// ============================================================
+
+  Future<void> _passwordDeletionDialog() async {
+    final TextEditingController passwordController =
     TextEditingController();
 
     bool obscure = true;
 
     final String? password =
     await showDialog<String>(
-      context:
-      context,
+      context: context,
+      barrierDismissible: false,
 
-      barrierDismissible:
-      false,
-
-      builder:
-          (dialogContext) {
+      builder: (
+          dialogContext,
+          ) {
         return StatefulBuilder(
-          builder:
-              (
+          builder: (
               context,
               setDialogState,
               ) {
@@ -1042,21 +1052,28 @@ class _SecurityScreenState
               backgroundColor:
               AppColors.surface,
 
+              shape:
+              RoundedRectangleBorder(
+                borderRadius:
+                BorderRadius.circular(
+                  20,
+                ),
+              ),
+
               title:
               const Row(
                 children: [
                   Icon(
-                    Icons.warning_amber_rounded,
+                    Icons
+                        .warning_amber_rounded,
                     color:
                     AppColors.danger,
                   ),
                   SizedBox(
-                    width:
-                    10,
+                    width: 10,
                   ),
                   Expanded(
-                    child:
-                    Text(
+                    child: Text(
                       'Confirm Account Deletion',
                     ),
                   ),
@@ -1073,12 +1090,11 @@ class _SecurityScreenState
 
                 children: [
                   const Text(
-                    'For security, enter your current password before requesting account deletion.',
+                    'For security, enter your current password before permanently deleting your SmartCity account.',
                   ),
 
                   const SizedBox(
-                    height:
-                    18,
+                    height: 18,
                   ),
 
                   TextField(
@@ -1097,42 +1113,130 @@ class _SecurityScreenState
                       'Current password',
 
                       icon:
-                      Icons.lock_outline,
+                      Icons
+                          .lock_outline,
 
                       suffix:
                       IconButton(
-                        onPressed: () {
-                          setDialogState(() {
-                            obscure =
-                            !obscure;
-                          });
+                        onPressed:
+                            () {
+                          setDialogState(
+                                () {
+                              obscure =
+                              !obscure;
+                            },
+                          );
                         },
 
                         icon:
                         Icon(
                           obscure
-                              ? Icons.visibility_outlined
-                              : Icons.visibility_off_outlined,
+                              ? Icons
+                              .visibility_outlined
+                              : Icons
+                              .visibility_off_outlined,
                         ),
                       ),
                     ),
+
+                    onSubmitted:
+                        (_) {
+                      final String value =
+                          passwordController
+                              .text;
+
+                      if (value
+                          .trim()
+                          .isEmpty) {
+                        return;
+                      }
+
+                      Navigator.pop(
+                        dialogContext,
+                        value,
+                      );
+                    },
                   ),
 
                   const SizedBox(
-                    height:
-                    12,
+                    height: 15,
                   ),
 
-                  const Text(
-                    'Your account will first be marked as pending deletion. This request can then be reviewed before permanent removal.',
-                    style:
-                    TextStyle(
+                  Container(
+                    width:
+                    double.infinity,
+
+                    padding:
+                    const EdgeInsets.all(
+                      12,
+                    ),
+
+                    decoration:
+                    BoxDecoration(
                       color:
-                      AppColors.textSecondary,
-                      fontSize:
-                      10,
-                      height:
-                      1.4,
+                      AppColors.danger
+                          .withOpacity(
+                        0.07,
+                      ),
+
+                      borderRadius:
+                      BorderRadius.circular(
+                        12,
+                      ),
+
+                      border:
+                      Border.all(
+                        color:
+                        AppColors.danger
+                            .withOpacity(
+                          0.35,
+                        ),
+                      ),
+                    ),
+
+                    child:
+                    const Row(
+                      crossAxisAlignment:
+                      CrossAxisAlignment.start,
+
+                      children: [
+                        Icon(
+                          Icons
+                              .delete_forever_outlined,
+
+                          color:
+                          AppColors.danger,
+
+                          size:
+                          19,
+                        ),
+
+                        SizedBox(
+                          width: 9,
+                        ),
+
+                        Expanded(
+                          child:
+                          Text(
+                            'This action permanently removes your SmartCity account. '
+                                'Your authentication account will also be removed from Supabase. '
+                                'This action cannot be undone.',
+
+                            style:
+                            TextStyle(
+                              color:
+                              AppColors
+                                  .textSecondary,
+
+                              fontSize:
+                              10,
+
+                              height:
+                              1.45,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -1140,7 +1244,8 @@ class _SecurityScreenState
 
               actions: [
                 TextButton(
-                  onPressed: () {
+                  onPressed:
+                      () {
                     Navigator.pop(
                       dialogContext,
                     );
@@ -1154,16 +1259,21 @@ class _SecurityScreenState
 
                 ElevatedButton(
                   style:
-                  ElevatedButton.styleFrom(
+                  ElevatedButton
+                      .styleFrom(
                     backgroundColor:
                     AppColors.danger,
                   ),
 
-                  onPressed: () {
+                  onPressed:
+                      () {
                     final String value =
-                        passwordController.text;
+                        passwordController
+                            .text;
 
-                    if (value.isEmpty) {
+                    if (value
+                        .trim()
+                        .isEmpty) {
                       return;
                     }
 
@@ -1185,10 +1295,29 @@ class _SecurityScreenState
       },
     );
 
-    passwordController.dispose();
+    // ==========================================================
+    // IMPORTANT
+    //
+    // Do not dispose while the dialog widget tree is still in a
+    // dependency teardown cycle.
+    // ==========================================================
 
-    if (password == null ||
-        password.isEmpty) {
+    WidgetsBinding.instance
+        .addPostFrameCallback(
+          (_) {
+        passwordController
+            .dispose();
+      },
+    );
+
+    if (
+    password == null ||
+        password.trim().isEmpty
+    ) {
+      return;
+    }
+
+    if (!mounted) {
       return;
     }
 
@@ -1199,16 +1328,50 @@ class _SecurityScreenState
       return;
     }
 
+    if (!mounted) {
+      return;
+    }
+
     setState(() {
       loading = true;
     });
 
+    bool accountDeleted = false;
+
     try {
+      // ========================================================
+      // NEW METHOD NAME
+      // ========================================================
+
       await authService
-          .requestAccountDeletionAfterPassword(
+          .deleteAccountAfterPassword(
         currentPassword:
         password,
       );
+
+      accountDeleted = true;
+
+      // ========================================================
+      // CLEAR LOCAL TRUSTED DEVICE / QUICK LOGIN STATE
+      // ========================================================
+
+      try {
+        await rememberedAccountService
+            .forgetDevice();
+      } catch (_) {}
+
+      try {
+        await quickLockService
+            .clearForFullSignOut();
+      } catch (_) {}
+
+      if (!mounted) {
+        return;
+      }
+
+      // ========================================================
+      // NAVIGATE ONLY ONCE AFTER PERMANENT DELETION
+      // ========================================================
 
       if (!mounted) {
         return;
@@ -1218,23 +1381,26 @@ class _SecurityScreenState
           .pushAndRemoveUntil(
         MaterialPageRoute(
           builder: (_) =>
-          const AuthGate(),
+          const AccountDeletedSuccessScreen(),
         ),
             (route) => false,
       );
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
 
-      showMessage(
-        e.toString().replaceFirst(
-          'Exception: ',
-          '',
-        ),
-      );
+      return;
+
     } finally {
-      if (mounted) {
+      // ========================================================
+      // DO NOT setState after successful deletion/navigation.
+      //
+      // This helps avoid:
+      //
+      // _dependents.isEmpty assertion
+      // ========================================================
+
+      if (
+      mounted &&
+          !accountDeleted
+      ) {
         setState(() {
           loading = false;
         });
@@ -1242,18 +1408,35 @@ class _SecurityScreenState
     }
   }
 
-  Future<void>
-  _googleDeletionDialog() async {
+// ============================================================
+// GOOGLE ACCOUNT DELETION
+// ============================================================
+
+  Future<void> _googleDeletionDialog() async {
+    if (loading) {
+      return;
+    }
+
     final bool? reauth =
     await showDialog<bool>(
-      context:
-      context,
+      context: context,
 
-      builder:
-          (dialogContext) {
+      barrierDismissible: false,
+
+      builder: (
+          dialogContext,
+          ) {
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
+
+          shape:
+          RoundedRectangleBorder(
+            borderRadius:
+            BorderRadius.circular(
+              20,
+            ),
+          ),
 
           title:
           const Row(
@@ -1264,12 +1447,10 @@ class _SecurityScreenState
                 AppColors.primary,
               ),
               SizedBox(
-                width:
-                10,
+                width: 10,
               ),
               Expanded(
-                child:
-                Text(
+                child: Text(
                   'Verify Google Account',
                 ),
               ),
@@ -1278,12 +1459,14 @@ class _SecurityScreenState
 
           content:
           const Text(
-            'For security, Google Sign-In will open again to verify your identity before the deletion request is submitted.',
+            'For security, Google Sign-In will open again to verify '
+                'your identity before your SmartCity account is permanently deleted.',
           ),
 
           actions: [
             TextButton(
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                   false,
@@ -1298,12 +1481,14 @@ class _SecurityScreenState
 
             ElevatedButton(
               style:
-              ElevatedButton.styleFrom(
+              ElevatedButton
+                  .styleFrom(
                 backgroundColor:
                 AppColors.primaryDark,
               ),
 
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                   true,
@@ -1324,6 +1509,10 @@ class _SecurityScreenState
       return;
     }
 
+    if (!mounted) {
+      return;
+    }
+
     final bool? finalConfirmation =
     await _finalDeletionConfirmation();
 
@@ -1331,13 +1520,43 @@ class _SecurityScreenState
       return;
     }
 
+    if (!mounted) {
+      return;
+    }
+
     setState(() {
       loading = true;
     });
 
+    bool accountDeleted = false;
+
     try {
+      // ========================================================
+      // NEW METHOD NAME
+      // ========================================================
+
       await authService
-          .requestAccountDeletionAfterGoogle();
+          .deleteAccountAfterGoogle();
+
+      accountDeleted = true;
+
+      // ========================================================
+      // CLEAR REMEMBERED ACCOUNT / QUICK LOGIN
+      // ========================================================
+
+      try {
+        await rememberedAccountService
+            .forgetDevice();
+      } catch (_) {}
+
+      try {
+        await quickLockService
+            .clearForFullSignOut();
+      } catch (_) {}
+
+      if (!mounted) {
+        return;
+      }
 
       if (!mounted) {
         return;
@@ -1347,23 +1566,17 @@ class _SecurityScreenState
           .pushAndRemoveUntil(
         MaterialPageRoute(
           builder: (_) =>
-          const AuthGate(),
+          const AccountDeletedSuccessScreen(),
         ),
             (route) => false,
       );
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
 
-      showMessage(
-        e.toString().replaceFirst(
-          'Exception: ',
-          '',
-        ),
-      );
+      return;
     } finally {
-      if (mounted) {
+      if (
+      mounted &&
+          !accountDeleted
+      ) {
         setState(() {
           loading = false;
         });
@@ -1371,31 +1584,137 @@ class _SecurityScreenState
     }
   }
 
+// ============================================================
+// FINAL PERMANENT DELETION CONFIRMATION
+// ============================================================
+
   Future<bool?>
   _finalDeletionConfirmation() {
     return showDialog<bool>(
-      context:
-      context,
+      context: context,
 
-      builder:
-          (dialogContext) {
+      barrierDismissible: false,
+
+      builder: (
+          dialogContext,
+          ) {
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
 
+          shape:
+          RoundedRectangleBorder(
+            borderRadius:
+            BorderRadius.circular(
+              20,
+            ),
+          ),
+
           title:
-          const Text(
-            'Are you sure?',
+          const Row(
+            children: [
+              Icon(
+                Icons
+                    .delete_forever_rounded,
+
+                color:
+                AppColors.danger,
+              ),
+
+              SizedBox(
+                width: 10,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  'Permanently Delete Account?',
+                ),
+              ),
+            ],
           ),
 
           content:
-          const Text(
-            'This will submit an account deletion request and sign you out.',
+          Column(
+            mainAxisSize:
+            MainAxisSize.min,
+
+            crossAxisAlignment:
+            CrossAxisAlignment.start,
+
+            children: [
+              const Text(
+                'This action cannot be undone.',
+                style:
+                TextStyle(
+                  fontWeight:
+                  FontWeight.bold,
+
+                  color:
+                  AppColors.danger,
+                ),
+              ),
+
+              const SizedBox(
+                height: 12,
+              ),
+
+              const Text(
+                'Continuing will permanently delete your SmartCity '
+                    'account and remove your authentication account.',
+              ),
+
+              const SizedBox(
+                height: 15,
+              ),
+
+              Container(
+                width:
+                double.infinity,
+
+                padding:
+                const EdgeInsets.all(
+                  12,
+                ),
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  AppColors.danger
+                      .withOpacity(
+                    0.07,
+                  ),
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    12,
+                  ),
+                ),
+
+                child:
+                const Text(
+                  'You will no longer be able to sign in with this '
+                      'account after deletion is completed.',
+
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors
+                        .textSecondary,
+
+                    fontSize: 11,
+
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
           ),
 
           actions: [
             TextButton(
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                   false,
@@ -1408,23 +1727,31 @@ class _SecurityScreenState
               ),
             ),
 
-            ElevatedButton(
+            ElevatedButton.icon(
               style:
-              ElevatedButton.styleFrom(
+              ElevatedButton
+                  .styleFrom(
                 backgroundColor:
                 AppColors.danger,
               ),
 
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                   true,
                 );
               },
 
-              child:
+              icon:
+              const Icon(
+                Icons
+                    .delete_forever_outlined,
+              ),
+
+              label:
               const Text(
-                'Yes, Request Deletion',
+                'Yes, Delete Permanently',
               ),
             ),
           ],
