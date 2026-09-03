@@ -12,20 +12,24 @@ import 'create_report_location_screen.dart';
 // ================================================================
 // CREATE REPORT EVIDENCE SCREEN
 //
-// Existing UI design preserved.
+// Existing evidence design and functionality preserved.
 //
-// High-quality Smart Assist adds:
+// Smart Assist provides:
 //
-// 1. Automatic evidence analysis after compression.
-// 2. Report-context-aware Gemini analysis.
-// 3. Evidence quality assessment.
-// 4. Category comparison.
-// 5. Priority recommendation.
-// 6. Retake recommendation.
-// 7. Human review indication.
-// 8. Keep Mine / Apply AI choice.
-// 9. Analyze Again cooldown.
-// 10. Graceful failure without blocking reporting.
+// 1. Evidence compression.
+// 2. Automatic image AI analysis.
+// 3. Report-context-aware AI analysis.
+// 4. Report-quality assessment.
+// 5. Garbage / unusable text protection.
+// 6. Category comparison.
+// 7. Priority recommendation.
+// 8. Evidence-quality assessment.
+// 9. Retake recommendation.
+// 10. Human-review recommendation.
+// 11. Keep Mine / Apply AI.
+// 12. Edit Report.
+// 13. Retry / cooldown.
+// 14. Original-input audit preservation.
 // ================================================================
 
 class CreateReportEvidenceScreen extends StatefulWidget {
@@ -82,29 +86,28 @@ class _CreateReportEvidenceScreenState
 
   // ============================================================
   // AI REQUEST COOLDOWN
-  //
-  // Prevents accidental repeated Gemini calls.
   // ============================================================
 
   DateTime? lastAiAnalysisAt;
 
   static const Duration aiCooldown =
   Duration(
-    seconds:
-    5,
+    seconds: 5,
   );
 
   // ============================================================
   // EFFECTIVE REPORT VALUES
   //
-  // Begin with user's manually entered values.
+  // Start with user's values.
   //
-  // Only change when user chooses Apply AI.
+  // These only change when Apply AI is selected.
   // ============================================================
 
   late String selectedCategory;
 
   late String selectedPriority;
+
+  late String selectedTitle;
 
   late String selectedDescription;
 
@@ -141,8 +144,219 @@ class _CreateReportEvidenceScreenState
     selectedPriority =
         widget.priority;
 
+    selectedTitle =
+        widget.title;
+
     selectedDescription =
         widget.description;
+  }
+
+  // ============================================================
+  // LOCAL REPORT VALIDATION
+  //
+  // Local validation is used for obvious bad input.
+  //
+  // Examples:
+  //
+  // xxxxx
+  // @@@@@
+  // 123456
+  // asdfghjkl
+  // @@@WWWWijvkjd;clnodflwepwoefkndlv
+  //
+  // More difficult semantic cases are evaluated by Gemini.
+  // ============================================================
+
+  String? validateReportLocally({
+    required String title,
+    required String description,
+  }) {
+    final String? titleProblem =
+    validateMeaningfulText(
+      title,
+      fieldName: 'title',
+      minimumLength: 4,
+    );
+
+    if (titleProblem != null) {
+      return titleProblem;
+    }
+
+    final String? descriptionProblem =
+    validateMeaningfulText(
+      description,
+      fieldName: 'description',
+      minimumLength: 8,
+    );
+
+    if (descriptionProblem != null) {
+      return descriptionProblem;
+    }
+
+    return null;
+  }
+
+  // ============================================================
+  // MEANINGFUL TEXT VALIDATOR
+  // ============================================================
+
+  String? validateMeaningfulText(
+      String value, {
+        required String fieldName,
+        required int minimumLength,
+      }) {
+    final String text =
+    value.trim();
+
+    // ==========================================================
+    // EMPTY
+    // ==========================================================
+
+    if (text.isEmpty) {
+      return 'Please enter a $fieldName.';
+    }
+
+    // ==========================================================
+    // TOO SHORT
+    // ==========================================================
+
+    if (text.length <
+        minimumLength) {
+      return 'The $fieldName is too short to be useful.';
+    }
+
+    // ==========================================================
+    // LETTER CHECK
+    //
+    // Malay / English use Latin characters.
+    // ==========================================================
+
+    final int letterCount =
+        RegExp(
+          r'[A-Za-zÀ-ÖØ-öø-ÿ]',
+        ).allMatches(
+          text,
+        ).length;
+
+    if (letterCount == 0) {
+      return 'The $fieldName must contain meaningful words.';
+    }
+
+    // ==========================================================
+    // REPEATED CHARACTERS
+    //
+    // Examples:
+    //
+    // xxxxx
+    // WWWWW
+    // !!!!!!
+    // 111111
+    // ==========================================================
+
+    if (
+    RegExp(
+      r'(.)\1{3,}',
+      caseSensitive: false,
+    ).hasMatch(
+      text,
+    )
+    ) {
+      return 'The $fieldName contains too many repeated '
+          'characters and does not appear to be useful.';
+    }
+
+    // ==========================================================
+    // EXCESSIVE SYMBOLS
+    //
+    // Example:
+    //
+    // @@@###!!!/////
+    // ==========================================================
+
+    final int symbolCount =
+        RegExp(
+          r'[^A-Za-zÀ-ÖØ-öø-ÿ0-9\s]',
+        ).allMatches(
+          text,
+        ).length;
+
+    final double symbolRatio =
+        symbolCount /
+            text.length;
+
+    if (symbolRatio >
+        0.30) {
+      return 'The $fieldName contains too many symbols.';
+    }
+
+    // ==========================================================
+    // LETTER RATIO
+    // ==========================================================
+
+    final double letterRatio =
+        letterCount /
+            text.length;
+
+    if (letterRatio <
+        0.45) {
+      return 'The $fieldName does not contain enough '
+          'meaningful text.';
+    }
+
+    // ==========================================================
+    // LETTERS ONLY
+    // ==========================================================
+
+    final String lettersOnly =
+    text.replaceAll(
+      RegExp(
+        r'[^A-Za-zÀ-ÖØ-öø-ÿ]',
+      ),
+      '',
+    );
+
+    // ==========================================================
+    // SUSPICIOUS LONG TOKEN
+    //
+    // Example:
+    //
+    // ijvkjdclnodflwepwoefkndlv
+    //
+    // Legitimate words such as "streetlight" are not affected
+    // because this applies only to unusually long tokens.
+    // ==========================================================
+
+    if (
+    lettersOnly.length >= 18 &&
+        !text.contains(' ')
+    ) {
+      return 'The $fieldName does not appear to contain '
+          'a clear phrase or sentence.';
+    }
+
+    // ==========================================================
+    // LONG CONSONANT SEQUENCE
+    //
+    // Helps detect keyboard/random text.
+    //
+    // Example:
+    //
+    // xdfghjklmnbvc
+    // ==========================================================
+
+    if (
+    RegExp(
+      r'[bcdfghjklmnpqrstvwxyz]{7,}',
+      caseSensitive: false,
+    ).hasMatch(
+      lettersOnly,
+    )
+    ) {
+      return 'The $fieldName does not appear to contain '
+          'understandable words.';
+    }
+
+    return null;
   }
 
   // ============================================================
@@ -187,7 +401,7 @@ class _CreateReportEvidenceScreenState
     }
 
     // ==========================================================
-    // FILE CHECK
+    // IMAGE EXISTS?
     // ==========================================================
 
     if (!await imageFile.exists()) {
@@ -197,10 +411,6 @@ class _CreateReportEvidenceScreenState
 
       return;
     }
-
-    // ==========================================================
-    // START
-    // ==========================================================
 
     lastAiAnalysisAt =
         DateTime.now();
@@ -222,6 +432,8 @@ class _CreateReportEvidenceScreenState
     try {
       // ========================================================
       // CONTEXT-AWARE SMART ASSIST
+      //
+      // Uses current effective values.
       // ========================================================
 
       final ReportImageAiAnalysis result =
@@ -231,16 +443,16 @@ class _CreateReportEvidenceScreenState
         imageFile,
 
         userCategory:
-        widget.category,
+        selectedCategory,
 
         userPriority:
-        widget.priority,
+        selectedPriority,
 
         userTitle:
-        widget.title,
+        selectedTitle,
 
         userDescription:
-        widget.description,
+        selectedDescription,
       );
 
       if (!mounted) {
@@ -261,6 +473,9 @@ class _CreateReportEvidenceScreenState
 
               originalUserPriority:
               widget.priority,
+
+              originalUserTitle:
+              widget.title,
 
               originalUserDescription:
               widget.description,
@@ -284,13 +499,9 @@ class _CreateReportEvidenceScreenState
             : message;
       });
 
-      // ========================================================
-      // AI FAILURE NEVER BLOCKS REPORTING
-      // ========================================================
-
       showMessage(
         'AI analysis could not be completed. '
-            'You can still continue manually.',
+            'You can still review your report manually.',
       );
     } finally {
       if (mounted) {
@@ -314,6 +525,9 @@ class _CreateReportEvidenceScreenState
       selectedPriority =
           widget.priority;
 
+      selectedTitle =
+          widget.title;
+
       selectedDescription =
           widget.description;
 
@@ -335,6 +549,9 @@ class _CreateReportEvidenceScreenState
               originalUserPriority:
               widget.priority,
 
+              originalUserTitle:
+              widget.title,
+
               originalUserDescription:
               widget.description,
             );
@@ -342,7 +559,7 @@ class _CreateReportEvidenceScreenState
     });
 
     showMessage(
-      'Your original report information will be kept.',
+      'Your original report information is selected.',
     );
   }
 
@@ -372,45 +589,79 @@ class _CreateReportEvidenceScreenState
       // CATEGORY
       // ========================================================
 
-      if (result.category != null &&
+      if (
+      result.category != null &&
           result.category!
               .trim()
-              .isNotEmpty) {
+              .isNotEmpty
+      ) {
         selectedCategory =
-        result.category!;
+            result.category!
+                .trim();
       }
 
       // ========================================================
       // PRIORITY
-      //
-      // Prefer recommendedPriority if supplied.
-      // Otherwise use severity.
       // ========================================================
 
-      final String? recommended =
+      final String? recommendedPriority =
           result.recommendedPriority ??
               result.severity;
 
-      if (recommended != null &&
-          recommended
+      if (
+      recommendedPriority != null &&
+          recommendedPriority
               .trim()
-              .isNotEmpty) {
+              .isNotEmpty
+      ) {
         selectedPriority =
-            recommended;
+            recommendedPriority
+                .trim();
+      }
+
+      // ========================================================
+      // TITLE
+      //
+      // Prefer report-quality suggested title.
+      // ========================================================
+
+      if (
+      result.suggestedTitle != null &&
+          result.suggestedTitle!
+              .trim()
+              .isNotEmpty
+      ) {
+        selectedTitle =
+            result.suggestedTitle!
+                .trim();
       }
 
       // ========================================================
       // DESCRIPTION
+      //
+      // Prefer report-quality suggested description.
+      //
+      // Fall back to visible-evidence AI description.
       // ========================================================
 
-      if (result.description != null &&
-          result.description!
+      final String? suggestedDescription =
+          result.suggestedDescription ??
+              result.description;
+
+      if (
+      suggestedDescription != null &&
+          suggestedDescription
               .trim()
-              .isNotEmpty) {
+              .isNotEmpty
+      ) {
         selectedDescription =
-            result.description!
+            suggestedDescription
                 .trim();
       }
+
+      // ========================================================
+      // AUDIT DECISION
+      // ========================================================
 
       aiSuggestionsApplied =
       true;
@@ -429,6 +680,9 @@ class _CreateReportEvidenceScreenState
             originalUserPriority:
             widget.priority,
 
+            originalUserTitle:
+            widget.title,
+
             originalUserDescription:
             widget.description,
           );
@@ -436,6 +690,23 @@ class _CreateReportEvidenceScreenState
 
     showMessage(
       'Smart Assist suggestions applied.',
+    );
+  }
+
+  // ============================================================
+  // EDIT ORIGINAL REPORT
+  // ============================================================
+
+  void editReport() {
+    if (
+    loadingImage ||
+        analyzingEvidence
+    ) {
+      return;
+    }
+
+    Navigator.pop(
+      context,
     );
   }
 
@@ -462,8 +733,10 @@ class _CreateReportEvidenceScreenState
   // ============================================================
 
   Future<void> takePhoto() async {
-    if (loadingImage ||
-        analyzingEvidence) {
+    if (
+    loadingImage ||
+        analyzingEvidence
+    ) {
       return;
     }
 
@@ -520,8 +793,10 @@ class _CreateReportEvidenceScreenState
   // ============================================================
 
   Future<void> pickGalleryImages() async {
-    if (loadingImage ||
-        analyzingEvidence) {
+    if (
+    loadingImage ||
+        analyzingEvidence
+    ) {
       return;
     }
 
@@ -572,10 +847,10 @@ class _CreateReportEvidenceScreenState
       }
 
       // ========================================================
-      // PRIMARY IMAGE
+      // PRIMARY EVIDENCE
       //
-      // Analyze only first image automatically.
-      // Other images remain additional evidence.
+      // First image is analyzed automatically.
+      // Additional images remain supporting evidence.
       // ========================================================
 
       if (firstPreparedFile != null) {
@@ -659,9 +934,10 @@ class _CreateReportEvidenceScreenState
   Future<void> removeImage(
       int index,
       ) async {
-    if (index < 0 ||
-        index >=
-            evidenceImages.length) {
+    if (
+    index < 0 ||
+        index >= evidenceImages.length
+    ) {
       return;
     }
 
@@ -677,9 +953,10 @@ class _CreateReportEvidenceScreenState
       );
 
       totalCompressedBytes =
-          (totalCompressedBytes -
-              currentBytes)
-              .clamp(
+          (
+              totalCompressedBytes -
+                  currentBytes
+          ).clamp(
             0,
             1 << 62,
           );
@@ -703,6 +980,9 @@ class _CreateReportEvidenceScreenState
         selectedPriority =
             widget.priority;
 
+        selectedTitle =
+            widget.title;
+
         selectedDescription =
             widget.description;
       }
@@ -716,9 +996,15 @@ class _CreateReportEvidenceScreenState
 
   // ============================================================
   // CONTINUE TO LOCATION
+  //
+  // High-quality validation gate.
   // ============================================================
 
-  void continueToLocation() {
+  Future<void> continueToLocation() async {
+    // ==========================================================
+    // EVIDENCE
+    // ==========================================================
+
     if (evidenceImages.isEmpty) {
       showMessage(
         'Please add at least one evidence image.',
@@ -743,6 +1029,64 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
+    // ==========================================================
+    // LOCAL HARD VALIDATION
+    //
+    // Always validate the values that would actually be
+    // submitted.
+    // ==========================================================
+
+    final String? localProblem =
+    validateReportLocally(
+      title:
+      selectedTitle,
+
+      description:
+      selectedDescription,
+    );
+
+    if (localProblem != null) {
+      await showInvalidReportDialog(
+        localProblem,
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // AI SEMANTIC QUALITY CHECK
+    //
+    // If Gemini judged the original report insufficient,
+    // do not allow a poor original report to bypass the check
+    // through Keep Mine.
+    //
+    // The user must either:
+    //
+    // - edit the report manually
+    // - apply AI improvement
+    // ==========================================================
+
+    final ReportImageAiAnalysis? result =
+        aiAnalysis;
+
+    if (
+    result != null &&
+        result.reportSufficient == false &&
+        !aiSuggestionsApplied
+    ) {
+      await showPoorReportDialog();
+
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    // ==========================================================
+    // LOCATION
+    // ==========================================================
+
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -755,7 +1099,7 @@ class _CreateReportEvidenceScreenState
               selectedPriority,
 
               title:
-              widget.title,
+              selectedTitle,
 
               description:
               selectedDescription,
@@ -763,17 +1107,255 @@ class _CreateReportEvidenceScreenState
               evidenceImages:
               evidenceImages,
 
-              // ====================================================
-              // IMPORTANT
-              //
-              // If CreateReportLocationScreen does not yet define
-              // this parameter, add it in the next step.
-              // ====================================================
-
               aiAnalysis:
               aiAnalysis,
             ),
       ),
+    );
+  }
+
+  // ============================================================
+  // INVALID REPORT DIALOG
+  // ============================================================
+
+  Future<void> showInvalidReportDialog(
+      String reason,
+      ) async {
+    if (!mounted) {
+      return;
+    }
+
+    await showDialog<void>(
+      context:
+      context,
+
+      builder:
+          (dialogContext) {
+        return AlertDialog(
+          title:
+          const Row(
+            children: [
+              Icon(
+                Icons.warning_amber_rounded,
+                color:
+                Colors.orange,
+              ),
+
+              SizedBox(
+                width: 10,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  'Report Needs Improvement',
+                ),
+              ),
+            ],
+          ),
+
+          content:
+          Text(
+            '$reason\n\n'
+                'Please provide useful information so the '
+                'responding worker can understand the issue.',
+          ),
+
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                );
+              },
+
+              child:
+              const Text(
+                'Cancel',
+              ),
+            ),
+
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                );
+
+                editReport();
+              },
+
+              icon:
+              const Icon(
+                Icons.edit_outlined,
+              ),
+
+              label:
+              const Text(
+                'Edit Report',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // AI POOR REPORT DIALOG
+  // ============================================================
+
+  Future<void> showPoorReportDialog() async {
+    final ReportImageAiAnalysis? result =
+        aiAnalysis;
+
+    if (
+    !mounted ||
+        result == null
+    ) {
+      return;
+    }
+
+    await showDialog<void>(
+      context:
+      context,
+
+      builder:
+          (dialogContext) {
+        return AlertDialog(
+          title:
+          const Row(
+            children: [
+              Icon(
+                Icons.warning_amber_rounded,
+                color:
+                Colors.orange,
+              ),
+
+              SizedBox(
+                width: 10,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  'Report Information Is Unclear',
+                ),
+              ),
+            ],
+          ),
+
+          content:
+          Column(
+            mainAxisSize:
+            MainAxisSize.min,
+
+            crossAxisAlignment:
+            CrossAxisAlignment.start,
+
+            children: [
+              Text(
+                result.reportIssue ??
+                    'Smart Assist found that the report '
+                        'does not contain enough meaningful '
+                        'information.',
+              ),
+
+              if (
+              result.missingInformation
+                  .isNotEmpty
+              ) ...[
+                const SizedBox(
+                  height: 12,
+                ),
+
+                const Text(
+                  'Missing or unclear:',
+                  style:
+                  TextStyle(
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+
+                const SizedBox(
+                  height: 4,
+                ),
+
+                ...result
+                    .missingInformation
+                    .map(
+                      (item) =>
+                      Padding(
+                        padding:
+                        const EdgeInsets.only(
+                          bottom: 3,
+                        ),
+
+                        child:
+                        Text(
+                          '• $item',
+                        ),
+                      ),
+                ),
+              ],
+
+              if (
+              result.hasSuggestedReportText
+              ) ...[
+                const SizedBox(
+                  height: 14,
+                ),
+
+                const Text(
+                  'You can edit the report manually or '
+                      'apply the Smart Assist suggestion.',
+                ),
+              ],
+            ],
+          ),
+
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                );
+
+                editReport();
+              },
+
+              child:
+              const Text(
+                'Edit Report',
+              ),
+            ),
+
+            if (
+            result.hasSuggestedReportText &&
+                result.issueDetected == true
+            )
+              ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.pop(
+                    dialogContext,
+                  );
+
+                  applyAiSuggestions();
+                },
+
+                icon:
+                const Icon(
+                  Icons.auto_awesome,
+                ),
+
+                label:
+                const Text(
+                  'Apply AI',
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -877,8 +1459,7 @@ class _CreateReportEvidenceScreenState
                         ),
 
                         const SizedBox(
-                          width:
-                          14,
+                          width: 14,
                         ),
 
                         const Column(
@@ -888,12 +1469,9 @@ class _CreateReportEvidenceScreenState
                           children: [
                             Text(
                               'Report Issue',
-
                               style:
                               TextStyle(
-                                fontSize:
-                                22,
-
+                                fontSize: 22,
                                 fontWeight:
                                 FontWeight.bold,
                               ),
@@ -901,15 +1479,11 @@ class _CreateReportEvidenceScreenState
 
                             Text(
                               'Help improve your community',
-
                               style:
                               TextStyle(
                                 color:
-                                AppColors
-                                    .textSecondary,
-
-                                fontSize:
-                                12,
+                                AppColors.textSecondary,
+                                fontSize: 12,
                               ),
                             ),
                           ],
@@ -918,19 +1492,13 @@ class _CreateReportEvidenceScreenState
                     ),
 
                     const SizedBox(
-                      height:
-                      18,
+                      height: 18,
                     ),
-
-                    // =================================================
-                    // EXISTING PROGRESS
-                    // =================================================
 
                     const _EvidenceProgress(),
 
                     const SizedBox(
-                      height:
-                      22,
+                      height: 22,
                     ),
 
                     // =================================================
@@ -940,8 +1508,7 @@ class _CreateReportEvidenceScreenState
                     _buildSmartAssistCard(),
 
                     const SizedBox(
-                      height:
-                      20,
+                      height: 20,
                     ),
 
                     // =================================================
@@ -986,17 +1553,13 @@ class _CreateReportEvidenceScreenState
                         children: [
                           const Icon(
                             Icons.compress_outlined,
-
                             color:
                             AppColors.primary,
-
-                            size:
-                            25,
+                            size: 25,
                           ),
 
                           const SizedBox(
-                            width:
-                            12,
+                            width: 12,
                           ),
 
                           Expanded(
@@ -1008,20 +1571,17 @@ class _CreateReportEvidenceScreenState
                               children: [
                                 const Text(
                                   'Image Optimization',
-
                                   style:
                                   TextStyle(
                                     color:
                                     AppColors.primary,
-
                                     fontWeight:
                                     FontWeight.bold,
                                   ),
                                 ),
 
                                 const SizedBox(
-                                  height:
-                                  4,
+                                  height: 4,
                                 ),
 
                                 Text(
@@ -1029,20 +1589,15 @@ class _CreateReportEvidenceScreenState
                                       ? compressionMessage
                                       : evidenceImages.isEmpty
                                       ? 'Evidence images are compressed before upload to reduce file size.'
-                                      : '$compressionMessage\nPrepared size: '
+                                      : '$compressionMessage\n'
+                                      'Prepared size: '
                                       '${compressionService.formatBytes(totalCompressedBytes)}',
-
                                   style:
                                   const TextStyle(
                                     color:
-                                    AppColors
-                                        .textSecondary,
-
-                                    fontSize:
-                                    10,
-
-                                    height:
-                                    1.4,
+                                    AppColors.textSecondary,
+                                    fontSize: 10,
+                                    height: 1.4,
                                   ),
                                 ),
                               ],
@@ -1053,8 +1608,7 @@ class _CreateReportEvidenceScreenState
                     ),
 
                     const SizedBox(
-                      height:
-                      20,
+                      height: 20,
                     ),
 
                     // =================================================
@@ -1065,8 +1619,7 @@ class _CreateReportEvidenceScreenState
                       width:
                       double.infinity,
 
-                      height:
-                      190,
+                      height: 190,
 
                       decoration:
                       BoxDecoration(
@@ -1082,9 +1635,7 @@ class _CreateReportEvidenceScreenState
                         Border.all(
                           color:
                           AppColors.primaryDark,
-
-                          width:
-                          1.5,
+                          width: 1.5,
                         ),
                       ),
 
@@ -1096,47 +1647,36 @@ class _CreateReportEvidenceScreenState
                         children: [
                           Icon(
                             Icons.cloud_upload_outlined,
-
-                            size:
-                            48,
-
+                            size: 48,
                             color:
                             AppColors.primary,
                           ),
 
                           SizedBox(
-                            height:
-                            10,
+                            height: 10,
                           ),
 
                           Text(
                             'Upload Evidence',
-
                             style:
                             TextStyle(
-                              fontSize:
-                              16,
-
+                              fontSize: 16,
                               fontWeight:
                               FontWeight.bold,
                             ),
                           ),
 
                           SizedBox(
-                            height:
-                            6,
+                            height: 6,
                           ),
 
                           Text(
                             'Take a photo or choose from gallery',
-
                             style:
                             TextStyle(
                               color:
                               AppColors.textSecondary,
-
-                              fontSize:
-                              11,
+                              fontSize: 11,
                             ),
                           ),
                         ],
@@ -1144,8 +1684,7 @@ class _CreateReportEvidenceScreenState
                     ),
 
                     const SizedBox(
-                      height:
-                      16,
+                      height: 16,
                     ),
 
                     // =================================================
@@ -1176,8 +1715,7 @@ class _CreateReportEvidenceScreenState
                         ),
 
                         const SizedBox(
-                          width:
-                          10,
+                          width: 10,
                         ),
 
                         Expanded(
@@ -1204,8 +1742,7 @@ class _CreateReportEvidenceScreenState
                     ),
 
                     const SizedBox(
-                      height:
-                      20,
+                      height: 20,
                     ),
 
                     // =================================================
@@ -1225,14 +1762,9 @@ class _CreateReportEvidenceScreenState
 
                         gridDelegate:
                         const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount:
-                          3,
-
-                          crossAxisSpacing:
-                          9,
-
-                          mainAxisSpacing:
-                          9,
+                          crossAxisCount: 3,
+                          crossAxisSpacing: 9,
+                          mainAxisSpacing: 9,
                         ),
 
                         itemBuilder:
@@ -1253,7 +1785,6 @@ class _CreateReportEvidenceScreenState
                                   child:
                                   Image.file(
                                     evidenceImages[index],
-
                                     fit:
                                     BoxFit.cover,
                                   ),
@@ -1261,11 +1792,8 @@ class _CreateReportEvidenceScreenState
                               ),
 
                               Positioned(
-                                right:
-                                4,
-
-                                top:
-                                4,
+                                right: 4,
+                                top: 4,
 
                                 child:
                                 GestureDetector(
@@ -1290,7 +1818,6 @@ class _CreateReportEvidenceScreenState
                                     const BoxDecoration(
                                       color:
                                       Colors.black54,
-
                                       shape:
                                       BoxShape.circle,
                                     ),
@@ -1298,9 +1825,7 @@ class _CreateReportEvidenceScreenState
                                     child:
                                     const Icon(
                                       Icons.close,
-
-                                      size:
-                                      15,
+                                      size: 15,
                                     ),
                                   ),
                                 ),
@@ -1345,8 +1870,7 @@ class _CreateReportEvidenceScreenState
                   ),
 
                   const SizedBox(
-                    width:
-                    10,
+                    width: 10,
                   ),
 
                   Expanded(
@@ -1433,17 +1957,14 @@ class _CreateReportEvidenceScreenState
             children: [
               const Text(
                 '✨',
-
                 style:
                 TextStyle(
-                  fontSize:
-                  25,
+                  fontSize: 25,
                 ),
               ),
 
               const SizedBox(
-                width:
-                12,
+                width: 12,
               ),
 
               Expanded(
@@ -1455,38 +1976,29 @@ class _CreateReportEvidenceScreenState
                   children: [
                     const Text(
                       'Smart Assist Available',
-
                       style:
                       TextStyle(
                         color:
                         Color(
                           0xFF8F80FF,
                         ),
-
                         fontWeight:
                         FontWeight.bold,
                       ),
                     ),
 
                     const SizedBox(
-                      height:
-                      3,
+                      height: 3,
                     ),
 
                     Text(
                       _smartAssistMessage(),
-
                       style:
                       const TextStyle(
                         color:
-                        AppColors
-                            .textSecondary,
-
-                        fontSize:
-                        11,
-
-                        height:
-                        1.4,
+                        AppColors.textSecondary,
+                        fontSize: 11,
+                        height: 1.4,
                       ),
                     ),
                   ],
@@ -1495,17 +2007,12 @@ class _CreateReportEvidenceScreenState
 
               if (analyzingEvidence)
                 const SizedBox(
-                  width:
-                  20,
-
-                  height:
-                  20,
+                  width: 20,
+                  height: 20,
 
                   child:
                   CircularProgressIndicator(
-                    strokeWidth:
-                    2,
-
+                    strokeWidth: 2,
                     color:
                     Color(
                       0xFF8F80FF,
@@ -1521,8 +2028,7 @@ class _CreateReportEvidenceScreenState
 
           if (aiError != null) ...[
             const SizedBox(
-              height:
-              14,
+              height: 14,
             ),
 
             const Divider(
@@ -1531,29 +2037,22 @@ class _CreateReportEvidenceScreenState
             ),
 
             const SizedBox(
-              height:
-              8,
+              height: 8,
             ),
 
             Text(
               aiError!,
-
               style:
               const TextStyle(
                 color:
                 Colors.amber,
-
-                fontSize:
-                11,
-
-                height:
-                1.4,
+                fontSize: 11,
+                height: 1.4,
               ),
             ),
 
             const SizedBox(
-              height:
-              10,
+              height: 10,
             ),
 
             OutlinedButton.icon(
@@ -1566,9 +2065,7 @@ class _CreateReportEvidenceScreenState
               icon:
               const Icon(
                 Icons.refresh,
-
-                size:
-                17,
+                size: 17,
               ),
 
               label:
@@ -1584,8 +2081,7 @@ class _CreateReportEvidenceScreenState
 
           if (aiAnalysis != null) ...[
             const SizedBox(
-              height:
-              14,
+              height: 14,
             ),
 
             const Divider(
@@ -1594,13 +2090,42 @@ class _CreateReportEvidenceScreenState
             ),
 
             const SizedBox(
-              height:
-              8,
+              height: 8,
             ),
 
             // ==================================================
-            // CORE RESULT
+            // REPORT QUALITY
             // ==================================================
+
+            _buildReportQualitySection(
+              aiAnalysis!,
+            ),
+
+            const SizedBox(
+              height: 12,
+            ),
+
+            // ==================================================
+            // CORE IMAGE RESULT
+            // ==================================================
+
+            const Text(
+              'Evidence Analysis',
+              style:
+              TextStyle(
+                color:
+                Color(
+                  0xFF8F80FF,
+                ),
+                fontSize: 11,
+                fontWeight:
+                FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
 
             _AiResultRow(
               label:
@@ -1610,7 +2135,8 @@ class _CreateReportEvidenceScreenState
               aiAnalysis!
                   .issueDetected ==
                   true
-                  ? aiAnalysis!.issueLabel
+                  ? aiAnalysis!
+                  .issueLabel
                   : 'No clear issue detected',
             ),
 
@@ -1634,42 +2160,35 @@ class _CreateReportEvidenceScreenState
                   'Low',
             ),
 
-            // ==================================================
-            // USER VS AI
-            // ==================================================
-
             const SizedBox(
-              height:
-              4,
+              height: 4,
             ),
+
+            // ==================================================
+            // REPORT COMPARISON
+            // ==================================================
 
             const Text(
               'Report Comparison',
-
               style:
               TextStyle(
                 color:
                 Color(
                   0xFF8F80FF,
                 ),
-
-                fontSize:
-                11,
-
+                fontSize: 11,
                 fontWeight:
                 FontWeight.bold,
               ),
             ),
 
             const SizedBox(
-              height:
-              8,
+              height: 8,
             ),
 
             _AiResultRow(
               label:
               'Your Category',
-
               value:
               widget.category,
             ),
@@ -1677,7 +2196,6 @@ class _CreateReportEvidenceScreenState
             _AiResultRow(
               label:
               'AI Category',
-
               value:
               aiAnalysis!
                   .category ??
@@ -1699,7 +2217,6 @@ class _CreateReportEvidenceScreenState
             _AiResultRow(
               label:
               'Your Priority',
-
               value:
               widget.priority,
             ),
@@ -1717,20 +2234,21 @@ class _CreateReportEvidenceScreenState
             ),
 
             // ==================================================
-            // PRIORITY CHANGE NOTICE
+            // PRIORITY WARNING
             // ==================================================
 
-            if (aiAnalysis!
+            if (
+            aiAnalysis!
                 .priorityChangeRecommended ==
-                true)
+                true
+            )
               Container(
                 width:
                 double.infinity,
 
                 margin:
                 const EdgeInsets.only(
-                  top:
-                  8,
+                  top: 8,
                 ),
 
                 padding:
@@ -1771,12 +2289,8 @@ class _CreateReportEvidenceScreenState
                   const TextStyle(
                     color:
                     Colors.amber,
-
-                    fontSize:
-                    10,
-
-                    height:
-                    1.4,
+                    fontSize: 10,
+                    height: 1.4,
                   ),
                 ),
               ),
@@ -1785,16 +2299,17 @@ class _CreateReportEvidenceScreenState
             // HUMAN REVIEW
             // ==================================================
 
-            if (aiAnalysis!
-                .needsHumanReview)
+            if (
+            aiAnalysis!
+                .needsHumanReview
+            )
               Container(
                 width:
                 double.infinity,
 
                 margin:
                 const EdgeInsets.only(
-                  top:
-                  10,
+                  top: 10,
                 ),
 
                 padding:
@@ -1829,38 +2344,35 @@ class _CreateReportEvidenceScreenState
 
                 child:
                 const Text(
-                  'ℹ Human review recommended because the AI assessment may require additional verification.',
-
+                  'ℹ Human review recommended because the AI '
+                      'assessment may require additional verification.',
                   style:
                   TextStyle(
                     color:
                     Color(
                       0xFFC7C1FF,
                     ),
-
-                    fontSize:
-                    10,
-
-                    height:
-                    1.4,
+                    fontSize: 10,
+                    height: 1.4,
                   ),
                 ),
               ),
 
             // ==================================================
-            // RETAKE RECOMMENDATION
+            // RETAKE
             // ==================================================
 
-            if (aiAnalysis!
-                .retakeRecommended)
+            if (
+            aiAnalysis!
+                .retakeRecommended
+            )
               Container(
                 width:
                 double.infinity,
 
                 margin:
                 const EdgeInsets.only(
-                  top:
-                  10,
+                  top: 10,
                 ),
 
                 padding:
@@ -1899,45 +2411,36 @@ class _CreateReportEvidenceScreenState
                   children: [
                     const Text(
                       'Better Evidence Recommended',
-
                       style:
                       TextStyle(
                         color:
                         Colors.orange,
-
-                        fontSize:
-                        11,
-
+                        fontSize: 11,
                         fontWeight:
                         FontWeight.bold,
                       ),
                     ),
 
-                    if (aiAnalysis!
+                    if (
+                    aiAnalysis!
                         .retakeReason
                         ?.trim()
                         .isNotEmpty ==
-                        true) ...[
+                        true
+                    ) ...[
                       const SizedBox(
-                        height:
-                        4,
+                        height: 4,
                       ),
 
                       Text(
                         aiAnalysis!
                             .retakeReason!,
-
                         style:
                         const TextStyle(
                           color:
-                          AppColors
-                              .textSecondary,
-
-                          fontSize:
-                          10,
-
-                          height:
-                          1.4,
+                          AppColors.textSecondary,
+                          fontSize: 10,
+                          height: 1.4,
                         ),
                       ),
                     ],
@@ -1946,52 +2449,43 @@ class _CreateReportEvidenceScreenState
               ),
 
             // ==================================================
-            // DESCRIPTION
+            // EVIDENCE DESCRIPTION
             // ==================================================
 
-            if (aiAnalysis!
+            if (
+            aiAnalysis!
                 .description
                 ?.trim()
                 .isNotEmpty ==
-                true) ...[
+                true
+            ) ...[
               const SizedBox(
-                height:
-                12,
+                height: 12,
               ),
 
               const Text(
-                'Suggested Description',
-
+                'Evidence Description',
                 style:
                 TextStyle(
                   color:
-                  AppColors
-                      .textSecondary,
-
-                  fontSize:
-                  10,
-
+                  AppColors.textSecondary,
+                  fontSize: 10,
                   fontWeight:
                   FontWeight.w600,
                 ),
               ),
 
               const SizedBox(
-                height:
-                4,
+                height: 4,
               ),
 
               Text(
                 aiAnalysis!
                     .description!,
-
                 style:
                 const TextStyle(
-                  fontSize:
-                  11,
-
-                  height:
-                  1.4,
+                  fontSize: 11,
+                  height: 1.4,
                 ),
               ),
             ],
@@ -2000,58 +2494,48 @@ class _CreateReportEvidenceScreenState
             // SAFETY
             // ==================================================
 
-            if (aiAnalysis!
+            if (
+            aiAnalysis!
                 .safetyConcern
                 ?.trim()
                 .isNotEmpty ==
-                true) ...[
+                true
+            ) ...[
               const SizedBox(
-                height:
-                10,
+                height: 10,
               ),
 
               Text(
                 '⚠ ${aiAnalysis!.safetyConcern!}',
-
                 style:
                 const TextStyle(
                   color:
                   Colors.amber,
-
-                  fontSize:
-                  10,
-
-                  height:
-                  1.4,
+                  fontSize: 10,
+                  height: 1.4,
                 ),
               ),
             ],
 
             const SizedBox(
-              height:
-              10,
+              height: 10,
             ),
 
             const Text(
               'AI-generated suggestion. '
                   'You remain responsible for the final report information.',
-
               style:
               TextStyle(
                 color:
                 AppColors.textSecondary,
-
-                fontSize:
-                9,
-
+                fontSize: 9,
                 fontStyle:
                 FontStyle.italic,
               ),
             ),
 
             const SizedBox(
-              height:
-              12,
+              height: 12,
             ),
 
             // ==================================================
@@ -2074,8 +2558,7 @@ class _CreateReportEvidenceScreenState
                 ),
 
                 const SizedBox(
-                  width:
-                  8,
+                  width: 8,
                 ),
 
                 Expanded(
@@ -2091,9 +2574,7 @@ class _CreateReportEvidenceScreenState
                     icon:
                     const Icon(
                       Icons.auto_awesome,
-
-                      size:
-                      17,
+                      size: 17,
                     ),
 
                     label:
@@ -2105,10 +2586,48 @@ class _CreateReportEvidenceScreenState
               ],
             ),
 
+            // ==================================================
+            // EDIT REPORT
+            // ==================================================
+
+            if (
+            aiAnalysis!
+                .shouldSuggestReportEdit
+            ) ...[
+              const SizedBox(
+                height: 8,
+              ),
+
+              SizedBox(
+                width:
+                double.infinity,
+
+                child:
+                OutlinedButton.icon(
+                  onPressed:
+                  editReport,
+
+                  icon:
+                  const Icon(
+                    Icons.edit_outlined,
+                    size: 17,
+                  ),
+
+                  label:
+                  const Text(
+                    'Edit Report',
+                  ),
+                ),
+              ),
+            ],
+
             const SizedBox(
-              height:
-              8,
+              height: 8,
             ),
+
+            // ==================================================
+            // ANALYZE AGAIN
+            // ==================================================
 
             SizedBox(
               width:
@@ -2125,9 +2644,7 @@ class _CreateReportEvidenceScreenState
                 icon:
                 const Icon(
                   Icons.refresh,
-
-                  size:
-                  17,
+                  size: 17,
                 ),
 
                 label:
@@ -2138,29 +2655,26 @@ class _CreateReportEvidenceScreenState
             ),
 
             // ==================================================
-            // CURRENT DECISION
+            // DECISION
             // ==================================================
 
-            if (aiAnalysis!
-                .reviewedByUser) ...[
+            if (
+            aiAnalysis!
+                .reviewedByUser
+            ) ...[
               const SizedBox(
-                height:
-                8,
+                height: 8,
               ),
 
               Text(
                 aiSuggestionsApplied
                     ? '✓ AI suggestions selected'
                     : '✓ Original report information selected',
-
                 style:
                 const TextStyle(
                   color:
                   AppColors.success,
-
-                  fontSize:
-                  10,
-
+                  fontSize: 10,
                   fontWeight:
                   FontWeight.w600,
                 ),
@@ -2173,21 +2687,304 @@ class _CreateReportEvidenceScreenState
   }
 
   // ============================================================
+  // REPORT QUALITY SECTION
+  // ============================================================
+
+  Widget _buildReportQualitySection(
+      ReportImageAiAnalysis result,
+      ) {
+    final bool needsImprovement =
+        result.shouldSuggestReportEdit;
+
+    final Color statusColor =
+    needsImprovement
+        ? Colors.amber
+        : AppColors.success;
+
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        12,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        statusColor.withOpacity(
+          0.08,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          12,
+        ),
+
+        border:
+        Border.all(
+          color:
+          statusColor.withOpacity(
+            0.35,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Row(
+            children: [
+              Icon(
+                needsImprovement
+                    ? Icons.warning_amber_rounded
+                    : Icons.check_circle_outline,
+
+                color:
+                statusColor,
+
+                size: 18,
+              ),
+
+              const SizedBox(
+                width: 8,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  needsImprovement
+                      ? 'Report Needs Improvement'
+                      : 'Report Quality Check',
+
+                  style:
+                  TextStyle(
+                    color:
+                    statusColor,
+                    fontSize: 12,
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+              ),
+
+              Text(
+                result.reportQualityLabel,
+                style:
+                TextStyle(
+                  color:
+                  statusColor,
+                  fontSize: 11,
+                  fontWeight:
+                  FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height: 10,
+          ),
+
+          _AiResultRow(
+            label:
+            'Title',
+
+            value:
+            result.titleMeaningful ==
+                false
+                ? 'Unclear ✕'
+                : 'Clear ✓',
+          ),
+
+          _AiResultRow(
+            label:
+            'Description',
+
+            value:
+            result.descriptionMeaningful ==
+                false
+                ? 'Unclear ✕'
+                : 'Clear ✓',
+          ),
+
+          if (
+          result.reportIssue
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height: 4,
+            ),
+
+            Text(
+              result.reportIssue!,
+              style:
+              const TextStyle(
+                color:
+                AppColors.textSecondary,
+                fontSize: 10,
+                height: 1.4,
+              ),
+            ),
+          ],
+
+          if (
+          result.missingInformation
+              .isNotEmpty
+          ) ...[
+            const SizedBox(
+              height: 10,
+            ),
+
+            const Text(
+              'Missing / unclear information',
+              style:
+              TextStyle(
+                color:
+                AppColors.textSecondary,
+                fontSize: 10,
+                fontWeight:
+                FontWeight.w600,
+              ),
+            ),
+
+            const SizedBox(
+              height: 4,
+            ),
+
+            ...result
+                .missingInformation
+                .map(
+                  (item) =>
+                  Padding(
+                    padding:
+                    const EdgeInsets.only(
+                      bottom: 3,
+                    ),
+
+                    child:
+                    Text(
+                      '• $item',
+                      style:
+                      const TextStyle(
+                        fontSize: 10,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+            ),
+          ],
+
+          if (
+          result.suggestedTitle
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height: 10,
+            ),
+
+            const Text(
+              'AI Suggested Title',
+              style:
+              TextStyle(
+                color:
+                AppColors.textSecondary,
+                fontSize: 10,
+                fontWeight:
+                FontWeight.w600,
+              ),
+            ),
+
+            const SizedBox(
+              height: 3,
+            ),
+
+            Text(
+              result.suggestedTitle!,
+              style:
+              const TextStyle(
+                fontSize: 11,
+                fontWeight:
+                FontWeight.w600,
+                height: 1.4,
+              ),
+            ),
+          ],
+
+          if (
+          result.suggestedDescription
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height: 10,
+            ),
+
+            const Text(
+              'AI Suggested Description',
+              style:
+              TextStyle(
+                color:
+                AppColors.textSecondary,
+                fontSize: 10,
+                fontWeight:
+                FontWeight.w600,
+              ),
+            ),
+
+            const SizedBox(
+              height: 3,
+            ),
+
+            Text(
+              result.suggestedDescription!,
+              style:
+              const TextStyle(
+                fontSize: 11,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
   // SMART ASSIST MESSAGE
   // ============================================================
 
   String _smartAssistMessage() {
     if (analyzingEvidence) {
-      return 'AI is analyzing the evidence and comparing it with your report details...';
+      return 'AI is analyzing the evidence and comparing '
+          'it with your report details...';
     }
 
     if (aiAnalysis != null) {
-      return 'AI analysis complete. Review the comparison before continuing.';
+      if (
+      aiAnalysis!
+          .shouldSuggestReportEdit
+      ) {
+        return 'Smart Assist found that the report may need '
+            'improvement. Review the suggestions before continuing.';
+      }
+
+      return 'AI analysis complete. Review the comparison '
+          'before continuing.';
     }
 
     if (aiError != null) {
       return 'AI analysis could not be completed. '
-          'Manual reporting is still available.';
+          'Manual review is still available.';
     }
 
     if (evidenceImages.isEmpty) {
@@ -2219,8 +3016,7 @@ class _AiResultRow
     return Padding(
       padding:
       const EdgeInsets.only(
-        bottom:
-        7,
+        bottom: 7,
       ),
 
       child:
@@ -2230,21 +3026,16 @@ class _AiResultRow
 
         children: [
           SizedBox(
-            width:
-            125,
+            width: 125,
 
             child:
             Text(
               label,
-
               style:
               const TextStyle(
                 color:
-                AppColors
-                    .textSecondary,
-
-                fontSize:
-                10,
+                AppColors.textSecondary,
+                fontSize: 10,
               ),
             ),
           ),
@@ -2253,12 +3044,9 @@ class _AiResultRow
             child:
             Text(
               value,
-
               style:
               const TextStyle(
-                fontSize:
-                11,
-
+                fontSize: 11,
                 fontWeight:
                 FontWeight.w600,
               ),
@@ -2289,23 +3077,18 @@ class _EvidenceProgress
           Column(
             children: [
               Divider(
-                thickness:
-                4,
-
+                thickness: 4,
                 color:
                 AppColors.success,
               ),
 
               Text(
                 '✓ Details',
-
                 style:
                 TextStyle(
                   color:
                   AppColors.success,
-
-                  fontSize:
-                  10,
+                  fontSize: 10,
                 ),
               ),
             ],
@@ -2317,23 +3100,18 @@ class _EvidenceProgress
           Column(
             children: [
               Divider(
-                thickness:
-                4,
-
+                thickness: 4,
                 color:
                 AppColors.primary,
               ),
 
               Text(
                 'Evidence',
-
                 style:
                 TextStyle(
                   color:
                   AppColors.primary,
-
-                  fontSize:
-                  10,
+                  fontSize: 10,
                 ),
               ),
             ],
@@ -2345,24 +3123,18 @@ class _EvidenceProgress
           Column(
             children: [
               Divider(
-                thickness:
-                4,
-
+                thickness: 4,
                 color:
                 AppColors.border,
               ),
 
               Text(
                 'Location',
-
                 style:
                 TextStyle(
                   color:
-                  AppColors
-                      .textSecondary,
-
-                  fontSize:
-                  10,
+                  AppColors.textSecondary,
+                  fontSize: 10,
                 ),
               ),
             ],
