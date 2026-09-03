@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../../models/nearby_report.dart';
+import '../../models/report_image_ai_analysis.dart';
 import '../../services/location_service.dart';
 import '../../services/nearby_report_service.dart';
 import '../../theme/app_colors.dart';
@@ -22,6 +23,15 @@ class CreateReportLocationScreen
 
   final List<File> evidenceImages;
 
+  // ============================================================
+  // AI SMART ASSIST RESULT
+  //
+  // Optional so the existing manual reporting flow still works
+  // when AI is unavailable or no analysis was completed.
+  // ============================================================
+
+  final ReportImageAiAnalysis? aiAnalysis;
+
   const CreateReportLocationScreen({
     super.key,
     required this.category,
@@ -29,6 +39,7 @@ class CreateReportLocationScreen
     required this.title,
     required this.description,
     required this.evidenceImages,
+    this.aiAnalysis,
   });
 
   @override
@@ -528,6 +539,9 @@ class _CreateReportLocationScreenState
 
               longitude:
               longitude,
+
+              aiAnalysis:
+              widget.aiAnalysis,
             ),
       ),
     );

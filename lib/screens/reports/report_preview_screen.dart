@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../../models/report_image_ai_analysis.dart';
+
 import '../../services/connectivity_service.dart';
 import '../../services/report_service.dart';
 import '../../theme/app_colors.dart';
@@ -20,6 +22,14 @@ class ReportPreviewScreen
   final double? latitude;
   final double? longitude;
 
+  // ============================================================
+  // AI SMART ASSIST RESULT
+  //
+  // Optional so the existing manual reporting flow remains
+  // fully compatible when AI is unavailable or not used.
+  // ============================================================
+  final ReportImageAiAnalysis? aiAnalysis;
+
   const ReportPreviewScreen({
     super.key,
     required this.category,
@@ -31,6 +41,7 @@ class ReportPreviewScreen
     required this.landmark,
     this.latitude,
     this.longitude,
+    this.aiAnalysis,
   });
 
   @override
