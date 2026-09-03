@@ -3,74 +3,10 @@ import 'dart:io';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../models/report_final_ai_analysis.dart';
 import '../models/report_image_ai_analysis.dart';
 
-// ============================================================
-// AI EVIDENCE SERVICE
-//
-// SmartCity supports TWO AI analysis flows:
-//
-// ============================================================
-//
-// FLOW A — PRE-SUBMISSION SMART ASSIST
-//
-// Citizen enters report details
-//      ↓
-// Selects evidence image
-//      ↓
-// Image compression
-//      ↓
-// Local compressed File
-//      ↓
-// Supabase Edge Function
-//      ↓
-// Gemini multimodal analysis
-//      ↓
-// Context-aware AI assessment
-//      ↓
-// ReportImageAiAnalysis
-//
-// No report_id or report_image_id exists at this point.
-//
-// ============================================================
-//
-// FLOW B — SAVED REPORT IMAGE ANALYSIS
-//
-// report_images.id
-//      ↓
-// Mark AI status = analyzing
-//      ↓
-// Protected Edge Function
-//      ↓
-// Ownership verification
-//      ↓
-// Load stored evidence
-//      ↓
-// Gemini
-//      ↓
-// Save permanent result
-//      ↓
-// report_image_ai_analysis
-//
-// ============================================================
-//
-// SECURITY:
-//
-// Gemini API key is NEVER stored in Flutter.
-//
-// Flutter
-//    ↓ authenticated request
-// Supabase Edge Function
-//    ↓
-// Gemini API
-//
-// ============================================================
-
 class AiEvidenceService {
-  // ============================================================
-  // SUPABASE
-  // ============================================================
-
   final SupabaseClient _supabase =
       Supabase.instance.client;
 
@@ -82,60 +18,37 @@ class AiEvidenceService {
       'report_image_ai_analysis';
 
   // ============================================================
-  // EDGE FUNCTION
+  // EDGE FUNCTIONS
   // ============================================================
 
   static const String edgeFunctionName =
       'analyze-report-image';
 
+  static const String combinedEdgeFunctionName =
+      'combine-report-ai-analysis';
+
   // ============================================================
-  // IMAGE SIZE LIMIT
-  //
-  // Images should already be optimized by
-  // ImageCompressionService.
-  //
-  // Client-side validation reduces unnecessary requests.
-  // Server-side validation must still remain in the
-  // Edge Function.
+  // LIMITS
   // ============================================================
 
   static const int maxAiImageBytes =
       8 * 1024 * 1024;
 
+  static const int maxCombinedImageAnalyses =
+  5;
+
   // ============================================================
-  // PRE-SUBMISSION SMART ASSIST
-  //
-  // Used by CreateReportEvidenceScreen.
-  //
-  // Gemini receives:
-  //
-  // - compressed evidence image
-  // - citizen category
-  // - citizen priority
-  // - citizen title
-  // - citizen description
-  //
-  // This allows Smart Assist to compare the visual evidence
-  // against the user's report instead of analyzing the image
-  // without context.
+  // ANALYZE ONE LOCAL IMAGE
   // ============================================================
 
   Future<ReportImageAiAnalysis>
   analyzeLocalImage({
     required File imageFile,
-
     required String userCategory,
-
     required String userPriority,
-
     required String userTitle,
-
     required String userDescription,
   }) async {
-    // ==========================================================
-    // AUTHENTICATION
-    // ==========================================================
-
     final Session? session =
         _supabase.auth.currentSession;
 
@@ -146,7 +59,7 @@ class AiEvidenceService {
     }
 
     // ==========================================================
-    // FILE VALIDATION
+    // FILE EXISTS
     // ==========================================================
 
     if (!await imageFile.exists()) {
@@ -172,7 +85,7 @@ class AiEvidenceService {
     }
 
     // ==========================================================
-    // READ IMAGE
+    // IMAGE DATA
     // ==========================================================
 
     final List<int> imageBytes =
@@ -184,18 +97,10 @@ class AiEvidenceService {
       );
     }
 
-    // ==========================================================
-    // BASE64
-    // ==========================================================
-
     final String imageBase64 =
     base64Encode(
       imageBytes,
     );
-
-    // ==========================================================
-    // MIME TYPE
-    // ==========================================================
 
     final String mimeType =
     _detectMimeType(
@@ -203,7 +108,7 @@ class AiEvidenceService {
     );
 
     // ==========================================================
-    // NORMALIZE REPORT CONTEXT
+    // REPORT CONTEXT
     // ==========================================================
 
     final String cleanCategory =
@@ -219,7 +124,7 @@ class AiEvidenceService {
     userDescription.trim();
 
     // ==========================================================
-    // EDGE FUNCTION REQUEST
+    // CALL SINGLE-IMAGE EDGE FUNCTION
     // ==========================================================
 
     try {
@@ -228,32 +133,14 @@ class AiEvidenceService {
         edgeFunctionName,
 
         body: {
-          // ====================================================
-          // ANALYSIS MODE
-          // ====================================================
-
           'analysis_mode':
           'pre_submission',
-
-          // ====================================================
-          // IMAGE
-          // ====================================================
 
           'image_base64':
           imageBase64,
 
           'mime_type':
           mimeType,
-
-          // ====================================================
-          // CITIZEN REPORT CONTEXT
-          //
-          // Gemini uses this to compare:
-          //
-          // citizen report
-          // vs
-          // visible evidence
-          // ====================================================
 
           'report_context': {
             'category':
@@ -271,21 +158,10 @@ class AiEvidenceService {
         },
       );
 
-      // ========================================================
-      // PARSE FUNCTION RESPONSE
-      // ========================================================
-
       final Map<String, dynamic> data =
       _parseFunctionResponse(
         response.data,
       );
-
-      // ========================================================
-      // CREATE TEMPORARY AI MODEL
-      //
-      // Database identifiers are intentionally empty because
-      // report_images has not been created yet.
-      // ========================================================
 
       return ReportImageAiAnalysis
           .fromAiResult(
@@ -297,6 +173,270 @@ class AiEvidenceService {
 
         originalUserPriority:
         cleanPriority,
+
+        originalUserTitle:
+        cleanTitle,
+
+        originalUserDescription:
+        cleanDescription,
+      );
+    } on FunctionException catch (e) {
+      throw Exception(
+        _functionErrorMessage(
+          e,
+        ),
+      );
+    } catch (e) {
+      throw Exception(
+        _cleanError(
+          e,
+          fallback:
+          'Unable to analyze the evidence image.',
+        ),
+      );
+    }
+  }
+
+  // ============================================================
+  // COMBINE MULTIPLE IMAGE ANALYSES
+  //
+  // Example:
+  //
+  // image 1
+  //   ↓
+  // ReportImageAiAnalysis #1
+  //
+  // image 2
+  //   ↓
+  // ReportImageAiAnalysis #2
+  //
+  // image 3
+  //   ↓
+  // ReportImageAiAnalysis #3
+  //
+  //        ↓
+  //
+  // combineImageAnalyses()
+  //
+  //        ↓
+  //
+  // ReportFinalAiAnalysis
+  // ============================================================
+
+  Future<ReportFinalAiAnalysis>
+  combineImageAnalyses({
+    required Map<
+        String,
+        ReportImageAiAnalysis
+    > imageAnalyses,
+
+    required String userCategory,
+    required String userPriority,
+    required String userTitle,
+    required String userDescription,
+  }) async {
+    // ==========================================================
+    // AUTHENTICATION
+    // ==========================================================
+
+    final Session? session =
+        _supabase.auth.currentSession;
+
+    if (session == null) {
+      throw Exception(
+        'Please sign in before using Smart Assist.',
+      );
+    }
+
+    // ==========================================================
+    // ANALYSIS REQUIRED
+    // ==========================================================
+
+    if (imageAnalyses.isEmpty) {
+      throw Exception(
+        'At least one evidence image must be analyzed '
+            'before creating the final Smart Assist result.',
+      );
+    }
+
+    if (
+    imageAnalyses.length >
+        maxCombinedImageAnalyses
+    ) {
+      throw Exception(
+        'Smart Assist can combine a maximum of '
+            '$maxCombinedImageAnalyses evidence images.',
+      );
+    }
+
+    // ==========================================================
+    // CLEAN REPORT CONTEXT
+    // ==========================================================
+
+    final String cleanCategory =
+    userCategory.trim();
+
+    final String cleanPriority =
+    userPriority.trim();
+
+    final String cleanTitle =
+    userTitle.trim();
+
+    final String cleanDescription =
+    userDescription.trim();
+
+    if (cleanTitle.isEmpty) {
+      throw Exception(
+        'Report title is required.',
+      );
+    }
+
+    if (cleanDescription.isEmpty) {
+      throw Exception(
+        'Report description is required.',
+      );
+    }
+
+    // ==========================================================
+    // STRUCTURED IMAGE ANALYSIS PAYLOAD
+    //
+    // Key:
+    // local image path
+    //
+    // Value:
+    // AI result for that exact image
+    //
+    // This avoids index mismatch when images are deleted.
+    // ==========================================================
+
+    final List<Map<String, dynamic>>
+    analysisPayload = [];
+
+    final List<String>
+    sourceEvidenceIds = [];
+
+    for (
+    final MapEntry<
+        String,
+        ReportImageAiAnalysis
+    > entry
+    in imageAnalyses.entries
+    ) {
+      final String sourceEvidenceId =
+      entry.key.trim();
+
+      final ReportImageAiAnalysis analysis =
+          entry.value;
+
+      if (sourceEvidenceId.isNotEmpty) {
+        sourceEvidenceIds.add(
+          sourceEvidenceId,
+        );
+      }
+
+      analysisPayload.add(
+        {
+          'source_evidence_id':
+          sourceEvidenceId,
+
+          'issue_detected':
+          analysis.issueDetected,
+
+          'category':
+          analysis.category,
+
+          'subcategory':
+          analysis.subcategory,
+
+          'severity':
+          analysis.severity,
+
+          'confidence':
+          analysis.confidence,
+
+          'evidence_quality':
+          analysis.evidenceQuality,
+
+          'description':
+          analysis.description,
+
+          'safety_concern':
+          analysis.safetyConcern,
+
+          'needs_human_review':
+          analysis.needsHumanReview,
+
+          'retake_recommended':
+          analysis.retakeRecommended,
+
+          'retake_reason':
+          analysis.retakeReason,
+        },
+      );
+    }
+
+    // ==========================================================
+    // CALL FINAL COMBINED EDGE FUNCTION
+    // ==========================================================
+
+    try {
+      final FunctionResponse response =
+      await _supabase.functions.invoke(
+        combinedEdgeFunctionName,
+
+        body: {
+          'analysis_mode':
+          'combine_analysis',
+
+          'report_context': {
+            'category':
+            cleanCategory,
+
+            'priority':
+            cleanPriority,
+
+            'title':
+            cleanTitle,
+
+            'description':
+            cleanDescription,
+          },
+
+          'image_analyses':
+          analysisPayload,
+        },
+      );
+
+      final Map<String, dynamic> data =
+      _parseFunctionResponse(
+        response.data,
+      );
+
+      // ========================================================
+      // CREATE TEMPORARY FINAL MODEL
+      //
+      // reportId remains empty until final submission.
+      // ========================================================
+
+      return ReportFinalAiAnalysis
+          .fromAiResult(
+        data,
+
+        analyzedImageCount:
+        analysisPayload.length,
+
+        sourceEvidenceIds:
+        sourceEvidenceIds,
+      )
+          .copyWith(
+        originalUserCategory:
+        cleanCategory,
+
+        originalUserPriority:
+        cleanPriority,
+
+        originalUserTitle:
+        cleanTitle,
 
         originalUserDescription:
         cleanDescription,
@@ -313,7 +453,7 @@ class AiEvidenceService {
           e,
 
           fallback:
-          'Unable to analyze the evidence image.',
+          'Unable to create the final Smart Assist analysis.',
         ),
       );
     }
@@ -321,12 +461,6 @@ class AiEvidenceService {
 
   // ============================================================
   // START SAVED IMAGE ANALYSIS
-  //
-  // Creates or updates:
-  //
-  // ai_status = analyzing
-  //
-  // for an existing report_images record.
   // ============================================================
 
   Future<ReportImageAiAnalysis>
@@ -383,7 +517,6 @@ class AiEvidenceService {
       throw Exception(
         _cleanError(
           e,
-
           fallback:
           'Unable to start AI analysis.',
         ),
@@ -393,15 +526,6 @@ class AiEvidenceService {
 
   // ============================================================
   // CALL BACKEND FOR SAVED IMAGE
-  //
-  // The Edge Function will:
-  //
-  // 1. identify authenticated caller
-  // 2. load report_images
-  // 3. verify report ownership
-  // 4. download image from report-evidence
-  // 5. call Gemini
-  // 6. return structured result
   // ============================================================
 
   Future<Map<String, dynamic>>
@@ -444,7 +568,6 @@ class AiEvidenceService {
       throw Exception(
         _cleanError(
           e,
-
           fallback:
           'AI analysis failed.',
         ),
@@ -454,21 +577,11 @@ class AiEvidenceService {
 
   // ============================================================
   // SAVE COMPLETE AI MODEL
-  //
-  // Preferred persistence method.
-  //
-  // Saves:
-  //
-  // core result
-  // advanced result
-  // citizen comparison
-  // human review information
   // ============================================================
 
   Future<ReportImageAiAnalysis>
   saveAnalysis({
     required String reportImageId,
-
     required ReportImageAiAnalysis analysis,
   }) async {
     final String cleanId =
@@ -487,10 +600,6 @@ class AiEvidenceService {
         reportImageId:
         cleanId,
       );
-
-      // ========================================================
-      // ENSURE COMPLETED STATUS
-      // ========================================================
 
       databaseData['ai_status'] =
       'completed';
@@ -537,7 +646,6 @@ class AiEvidenceService {
       throw Exception(
         _cleanError(
           e,
-
           fallback:
           'Unable to save AI analysis.',
         ),
@@ -546,32 +654,19 @@ class AiEvidenceService {
   }
 
   // ============================================================
-  // LEGACY / BASIC SAVE METHOD
-  //
-  // Retained so existing code using saveCompletedAnalysis()
-  // does not break.
-  //
-  // New code should preferably use saveAnalysis().
+  // LEGACY SAVE METHOD
   // ============================================================
 
   Future<ReportImageAiAnalysis>
   saveCompletedAnalysis({
     required String reportImageId,
-
     required bool issueDetected,
-
     required String category,
-
     required String subcategory,
-
     required String severity,
-
     required String confidence,
-
     required String description,
-
     required String evidenceQuality,
-
     required String safetyConcern,
   }) async {
     final ReportImageAiAnalysis analysis =
@@ -604,7 +699,8 @@ class AiEvidenceService {
       safetyConcern,
 
       analyzedAt:
-      DateTime.now().toUtc(),
+      DateTime.now()
+          .toUtc(),
     );
 
     return saveAnalysis(
@@ -617,25 +713,12 @@ class AiEvidenceService {
   }
 
   // ============================================================
-  // SAVE PRE-SUBMISSION AI RESULT
-  //
-  // Call AFTER:
-  //
-  // report inserted
-  //      ↓
-  // image uploaded
-  //      ↓
-  // report_images row inserted
-  //      ↓
-  // report_image_id available
-  //
-  // The temporary AI result can now become permanent.
+  // SAVE TEMPORARY PRE-SUBMISSION RESULT
   // ============================================================
 
   Future<ReportImageAiAnalysis>
   saveTemporaryAnalysis({
     required String reportImageId,
-
     required ReportImageAiAnalysis analysis,
   }) async {
     final String cleanId =
@@ -647,8 +730,7 @@ class AiEvidenceService {
       );
     }
 
-    final ReportImageAiAnalysis
-    permanentAnalysis =
+    final ReportImageAiAnalysis permanentAnalysis =
     analysis.copyWith(
       reportImageId:
       cleanId,
@@ -658,10 +740,12 @@ class AiEvidenceService {
 
       analyzedAt:
       analysis.analyzedAt ??
-          DateTime.now().toUtc(),
+          DateTime.now()
+              .toUtc(),
 
       updatedAt:
-      DateTime.now().toUtc(),
+      DateTime.now()
+          .toUtc(),
     );
 
     return saveAnalysis(
@@ -675,9 +759,6 @@ class AiEvidenceService {
 
   // ============================================================
   // MARK ANALYSIS FAILED
-  //
-  // Failure logging should NEVER stop the citizen from using
-  // normal manual reporting.
   // ============================================================
 
   Future<void> markAnalysisFailed({
@@ -713,21 +794,12 @@ class AiEvidenceService {
         'report_image_id',
       );
     } catch (_) {
-      // ========================================================
-      // INTENTIONAL
-      //
-      // An AI logging failure must not prevent:
-      //
-      // report submission
-      // evidence upload
-      // location selection
-      // worker processing
-      // ========================================================
+      // AI logging must never block normal reporting.
     }
   }
 
   // ============================================================
-  // GET EXISTING AI ANALYSIS
+  // GET EXISTING ANALYSIS
   // ============================================================
 
   Future<ReportImageAiAnalysis?>
@@ -770,7 +842,6 @@ class AiEvidenceService {
       throw Exception(
         _cleanError(
           e,
-
           fallback:
           'Unable to load AI analysis.',
         ),
@@ -779,15 +850,7 @@ class AiEvidenceService {
   }
 
   // ============================================================
-  // DELETE AI ANALYSIS
-  //
-  // Useful if:
-  //
-  // report image is deleted
-  // analysis must be regenerated
-  //
-  // ON DELETE CASCADE should normally handle deletion when the
-  // report image itself is removed.
+  // DELETE ANALYSIS
   // ============================================================
 
   Future<void> deleteAnalysis({
@@ -819,20 +882,6 @@ class AiEvidenceService {
 
   // ============================================================
   // COMPLETE SAVED-IMAGE ANALYSIS
-  //
-  // Existing flow preserved:
-  //
-  // report_images.id
-  //       ↓
-  // ai_status = analyzing
-  //       ↓
-  // Edge Function
-  //       ↓
-  // Gemini
-  //       ↓
-  // parse structured result
-  //       ↓
-  // save permanent result
   // ============================================================
 
   Future<ReportImageAiAnalysis>
@@ -849,18 +898,10 @@ class AiEvidenceService {
     }
 
     try {
-      // ========================================================
-      // STEP 1 — STATUS
-      // ========================================================
-
       await startAnalysis(
         reportImageId:
         cleanId,
       );
-
-      // ========================================================
-      // STEP 2 — EDGE FUNCTION
-      // ========================================================
 
       final Map<String, dynamic> aiResult =
       await callAiBackend(
@@ -868,19 +909,11 @@ class AiEvidenceService {
         cleanId,
       );
 
-      // ========================================================
-      // STEP 3 — PARSE
-      // ========================================================
-
       final ReportImageAiAnalysis analysis =
       ReportImageAiAnalysis
           .fromAiResult(
         aiResult,
       );
-
-      // ========================================================
-      // STEP 4 — PERSIST
-      // ========================================================
 
       return await saveTemporaryAnalysis(
         reportImageId:
@@ -890,10 +923,6 @@ class AiEvidenceService {
         analysis,
       );
     } catch (e) {
-      // ========================================================
-      // FAILURE STATUS
-      // ========================================================
-
       await markAnalysisFailed(
         reportImageId:
         cleanId,
@@ -904,22 +933,13 @@ class AiEvidenceService {
   }
 
   // ============================================================
-  // SAVE HUMAN REVIEW DECISION
-  //
-  // Allows the report workflow to record whether the citizen:
-  //
-  // - reviewed the AI result
-  // - applied AI suggestions
-  //
-  // without re-running Gemini.
+  // UPDATE HUMAN REVIEW
   // ============================================================
 
   Future<ReportImageAiAnalysis>
   updateHumanReview({
     required String reportImageId,
-
     required bool suggestionsApplied,
-
     required bool reviewedByUser,
   }) async {
     final String cleanId =
@@ -977,19 +997,11 @@ class AiEvidenceService {
   _parseFunctionResponse(
       dynamic rawData,
       ) {
-    // ==========================================================
-    // NULL
-    // ==========================================================
-
     if (rawData == null) {
       throw Exception(
         'AI analysis returned no data.',
       );
     }
-
-    // ==========================================================
-    // EXPECT OBJECT
-    // ==========================================================
 
     if (rawData is! Map) {
       throw Exception(
@@ -1002,15 +1014,16 @@ class AiEvidenceService {
       rawData,
     );
 
-    // ==========================================================
-    // BACKEND ERROR
-    // ==========================================================
-
     final String? backendError =
-    data['error']?.toString();
+    data['error']
+        ?.toString();
 
-    if (backendError != null &&
-        backendError.trim().isNotEmpty) {
+    if (
+    backendError != null &&
+        backendError
+            .trim()
+            .isNotEmpty
+    ) {
       throw Exception(
         backendError.trim(),
       );
@@ -1031,43 +1044,41 @@ class AiEvidenceService {
         .trim()
         .toLowerCase();
 
-    if (lower.endsWith(
+    if (
+    lower.endsWith(
       '.png',
-    )) {
+    )
+    ) {
       return 'image/png';
     }
 
-    if (lower.endsWith(
+    if (
+    lower.endsWith(
       '.webp',
-    )) {
+    )
+    ) {
       return 'image/webp';
     }
 
-    if (lower.endsWith(
+    if (
+    lower.endsWith(
       '.jpg',
     ) ||
         lower.endsWith(
           '.jpeg',
-        )) {
+        )
+    ) {
       return 'image/jpeg';
     }
 
-    // ==========================================================
-    // HEIC / HEIF
-    //
-    // Your Edge Function currently accepts only the configured
-    // supported formats.
-    //
-    // If compression converts HEIC to JPEG, the resulting file
-    // extension should normally be JPEG.
-    // ==========================================================
-
-    if (lower.endsWith(
+    if (
+    lower.endsWith(
       '.heic',
     ) ||
         lower.endsWith(
           '.heif',
-        )) {
+        )
+    ) {
       return 'image/heic';
     }
 
@@ -1081,18 +1092,10 @@ class AiEvidenceService {
   String _functionErrorMessage(
       FunctionException error,
       ) {
-    // ==========================================================
-    // DETAILS
-    // ==========================================================
-
     final dynamic rawDetails =
         error.details;
 
     if (rawDetails != null) {
-      // ========================================================
-      // MAP DETAILS
-      // ========================================================
-
       if (rawDetails is Map) {
         final dynamic nestedError =
         rawDetails['error'];
@@ -1109,31 +1112,31 @@ class AiEvidenceService {
         }
       }
 
-      // ========================================================
-      // STRING DETAILS
-      // ========================================================
-
       final String details =
       rawDetails
           .toString()
           .trim();
 
-      if (details.isNotEmpty &&
-          details != 'null' &&
-          details != '{}') {
+      if (
+      details.isNotEmpty &&
+          details !=
+              'null' &&
+          details !=
+              '{}'
+      ) {
         return 'AI analysis failed: $details';
       }
     }
 
-    // ==========================================================
-    // HTTP REASON
-    // ==========================================================
-
     final String? reason =
         error.reasonPhrase;
 
-    if (reason != null &&
-        reason.trim().isNotEmpty) {
+    if (
+    reason != null &&
+        reason
+            .trim()
+            .isNotEmpty
+    ) {
       return 'AI analysis failed: '
           '${reason.trim()}';
     }
