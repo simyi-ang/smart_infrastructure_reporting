@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'screens/auth/auth_gate.dart';
+import 'screens/auth/email_verified_success_screen.dart';
 import 'screens/auth/password_recovery_error_screen.dart';
 import 'screens/auth/reset_password_screen.dart';
 import 'screens/welcome_screen.dart';
@@ -20,11 +21,12 @@ GlobalKey<NavigatorState>();
 // ============================================================
 // APP LINKS
 //
-// Used to detect:
-// smartcity://reset-password
+// Handles:
 //
-// even when Supabase cannot establish a valid recovery session
-// because the link is expired, invalid, or already used.
+// smartcity://reset-password
+// smartcity://email-verified
+//
+// without printing sensitive callback parameters.
 // ============================================================
 
 final AppLinks appLinks =
@@ -43,16 +45,18 @@ globalDeepLinkSubscription;
 // ============================================================
 // PASSWORD RECOVERY COORDINATOR
 //
-// Handles both:
+// Handles:
 //
-// 1. VALID recovery
-//    → AuthChangeEvent.passwordRecovery
-//    → ResetPasswordScreen
+// VALID:
+// smartcity://reset-password
+// +
+// AuthChangeEvent.passwordRecovery
+// → ResetPasswordScreen
 //
-// 2. INVALID / EXPIRED recovery
-//    → deep link arrives
-//    → no passwordRecovery event
-//    → PasswordRecoveryErrorScreen
+// INVALID / EXPIRED:
+// callback received
+// but no passwordRecovery event
+// → PasswordRecoveryErrorScreen
 // ============================================================
 
 class PasswordRecoveryCoordinator {
@@ -64,54 +68,33 @@ class PasswordRecoveryCoordinator {
   false;
 
   // ==========================================================
-  // NAVIGATION ALREADY ACTIVE
+  // NAVIGATION ACTIVE
   // ==========================================================
 
   static bool navigationActive =
   false;
 
   // ==========================================================
-  // A RECOVERY CALLBACK HAS ARRIVED
-  //
-  // This does NOT mean it is valid yet.
+  // CALLBACK RECEIVED
   // ==========================================================
 
   static bool recoveryCallbackReceived =
   false;
 
   // ==========================================================
-  // FALLBACK VALIDATION TIMER
-  //
-  // Gives Supabase a short period to process the recovery
-  // callback before SmartCity decides that it is invalid.
+  // VALIDATION TIMER
   // ==========================================================
 
   static Timer? validationTimer;
 
   // ==========================================================
   // NAVIGATOR RETRY TIMER
-  //
-  // Used when the deep link arrives before MaterialApp has
-  // created its Navigator.
   // ==========================================================
 
   static Timer? navigatorRetryTimer;
 
   // ==========================================================
-  // RECOVERY CALLBACK RECEIVED
-  //
-  // Called by app_links when Android delivers:
-  //
-  // smartcity://reset-password
-  //
-  // For a valid recovery link, Supabase should emit:
-  //
-  // AuthChangeEvent.passwordRecovery
-  //
-  // shortly afterward.
-  //
-  // If that does not happen, SmartCity shows the generic
-  // expired/invalid recovery screen.
+  // PASSWORD RECOVERY CALLBACK RECEIVED
   // ==========================================================
 
   static void markCallbackReceived() {
@@ -126,24 +109,25 @@ class PasswordRecoveryCoordinator {
             seconds: 3,
           ),
               () {
-            // ======================================================
-            // VALID RECOVERY ALREADY RECEIVED
-            // ======================================================
+            // ====================================================
+            // VALID EVENT ALREADY RECEIVED
+            // ====================================================
 
-            if (!recoveryCallbackReceived ||
-                pendingRecovery) {
+            if (
+            !recoveryCallbackReceived ||
+                pendingRecovery
+            ) {
               return;
             }
 
-            // ======================================================
+            // ====================================================
             // NO VALID PASSWORD-RECOVERY EVENT
             //
-            // Do NOT rely only on currentSession here.
+            // Do NOT rely only on currentSession.
             //
-            // A user might already have some unrelated session.
-            // The authoritative signal for password recovery is
-            // AuthChangeEvent.passwordRecovery.
-            // ======================================================
+            // AuthChangeEvent.passwordRecovery is the authoritative
+            // recovery signal.
+            // ====================================================
 
             openRecoveryError();
           },
@@ -151,7 +135,7 @@ class PasswordRecoveryCoordinator {
   }
 
   // ==========================================================
-  // VALID SUPABASE RECOVERY EVENT
+  // VALID SUPABASE PASSWORD RECOVERY EVENT
   // ==========================================================
 
   static void markRecoveryPending() {
@@ -171,7 +155,6 @@ class PasswordRecoveryCoordinator {
     pendingRecovery =
     true;
 
-    // Reset this so valid recovery navigation is allowed.
     navigationActive =
     false;
   }
@@ -206,8 +189,10 @@ class PasswordRecoveryCoordinator {
   // ==========================================================
 
   static void tryOpenResetPasswordScreen() {
-    if (!pendingRecovery ||
-        navigationActive) {
+    if (
+    !pendingRecovery ||
+        navigationActive
+    ) {
       return;
     }
 
@@ -215,10 +200,7 @@ class PasswordRecoveryCoordinator {
         navigatorKey.currentState;
 
     // ========================================================
-    // NAVIGATOR NOT READY YET
-    //
-    // This can happen when Gmail opens SmartCity from a cold
-    // start and the auth event arrives very early.
+    // NAVIGATOR NOT READY
     // ========================================================
 
     if (navigator == null) {
@@ -247,42 +229,28 @@ class PasswordRecoveryCoordinator {
 
     navigator.pushAndRemoveUntil(
       MaterialPageRoute(
-        builder: (_) =>
+        builder:
+            (_) =>
             ResetPasswordScreen(
               onFinished: () {
                 clearRecovery();
               },
             ),
       ),
-          (route) => false,
+          (
+          route,
+          ) =>
+      false,
     );
   }
 
   // ==========================================================
-  // OPEN RECOVERY ERROR SCREEN
-  //
-  // Used when SmartCity receives the recovery callback but
-  // Supabase does not emit passwordRecovery.
-  //
-  // The link may be:
-  //
-  // - expired
-  // - already used
-  // - invalid
-  // - malformed
-  // - unable to be verified
-  //
-  // We intentionally show a general message rather than
-  // pretending SmartCity knows the exact cause.
+  // OPEN INVALID / EXPIRED RECOVERY SCREEN
   // ==========================================================
 
   static void openRecoveryError() {
     final NavigatorState? navigator =
         navigatorKey.currentState;
-
-    // ========================================================
-    // NAVIGATOR NOT READY
-    // ========================================================
 
     if (navigator == null) {
       navigatorRetryTimer?.cancel();
@@ -321,11 +289,286 @@ class PasswordRecoveryCoordinator {
 
     navigator.pushAndRemoveUntil(
       MaterialPageRoute(
-        builder: (_) =>
+        builder:
+            (_) =>
         const PasswordRecoveryErrorScreen(),
       ),
-          (route) => false,
+          (
+          route,
+          ) =>
+      false,
     );
+  }
+}
+
+// ============================================================
+// EMAIL VERIFICATION COORDINATOR
+//
+// Handles:
+//
+// smartcity://email-verified
+//
+// SECURITY:
+//
+// Receiving the URI alone does NOT prove that verification
+// succeeded.
+//
+// SmartCity requires:
+//
+// currentUser != null
+// AND
+// currentUser.emailConfirmedAt != null
+//
+// before showing EmailVerifiedSuccessScreen.
+// ============================================================
+
+class EmailVerificationCoordinator {
+  // ==========================================================
+  // CALLBACK RECEIVED
+  // ==========================================================
+
+  static bool callbackReceived =
+  false;
+
+  // ==========================================================
+  // SUPABASE VERIFICATION CONFIRMED
+  // ==========================================================
+
+  static bool verificationConfirmed =
+  false;
+
+  // ==========================================================
+  // NAVIGATION ACTIVE
+  // ==========================================================
+
+  static bool navigationActive =
+  false;
+
+  // ==========================================================
+  // TIMERS
+  // ==========================================================
+
+  static Timer? validationTimer;
+
+  static Timer? navigatorRetryTimer;
+
+  // ==========================================================
+  // EMAIL VERIFICATION CALLBACK RECEIVED
+  // ==========================================================
+
+  static void markCallbackReceived() {
+    callbackReceived =
+    true;
+
+    navigationActive =
+    false;
+
+    validationTimer?.cancel();
+
+    // ========================================================
+    // Supabase may already have processed the callback before
+    // app_links delivers the URI.
+    // ========================================================
+
+    _checkCurrentUserVerification();
+
+    // ========================================================
+    // Give Supabase several seconds to process PKCE callback.
+    //
+    // Unlike password recovery, we do NOT display success simply
+    // because the URI was received.
+    // ========================================================
+
+    validationTimer =
+        Timer.periodic(
+          const Duration(
+            milliseconds: 500,
+          ),
+              (
+              timer,
+              ) {
+            if (
+            verificationConfirmed
+            ) {
+              timer.cancel();
+
+              return;
+            }
+
+            _checkCurrentUserVerification();
+          },
+        );
+
+    // Stop polling after a short validation period.
+    Timer(
+      const Duration(
+        seconds: 5,
+      ),
+          () {
+        validationTimer?.cancel();
+
+        validationTimer =
+        null;
+      },
+    );
+  }
+
+  // ==========================================================
+  // AUTH EVENT RECEIVED
+  //
+  // Called from Supabase auth-state listener.
+  // ==========================================================
+
+  static void handleAuthState(
+      AuthState authState,
+      ) {
+    if (!callbackReceived) {
+      return;
+    }
+
+    final User? user =
+        authState.session?.user ??
+            Supabase.instance.client.auth
+                .currentUser;
+
+    if (
+    user != null &&
+        user.emailConfirmedAt !=
+            null
+    ) {
+      markVerificationConfirmed();
+    }
+  }
+
+  // ==========================================================
+  // CHECK CURRENT USER
+  // ==========================================================
+
+  static void _checkCurrentUserVerification() {
+    if (!callbackReceived) {
+      return;
+    }
+
+    final User? user =
+        Supabase.instance.client.auth
+            .currentUser;
+
+    if (
+    user != null &&
+        user.emailConfirmedAt !=
+            null
+    ) {
+      markVerificationConfirmed();
+    }
+  }
+
+  // ==========================================================
+  // VERIFICATION CONFIRMED
+  // ==========================================================
+
+  static void markVerificationConfirmed() {
+    if (verificationConfirmed) {
+      return;
+    }
+
+    verificationConfirmed =
+    true;
+
+    validationTimer?.cancel();
+
+    validationTimer =
+    null;
+
+    WidgetsBinding.instance
+        .addPostFrameCallback(
+          (_) {
+        tryOpenVerificationSuccessScreen();
+      },
+    );
+  }
+
+  // ==========================================================
+  // OPEN VERIFIED SUCCESS SCREEN
+  // ==========================================================
+
+  static void
+  tryOpenVerificationSuccessScreen() {
+    if (
+    !callbackReceived ||
+        !verificationConfirmed ||
+        navigationActive
+    ) {
+      return;
+    }
+
+    final NavigatorState? navigator =
+        navigatorKey.currentState;
+
+    // ========================================================
+    // COLD START:
+    // Navigator may not exist yet.
+    // ========================================================
+
+    if (navigator == null) {
+      navigatorRetryTimer?.cancel();
+
+      navigatorRetryTimer =
+          Timer(
+            const Duration(
+              milliseconds: 250,
+            ),
+                () {
+              tryOpenVerificationSuccessScreen();
+            },
+          );
+
+      return;
+    }
+
+    navigatorRetryTimer?.cancel();
+
+    navigatorRetryTimer =
+    null;
+
+    navigationActive =
+    true;
+
+    navigator.pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder:
+            (_) =>
+        const EmailVerifiedSuccessScreen(),
+      ),
+          (
+          route,
+          ) =>
+      false,
+    );
+  }
+
+  // ==========================================================
+  // CLEAR VERIFICATION STATE
+  // ==========================================================
+
+  static void clearVerification() {
+    validationTimer?.cancel();
+
+    validationTimer =
+    null;
+
+    navigatorRetryTimer?.cancel();
+
+    navigatorRetryTimer =
+    null;
+
+    callbackReceived =
+    false;
+
+    verificationConfirmed =
+    false;
+
+    navigationActive =
+    false;
   }
 }
 
@@ -339,8 +582,8 @@ void handleIncomingUri(
   // ==========================================================
   // SAFE DEBUG OUTPUT
   //
-  // Do not print the complete recovery URI because it may
-  // contain security-sensitive query parameters.
+  // Never print the full URI because auth callbacks can contain
+  // security-sensitive query parameters.
   // ==========================================================
 
   debugPrint(
@@ -349,20 +592,55 @@ void handleIncomingUri(
   );
 
   // ==========================================================
-  // PASSWORD RECOVERY CALLBACK
-  //
-  // Expected:
+  // ONLY SMARTCITY LINKS
+  // ==========================================================
+
+  if (
+  uri.scheme !=
+      'smartcity'
+  ) {
+    return;
+  }
+
+  // ==========================================================
+  // PASSWORD RECOVERY
   //
   // smartcity://reset-password
   // ==========================================================
 
-  if (uri.scheme ==
-      'smartcity' &&
-      uri.host ==
-          'reset-password') {
+  if (
+  uri.host ==
+      'reset-password'
+  ) {
     PasswordRecoveryCoordinator
         .markCallbackReceived();
+
+    return;
   }
+
+  // ==========================================================
+  // EMAIL VERIFICATION
+  //
+  // smartcity://email-verified
+  // ==========================================================
+
+  if (
+  uri.host ==
+      'email-verified'
+  ) {
+    EmailVerificationCoordinator
+        .markCallbackReceived();
+
+    return;
+  }
+
+  // ==========================================================
+  // UNKNOWN SMARTCITY URI
+  // ==========================================================
+
+  debugPrint(
+    'Unknown SmartCity deep-link destination.',
+  );
 }
 
 // ============================================================
@@ -385,9 +663,12 @@ Future<void> main() async {
     'sb_publishable_qGdkpnvxBaOWDs2WvU2xgQ_g98Vv__D',
 
     // ========================================================
-    // PKCE AUTH FLOW
+    // PKCE AUTH
     //
-    // Used by SmartCity recovery deep linking.
+    // Used by:
+    //
+    // - password recovery
+    // - email verification
     // ========================================================
 
     authOptions:
@@ -399,8 +680,6 @@ Future<void> main() async {
 
   // ==========================================================
   // AUTH STATE LISTENER
-  //
-  // This is the authoritative VALID RECOVERY signal.
   // ==========================================================
 
   globalAuthSubscription =
@@ -421,9 +700,11 @@ Future<void> main() async {
           // VALID PASSWORD RECOVERY
           // ======================================================
 
-          if (event ==
+          if (
+          event ==
               AuthChangeEvent
-                  .passwordRecovery) {
+                  .passwordRecovery
+          ) {
             PasswordRecoveryCoordinator
                 .markRecoveryPending();
 
@@ -434,12 +715,22 @@ Future<void> main() async {
                     .tryOpenResetPasswordScreen();
               },
             );
-          }
-        },
 
-        // ========================================================
-        // AUTH STREAM ERROR
-        // ========================================================
+            return;
+          }
+
+          // ======================================================
+          // EMAIL VERIFICATION
+          //
+          // The verification coordinator only acts if the
+          // email-verified deep link was actually received.
+          // ======================================================
+
+          EmailVerificationCoordinator
+              .handleAuthState(
+            authState,
+          );
+        },
 
         onError: (
             Object error,
@@ -452,15 +743,7 @@ Future<void> main() async {
       );
 
   // ==========================================================
-  // DEEP LINK LISTENER
-  //
-  // Important:
-  //
-  // This runs independently from the Supabase auth listener.
-  //
-  // Therefore SmartCity still knows that a recovery link was
-  // opened even when the link cannot create a valid Supabase
-  // recovery session.
+  // LIVE DEEP LINK LISTENER
   // ==========================================================
 
   globalDeepLinkSubscription =
@@ -483,7 +766,7 @@ Future<void> main() async {
       );
 
   // ==========================================================
-  // START APPLICATION
+  // START APP
   // ==========================================================
 
   runApp(
@@ -491,12 +774,10 @@ Future<void> main() async {
   );
 
   // ==========================================================
-  // COLD-START INITIAL LINK
+  // COLD-START DEEP LINK
   //
-  // Some app_links versions/platform situations expose the
-  // launch URI separately from the live stream.
-  //
-  // Reading it here makes cold-start recovery more reliable.
+  // Important when Gmail starts SmartCity from a completely
+  // closed state.
   // ==========================================================
 
   try {
@@ -548,19 +829,19 @@ class _SmartCityAppState
     WidgetsBinding.instance
         .addPostFrameCallback(
           (_) {
-        // ======================================================
-        // RECOVERY EVENT MAY HAVE ARRIVED BEFORE NAVIGATOR
-        // ======================================================
+        // ====================================================
+        // PASSWORD RECOVERY MAY HAVE ARRIVED BEFORE NAVIGATOR
+        // ====================================================
 
         PasswordRecoveryCoordinator
             .tryOpenResetPasswordScreen();
 
-        // ======================================================
-        // INVALID CALLBACK MAY ALSO HAVE ARRIVED EARLY
-        //
-        // The coordinator's own retry mechanism handles the
-        // eventual error navigation.
-        // ======================================================
+        // ====================================================
+        // EMAIL VERIFICATION MAY HAVE ARRIVED BEFORE NAVIGATOR
+        // ====================================================
+
+        EmailVerificationCoordinator
+            .tryOpenVerificationSuccessScreen();
       },
     );
   }
@@ -619,19 +900,18 @@ class _SmartCityAppState
       // ========================================================
       // NORMAL APPLICATION STARTUP
       //
-      // No session
+      // No normal session
       // → WelcomeScreen
       //
       // Existing normal session
       // → AuthGate
       //
-      // Valid recovery
-      // → PasswordRecoveryCoordinator overrides routing and
-      //   opens ResetPasswordScreen
+      // Password recovery callback
+      // → coordinator overrides navigation
       //
-      // Expired / invalid recovery
-      // → PasswordRecoveryCoordinator opens
-      //   PasswordRecoveryErrorScreen
+      // Email verification callback
+      // → coordinator verifies Supabase confirmation first
+      // → EmailVerifiedSuccessScreen
       // ========================================================
 
       home:
@@ -639,6 +919,5 @@ class _SmartCityAppState
           ? const AuthGate()
           : const WelcomeScreen(),
     );
-
   }
 }
