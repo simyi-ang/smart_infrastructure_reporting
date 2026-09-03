@@ -3,8 +3,44 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
 import 'login_screen.dart';
+
+// ================================================================
+// EMAIL VERIFICATION SCREEN
+//
+// Registration is NOT considered complete simply because signUp()
+// returned a User.
+//
+// SmartCity considers registration complete only when:
+//
+// emailConfirmedAt != null
+//
+// The verification status is checked server-side through:
+//
+// check-registration-email
+//
+// Flow:
+//
+// Register
+//    ↓
+// Pending verification
+//    ↓
+// Verification email
+//    ↓
+// User clicks link
+//    ↓
+// User returns here
+//    ↓
+// "I Have Verified My Email"
+//    ↓
+// Server confirms email_confirmed = true
+//    ↓
+// Account Creation Successful
+//    ↓
+// Login
+// ================================================================
 
 class EmailVerificationScreen
     extends StatefulWidget {
@@ -23,7 +59,24 @@ class EmailVerificationScreen
 
 class _EmailVerificationScreenState
     extends State<EmailVerificationScreen> {
+  // ============================================================
+  // SERVICES
+  // ============================================================
+
+  final AuthService authService =
+  AuthService();
+
+  // ============================================================
+  // STATE
+  // ============================================================
+
   bool sending =
+  false;
+
+  bool checkingVerification =
+  false;
+
+  bool verificationCompleted =
   false;
 
   int resendCooldownSeconds =
@@ -47,6 +100,7 @@ class _EmailVerificationScreenState
   Future<void> resendEmail() async {
     if (
     sending ||
+        checkingVerification ||
         resendCooldownSeconds >
             0
     ) {
@@ -75,20 +129,20 @@ class _EmailVerificationScreenState
       _startResendCooldown();
 
       showMessage(
-        'Verification email sent. Please check your inbox.',
+        'Verification email sent. '
+            'Please check your inbox.',
+        success:
+        true,
       );
     } on AuthException catch (e) {
       if (!mounted) {
         return;
       }
 
-      final String message =
-      _formatAuthError(
-        e.message,
-      );
-
       showMessage(
-        message,
+        _formatAuthError(
+          e.message,
+        ),
       );
     } catch (_) {
       if (!mounted) {
@@ -111,8 +165,6 @@ class _EmailVerificationScreenState
 
   // ============================================================
   // RESEND COOLDOWN
-  //
-  // Prevents repeated taps from consuming Supabase email quota.
   // ============================================================
 
   void _startResendCooldown() {
@@ -160,21 +212,318 @@ class _EmailVerificationScreenState
   }
 
   // ============================================================
-  // CONTINUE TO LOGIN
+  // CHECK EMAIL VERIFICATION
   //
-  // This does NOT grant access.
+  // IMPORTANT:
   //
-  // LoginScreen + AuthService will still reject an unverified
-  // email/password account.
+  // We do not trust the button tap itself.
+  //
+  // Clicking:
+  //
+  // "I Have Verified My Email"
+  //
+  // does NOT mark the account as verified.
+  //
+  // SmartCity asks the server whether Supabase has actually
+  // confirmed this email.
+  // ============================================================
+
+  Future<void>
+  checkVerificationStatus() async {
+    if (
+    checkingVerification ||
+        sending
+    ) {
+      return;
+    }
+
+    setState(() {
+      checkingVerification =
+      true;
+    });
+
+    try {
+      // ========================================================
+      // SERVER-SIDE AUTH USER CHECK
+      // ========================================================
+
+      final RegistrationEmailCheckResult
+      result =
+      await authService
+          .checkRegistrationEmail(
+        cleanEmail,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      // ========================================================
+      // ACCOUNT SHOULD EXIST
+      // ========================================================
+
+      if (!result.exists) {
+        showMessage(
+          'Registration information could not be found. '
+              'Please register again.',
+        );
+
+        return;
+      }
+
+      // ========================================================
+      // NOT VERIFIED
+      // ========================================================
+
+      if (!result.emailConfirmed) {
+        setState(() {
+          verificationCompleted =
+          false;
+        });
+
+        showMessage(
+          'Your email has not been verified yet. '
+              'Please open the verification email and click the '
+              'confirmation link first.',
+        );
+
+        return;
+      }
+
+      // ========================================================
+      // VERIFIED
+      //
+      // THIS IS THE POINT WHERE SMARTCITY CONSIDERS THE
+      // REGISTRATION SUCCESSFULLY COMPLETED.
+      // ========================================================
+
+      setState(() {
+        verificationCompleted =
+        true;
+      });
+
+      await showAccountCreatedSuccess();
+
+      if (!mounted) {
+        return;
+      }
+
+      await goToLogin();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
+        'Exception: ',
+        '',
+      )
+          .trim();
+
+      showMessage(
+        message.isEmpty
+            ? 'Unable to check email verification. '
+            'Please try again.'
+            : message,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          checkingVerification =
+          false;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // ACCOUNT CREATED SUCCESSFULLY
+  //
+  // ONLY displayed after:
+  //
+  // result.emailConfirmed == true
+  // ============================================================
+
+  Future<void>
+  showAccountCreatedSuccess() async {
+    await showDialog<void>(
+      context:
+      context,
+
+      barrierDismissible:
+      false,
+
+      builder:
+          (
+          dialogContext,
+          ) {
+        return AlertDialog(
+          backgroundColor:
+          AppColors.surface,
+
+          title:
+          const Row(
+            crossAxisAlignment:
+            CrossAxisAlignment.start,
+
+            children: [
+              Icon(
+                Icons
+                    .check_circle_outline,
+
+                color:
+                AppColors.success,
+
+                size:
+                27,
+              ),
+
+              SizedBox(
+                width:
+                10,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  'Account Created Successfully',
+                ),
+              ),
+            ],
+          ),
+
+          content:
+          Column(
+            mainAxisSize:
+            MainAxisSize.min,
+
+            children: [
+              Container(
+                width:
+                70,
+
+                height:
+                70,
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  AppColors.success
+                      .withOpacity(
+                    0.10,
+                  ),
+
+                  shape:
+                  BoxShape.circle,
+                ),
+
+                child:
+                const Icon(
+                  Icons
+                      .verified_outlined,
+
+                  color:
+                  AppColors.success,
+
+                  size:
+                  38,
+                ),
+              ),
+
+              const SizedBox(
+                height:
+                18,
+              ),
+
+              const Text(
+                'Your email address has been verified successfully.',
+
+                textAlign:
+                TextAlign.center,
+
+                style:
+                TextStyle(
+                  fontWeight:
+                  FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(
+                height:
+                8,
+              ),
+
+              const Text(
+                'Your SmartCity account registration is now '
+                    'complete. You can sign in using your email '
+                    'and password.',
+
+                textAlign:
+                TextAlign.center,
+
+                style:
+                TextStyle(
+                  color:
+                  AppColors.textSecondary,
+
+                  height:
+                  1.5,
+                ),
+              ),
+            ],
+          ),
+
+          actions: [
+            SizedBox(
+              width:
+              double.infinity,
+
+              child:
+              ElevatedButton(
+                style:
+                ElevatedButton
+                    .styleFrom(
+                  backgroundColor:
+                  AppColors.primaryDark,
+                ),
+
+                onPressed:
+                    () {
+                  Navigator.pop(
+                    dialogContext,
+                  );
+                },
+
+                child:
+                const Text(
+                  'Continue to Login',
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // GO TO LOGIN
   // ============================================================
 
   Future<void> goToLogin() async {
     try {
-      // Registration should normally have no active session when
-      // Supabase Confirm Email is enabled.
+      // ========================================================
+      // DEFENSIVE SIGN OUT
       //
-      // Sign out defensively so this screen can never accidentally
-      // carry a registration session into the application.
+      // Registration should not carry an authenticated session
+      // directly into the application.
+      //
+      // The citizen signs in normally after verification.
+      // ========================================================
+
       if (
       Supabase.instance.client.auth
           .currentSession !=
@@ -184,7 +533,8 @@ class _EmailVerificationScreenState
             .signOut();
       }
     } catch (_) {
-      // Navigation should still be allowed.
+      // A local sign-out problem should not trap the user
+      // on the verification screen.
     }
 
     if (!mounted) {
@@ -193,16 +543,31 @@ class _EmailVerificationScreenState
 
     Navigator.pushAndRemoveUntil(
       context,
+
       MaterialPageRoute(
         builder:
             (_) =>
         const LoginScreen(),
       ),
+
           (
           route,
           ) =>
       false,
     );
+  }
+
+  // ============================================================
+  // RETURN TO LOGIN WITHOUT CLAIMING VERIFICATION
+  //
+  // Useful if the user wants to leave this screen.
+  //
+  // LoginScreen/AuthService will still reject the account if
+  // emailConfirmedAt is null.
+  // ============================================================
+
+  Future<void> backToLogin() async {
+    await goToLogin();
   }
 
   // ============================================================
@@ -229,11 +594,11 @@ class _EmailVerificationScreenState
 
     if (
     lower.contains(
-      'already',
+      'already confirmed',
     )
     ) {
-      return 'This email is already associated with an account. '
-          'Please sign in instead.';
+      return 'This email address has already been verified. '
+          'Tap "I Have Verified My Email" to continue.';
     }
 
     return message;
@@ -244,8 +609,9 @@ class _EmailVerificationScreenState
   // ============================================================
 
   void showMessage(
-      String message,
-      ) {
+      String message, {
+        bool success = false,
+      }) {
     ScaffoldMessenger.of(
       context,
     ).hideCurrentSnackBar();
@@ -254,9 +620,52 @@ class _EmailVerificationScreenState
       context,
     ).showSnackBar(
       SnackBar(
+        behavior:
+        SnackBarBehavior.floating,
+
+        duration:
+        const Duration(
+          seconds:
+          4,
+        ),
+
+        backgroundColor:
+        success
+            ? AppColors.success
+            : AppColors.danger,
+
         content:
-        Text(
-          message,
+        Row(
+          children: [
+            Icon(
+              success
+                  ? Icons
+                  .check_circle_outline
+                  : Icons
+                  .error_outline,
+
+              color:
+              Colors.white,
+            ),
+
+            const SizedBox(
+              width:
+              10,
+            ),
+
+            Expanded(
+              child:
+              Text(
+                message,
+
+                style:
+                const TextStyle(
+                  color:
+                  Colors.white,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -283,6 +692,7 @@ class _EmailVerificationScreenState
       ) {
     final bool canResend =
         !sending &&
+            !checkingVerification &&
             resendCooldownSeconds ==
                 0;
 
@@ -318,7 +728,12 @@ class _EmailVerificationScreenState
                 decoration:
                 BoxDecoration(
                   color:
-                  AppColors.primary
+                  verificationCompleted
+                      ? AppColors.success
+                      .withOpacity(
+                    0.12,
+                  )
+                      : AppColors.primary
                       .withOpacity(
                     0.12,
                   ),
@@ -330,15 +745,20 @@ class _EmailVerificationScreenState
                 ),
 
                 child:
-                const Icon(
-                  Icons
-                      .mark_email_read_outlined,
+                Icon(
+                  verificationCompleted
+                      ? Icons
+                      .verified_outlined
+                      : Icons
+                      .mark_email_unread_outlined,
 
                   size:
                   48,
 
                   color:
-                  AppColors.primary,
+                  verificationCompleted
+                      ? AppColors.success
+                      : AppColors.primary,
                 ),
               ),
 
@@ -353,6 +773,9 @@ class _EmailVerificationScreenState
 
               const Text(
                 'Verify Your Email',
+
+                textAlign:
+                TextAlign.center,
 
                 style:
                 TextStyle(
@@ -384,6 +807,10 @@ class _EmailVerificationScreenState
                 8,
               ),
 
+              // =================================================
+              // EMAIL
+              // =================================================
+
               Text(
                 cleanEmail,
 
@@ -397,6 +824,9 @@ class _EmailVerificationScreenState
 
                   fontWeight:
                   FontWeight.bold,
+
+                  fontSize:
+                  15,
                 ),
               ),
 
@@ -406,7 +836,7 @@ class _EmailVerificationScreenState
               ),
 
               // =================================================
-              // SECURITY INFORMATION
+              // REGISTRATION STATUS
               // =================================================
 
               Container(
@@ -440,13 +870,13 @@ class _EmailVerificationScreenState
                   children: [
                     Icon(
                       Icons
-                          .verified_user_outlined,
+                          .pending_actions_outlined,
 
                       color:
-                      AppColors.primary,
+                      AppColors.warning,
 
                       size:
-                      25,
+                      26,
                     ),
 
                     SizedBox(
@@ -455,8 +885,7 @@ class _EmailVerificationScreenState
                     ),
 
                     Text(
-                      'Email verification is required before '
-                          'you can use SmartCity.',
+                      'Registration Pending Verification',
 
                       textAlign:
                       TextAlign.center,
@@ -465,6 +894,9 @@ class _EmailVerificationScreenState
                       TextStyle(
                         fontWeight:
                         FontWeight.bold,
+
+                        fontSize:
+                        15,
                       ),
                     ),
 
@@ -474,9 +906,11 @@ class _EmailVerificationScreenState
                     ),
 
                     Text(
-                      'Open your email and click the verification '
-                          'link. After verification, return to SmartCity '
-                          'and sign in using your email and password.',
+                      'Your registration is not complete yet. '
+                          'Open your email and click the verification '
+                          'link. Your SmartCity account will only '
+                          'become active after your email address has '
+                          'been verified.',
 
                       textAlign:
                       TextAlign.center,
@@ -500,7 +934,7 @@ class _EmailVerificationScreenState
               ),
 
               // =================================================
-              // NOTE
+              // INSTRUCTIONS
               // =================================================
 
               Container(
@@ -550,8 +984,12 @@ class _EmailVerificationScreenState
                     Expanded(
                       child:
                       Text(
-                        'If you do not see the email, check your '
-                            'Spam or Junk folder before requesting another one.',
+                        '1. Open the verification email.\n'
+                            '2. Click the confirmation link.\n'
+                            '3. Return to SmartCity.\n'
+                            '4. Tap "I Have Verified My Email".\n\n'
+                            'If you do not see the email, check your '
+                            'Spam or Junk folder.',
 
                         style:
                         TextStyle(
@@ -562,7 +1000,7 @@ class _EmailVerificationScreenState
                           11,
 
                           height:
-                          1.4,
+                          1.5,
                         ),
                       ),
                     ),
@@ -573,7 +1011,7 @@ class _EmailVerificationScreenState
               const Spacer(),
 
               // =================================================
-              // LOGIN
+              // CHECK VERIFICATION BUTTON
               // =================================================
 
               SizedBox(
@@ -589,22 +1027,51 @@ class _EmailVerificationScreenState
                   ElevatedButton.styleFrom(
                     backgroundColor:
                     AppColors.primaryDark,
+
+                    disabledBackgroundColor:
+                    AppColors.primaryDark
+                        .withOpacity(
+                      0.5,
+                    ),
                   ),
 
                   onPressed:
-                  goToLogin,
+                  checkingVerification ||
+                      sending
+                      ? null
+                      : checkVerificationStatus,
 
                   icon:
-                  const Icon(
-                    Icons.login,
+                  checkingVerification
+                      ? const SizedBox(
+                    width:
+                    18,
+
+                    height:
+                    18,
+
+                    child:
+                    CircularProgressIndicator(
+                      strokeWidth:
+                      2,
+
+                      color:
+                      Colors.white,
+                    ),
+                  )
+                      : const Icon(
+                    Icons
+                        .verified_user_outlined,
                   ),
 
                   label:
-                  const Text(
-                    'Continue to Login',
+                  Text(
+                    checkingVerification
+                        ? 'Checking Verification...'
+                        : 'I Have Verified My Email',
 
                     style:
-                    TextStyle(
+                    const TextStyle(
                       fontWeight:
                       FontWeight.bold,
                     ),
@@ -653,14 +1120,32 @@ class _EmailVerificationScreenState
                       ? 'Sending...'
                       : resendCooldownSeconds >
                       0
-                      ? 'Resend in ${resendCooldownSeconds}s'
+                      ? 'Resend in '
+                      '${resendCooldownSeconds}s'
                       : 'Resend verification email',
+                ),
+              ),
+
+              // =================================================
+              // BACK TO LOGIN
+              // =================================================
+
+              TextButton(
+                onPressed:
+                checkingVerification ||
+                    sending
+                    ? null
+                    : backToLogin,
+
+                child:
+                const Text(
+                  'Back to Login',
                 ),
               ),
 
               const SizedBox(
                 height:
-                15,
+                10,
               ),
             ],
           ),

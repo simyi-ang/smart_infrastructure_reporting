@@ -435,16 +435,51 @@ class _LoginScreenState
   }
 
   // ============================================================
-  // EMAIL / PASSWORD LOGIN
-  // ============================================================
+// EMAIL / PASSWORD LOGIN
+//
+// FINAL SMARTCITY AUTH FLOW:
+//
+// Email + Password
+//        ↓
+// Login-security check
+//        ↓
+// Supabase authentication
+//        ↓
+// Email/password identity?
+//        ↓
+// Email verified?
+//
+// NO
+// ├─ Sign out immediately
+// ├─ Do NOT record failed login
+// ├─ Do NOT remember account
+// ├─ Do NOT clear Quick Lock
+// ├─ Do NOT record successful activity
+// └─ Return to EmailVerificationScreen
+//
+// YES
+// ├─ Reset failed attempts
+// ├─ Remember account if enabled
+// ├─ Finish password-manager autofill
+// ├─ Clear Quick Lock if applicable
+// ├─ Record login activity
+// └─ Continue to AuthGate
+// ============================================================
 
   Future<void> login() async {
+    // ==========================================================
+    // PREVENT DOUBLE SUBMISSION
+    // ==========================================================
+
     if (loading) {
       return;
     }
 
-    if (!(formKey.currentState
-        ?.validate() ??
+    // ==========================================================
+    // FORM VALIDATION
+    // ==========================================================
+
+    if (!(formKey.currentState?.validate() ??
         false)) {
       return;
     }
@@ -453,6 +488,10 @@ class _LoginScreenState
     emailController.text
         .trim()
         .toLowerCase();
+
+    // ==========================================================
+    // CHECK TEMPORARY LOGIN BLOCK
+    // ==========================================================
 
     final status =
     await loginSecurityService
@@ -486,12 +525,24 @@ class _LoginScreenState
       return;
     }
 
+    // ==========================================================
+    // START AUTHENTICATION
+    // ==========================================================
+
     setState(() {
       loading =
       true;
     });
 
     try {
+      // ========================================================
+      // AUTHENTICATE THROUGH AUTH SERVICE
+      //
+      // AuthService also performs its own verification check.
+      // This screen performs a second verification check for
+      // defence in depth.
+      // ========================================================
+
       final response =
       await authService.login(
         email:
@@ -511,7 +562,9 @@ class _LoginScreenState
       }
 
       // ========================================================
-      // SECOND UI-LEVEL VERIFICATION CHECK
+      // DETERMINE WHETHER THIS USER HAS EMAIL/PASSWORD IDENTITY
+      //
+      // Google sign-in is handled separately by googleLogin().
       // ========================================================
 
       final bool hasEmailIdentity =
@@ -524,16 +577,47 @@ class _LoginScreenState
           ) ??
               false;
 
+      // ========================================================
+      // EMAIL VERIFICATION REQUIRED
+      //
+      // IMPORTANT:
+      //
+      // A correct password is NOT enough.
+      //
+      // For an email/password account, SmartCity access is only
+      // granted after:
+      //
+      // user.emailConfirmedAt != null
+      // ========================================================
+
       if (
       hasEmailIdentity &&
           user.emailConfirmedAt ==
               null
       ) {
-        await authService.logout();
+        // ======================================================
+        // REMOVE ANY SESSION
+        // ======================================================
+
+        try {
+          await authService.logout();
+        } catch (_) {
+          // Continue to verification screen even if cleanup
+          // reports an error.
+        }
 
         if (!mounted) {
           return;
         }
+
+        // ======================================================
+        // IMPORTANT:
+        //
+        // DO NOT call recordFailedAttempt().
+        //
+        // The password may have been correct.
+        // The account simply has not completed verification.
+        // ======================================================
 
         Navigator.push(
           context,
@@ -547,11 +631,23 @@ class _LoginScreenState
           ),
         );
 
+        showMessage(
+          'Your registration is still pending. '
+              'Please verify your email address before signing in.',
+        );
+
         return;
       }
 
       // ========================================================
-      // RESET FAILED ATTEMPTS
+      // VERIFIED USER
+      //
+      // From this point onward, authentication succeeded AND the
+      // email requirement has been satisfied.
+      // ========================================================
+
+      // ========================================================
+      // RESET FAILED LOGIN ATTEMPTS
       // ========================================================
 
       await loginSecurityService
@@ -559,8 +655,25 @@ class _LoginScreenState
         email,
       );
 
+      countdownTimer?.cancel();
+
+      if (mounted) {
+        setState(() {
+          blocked =
+          false;
+
+          blockedUntil =
+          null;
+
+          failedAttempts =
+          0;
+        });
+      }
+
       // ========================================================
       // REMEMBER ACCOUNT
+      //
+      // Do this ONLY after successful verified login.
       // ========================================================
 
       if (rememberAccount) {
@@ -577,6 +690,11 @@ class _LoginScreenState
 
       // ========================================================
       // PASSWORD MANAGER
+      //
+      // SmartCity never saves the raw password itself.
+      //
+      // Android/iOS password-management systems can securely
+      // offer to save/update the credential.
       // ========================================================
 
       TextInput.finishAutofillContext(
@@ -585,7 +703,9 @@ class _LoginScreenState
       );
 
       // ========================================================
-      // CLEAR QUICK LOCK ONLY AFTER SUCCESS
+      // QUICK LOCK
+      //
+      // Never clear Quick Lock before successful verified login.
       // ========================================================
 
       if (widget.quickLockMode) {
@@ -597,7 +717,7 @@ class _LoginScreenState
           .markVerifiedForCurrentRun();
 
       // ========================================================
-      // ACTIVITY
+      // LOGIN ACTIVITY
       // ========================================================
 
       await loginActivityService
@@ -610,8 +730,16 @@ class _LoginScreenState
         return;
       }
 
+      // ========================================================
+      // ENTER SMARTCITY
+      // ========================================================
+
       goToAuthGate();
     } catch (e) {
+      // ========================================================
+      // NORMALIZE ERROR
+      // ========================================================
+
       final String message =
       e
           .toString()
@@ -621,30 +749,54 @@ class _LoginScreenState
       )
           .trim();
 
+      final String normalizedMessage =
+      message.toLowerCase();
+
       // ========================================================
       // EMAIL NOT VERIFIED
       //
-      // IMPORTANT:
-      // This is NOT a failed password attempt.
-      // Do NOT increment login-security failures.
+      // AuthService may throw:
+      //
+      // EMAIL_NOT_VERIFIED
+      //
+      // Supabase may alternatively return:
+      //
+      // Email not confirmed
+      //
+      // Handle all expected forms.
       // ========================================================
 
-      if (
-      message ==
-          'EMAIL_NOT_VERIFIED' ||
-          message
-              .toLowerCase()
-              .contains(
-            'email not confirmed',
-          )
-      ) {
+      final bool emailNotVerified =
+          message ==
+              'EMAIL_NOT_VERIFIED' ||
+              normalizedMessage.contains(
+                'email not confirmed',
+              ) ||
+              normalizedMessage.contains(
+                'email_not_confirmed',
+              ) ||
+              normalizedMessage.contains(
+                'email not verified',
+              );
+
+      if (emailNotVerified) {
+        // ======================================================
+        // DEFENSIVE SIGN OUT
+        // ======================================================
+
         try {
           await authService.logout();
-        } catch (_) {}
+        } catch (_) {
+          // Ignore cleanup failure.
+        }
 
         if (!mounted) {
           return;
         }
+
+        // ======================================================
+        // DO NOT INCREASE FAILED-LOGIN COUNT
+        // ======================================================
 
         Navigator.push(
           context,
@@ -659,14 +811,17 @@ class _LoginScreenState
         );
 
         showMessage(
-          'Please verify your email before signing in.',
+          'Your registration is still pending. '
+              'Please verify your email address before signing in.',
         );
 
         return;
       }
 
       // ========================================================
-      // REAL FAILED LOGIN
+      // REAL LOGIN FAILURE
+      //
+      // Only genuine failed authentication reaches this block.
       // ========================================================
 
       final failedStatus =
@@ -690,6 +845,10 @@ class _LoginScreenState
             failedStatus.failedAttempts;
       });
 
+      // ========================================================
+      // MAXIMUM ATTEMPTS REACHED
+      // ========================================================
+
       if (failedStatus.isBlocked) {
         startCountdown();
 
@@ -697,19 +856,25 @@ class _LoginScreenState
           'Too many failed login attempts. '
               'Login has been temporarily blocked for 5 minutes.',
         );
-      } else {
-        final int remaining =
-            LoginSecurityService
-                .maxFailedAttempts -
-                failedStatus
-                    .failedAttempts;
 
-        showMessage(
-          'Invalid email or password. '
-              '$remaining attempt'
-              '${remaining == 1 ? '' : 's'} remaining.',
-        );
+        return;
       }
+
+      // ========================================================
+      // ATTEMPTS REMAINING
+      // ========================================================
+
+      final int remaining =
+          LoginSecurityService
+              .maxFailedAttempts -
+              failedStatus
+                  .failedAttempts;
+
+      showMessage(
+        'Invalid email or password. '
+            '$remaining attempt'
+            '${remaining == 1 ? '' : 's'} remaining.',
+      );
     } finally {
       if (mounted) {
         setState(() {
