@@ -2,69 +2,255 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../../models/report_final_ai_analysis.dart';
 import '../../models/report_image_ai_analysis.dart';
 
 import '../../services/connectivity_service.dart';
 import '../../services/report_service.dart';
 import '../../theme/app_colors.dart';
 
+// ================================================================
+// REPORT PREVIEW SCREEN
+//
+// MULTI-IMAGE SMART ASSIST PREVIEW
+//
+// Existing report submission design and functionality preserved.
+//
+// Supports:
+//
+// Image 1
+//      ↓
+// Individual AI Analysis 1
+//
+// Image 2
+//      ↓
+// Individual AI Analysis 2
+//
+// Image 3
+//      ↓
+// Individual AI Analysis 3
+//
+// All individual analyses
+//      ↓
+// Final Combined Smart Assist Analysis
+//
+// Individual analyses can be expanded / collapsed.
+//
+// ================================================================
+
 class ReportPreviewScreen
     extends StatefulWidget {
+  // ============================================================
+  // FINAL EFFECTIVE REPORT INFORMATION
+  // ============================================================
+
   final String category;
+
   final String priority;
+
   final String title;
+
   final String description;
+
+  // ============================================================
+  // EVIDENCE
+  // ============================================================
+
   final List<File> evidenceImages;
 
+  // ============================================================
+  // LOCATION
+  // ============================================================
+
   final String address;
+
   final String landmark;
 
   final double? latitude;
+
   final double? longitude;
 
   // ============================================================
-  // AI SMART ASSIST RESULT
+  // INDIVIDUAL IMAGE AI RESULTS
   //
-  // Optional so the existing manual reporting flow remains
-  // fully compatible when AI is unavailable or not used.
+  // Key:
+  // local image path
+  //
+  // Value:
+  // AI analysis belonging to that exact image.
   // ============================================================
-  final ReportImageAiAnalysis? aiAnalysis;
+
+  final Map<
+      String,
+      ReportImageAiAnalysis
+  > imageAnalyses;
+
+  // ============================================================
+  // FINAL COMBINED SMART ASSIST RESULT
+  // ============================================================
+
+  final ReportFinalAiAnalysis?
+  finalAiAnalysis;
+
+  // ============================================================
+  // LEGACY SINGLE AI RESULT
+  //
+  // Kept temporarily so older reporting paths still work.
+  // ============================================================
+
+  final ReportImageAiAnalysis?
+  aiAnalysis;
 
   const ReportPreviewScreen({
     super.key,
+
     required this.category,
+
     required this.priority,
+
     required this.title,
+
     required this.description,
+
     required this.evidenceImages,
+
     required this.address,
+
     required this.landmark,
+
     this.latitude,
+
     this.longitude,
+
+    this.imageAnalyses =
+    const {},
+
+    this.finalAiAnalysis,
+
     this.aiAnalysis,
   });
 
   @override
-  State<ReportPreviewScreen> createState() =>
+  State<ReportPreviewScreen>
+  createState() =>
       _ReportPreviewScreenState();
 }
 
+// ================================================================
+// STATE
+// ================================================================
+
 class _ReportPreviewScreenState
     extends State<ReportPreviewScreen> {
+  // ============================================================
+  // SERVICES
+  // ============================================================
+
   final ReportService reportService =
   ReportService();
 
-  final ConnectivityService connectivityService =
+  final ConnectivityService
+  connectivityService =
   const ConnectivityService();
 
-  bool submitting = false;
+  // ============================================================
+  // SUBMISSION STATE
+  // ============================================================
 
-  double uploadProgress = 0;
-  String uploadMessage = '';
+  bool submitting =
+  false;
+
+  double uploadProgress =
+  0;
+
+  String uploadMessage =
+      '';
+
   String? submissionError;
 
   // ============================================================
-  // SUBMIT
+  // EXPANDED IMAGE ANALYSES
+  // ============================================================
+
+  final Set<String>
+  expandedImageAnalyses =
+  <String>{};
+
+  // ============================================================
+  // TOGGLE IMAGE ANALYSIS
+  // ============================================================
+
+  void toggleImageAnalysis(
+      String imagePath,
+      ) {
+    setState(() {
+      if (
+      expandedImageAnalyses
+          .contains(
+        imagePath,
+      )
+      ) {
+        expandedImageAnalyses
+            .remove(
+          imagePath,
+        );
+      } else {
+        expandedImageAnalyses.add(
+          imagePath,
+        );
+      }
+    });
+  }
+
+  // ============================================================
+  // GET ANALYSIS FOR IMAGE
+  //
+  // New:
+  // use image path → AI result.
+  //
+  // Legacy:
+  // if only old aiAnalysis exists, attach it to first image.
+  // ============================================================
+
+  ReportImageAiAnalysis?
+  analysisForImage(
+      File image,
+      int index,
+      ) {
+    final ReportImageAiAnalysis?
+    mapped =
+    widget.imageAnalyses[
+    image.path];
+
+    if (mapped != null) {
+      return mapped;
+    }
+
+    if (
+    widget.imageAnalyses.isEmpty &&
+        widget.aiAnalysis != null &&
+        index == 0
+    ) {
+      return widget.aiAnalysis;
+    }
+
+    return null;
+  }
+
+  // ============================================================
+  // SUBMIT REPORT
+  //
+  // IMPORTANT:
+  //
+  // Existing ReportService signature is preserved temporarily.
+  //
+  // Next step:
+  // ReportService will be upgraded to also receive:
+  //
+  // imageAnalyses
+  // finalAiAnalysis
+  //
+  // and persist them after report_images rows are generated.
   // ============================================================
 
   Future<void> submitReport() async {
@@ -73,42 +259,94 @@ class _ReportPreviewScreenState
     }
 
     setState(() {
-      submitting = true;
-      uploadProgress = 0.02;
-      uploadMessage = 'Checking internet connection...';
-      submissionError = null;
+      submitting =
+      true;
+
+      uploadProgress =
+      0.02;
+
+      uploadMessage =
+      'Checking internet connection...';
+
+      submissionError =
+      null;
     });
 
     try {
-      await connectivityService.requireInternetConnection();
+      // ========================================================
+      // INTERNET CHECK
+      // ========================================================
+
+      await connectivityService
+          .requireInternetConnection();
 
       if (!mounted) {
         return;
       }
 
       setState(() {
-        uploadProgress = 0.05;
-        uploadMessage = 'Preparing submission...';
+        uploadProgress =
+        0.05;
+
+        uploadMessage =
+        'Preparing submission...';
       });
 
-      final result = await reportService.submitReport(
-        title: widget.title,
-        category: widget.category,
-        priority: widget.priority,
-        description: widget.description,
-        address: widget.address,
-        landmark: widget.landmark,
-        latitude: widget.latitude,
-        longitude: widget.longitude,
-        evidenceImages: widget.evidenceImages,
-        onProgress: (ReportUploadProgress progress) {
+      // ========================================================
+      // CURRENT REPORT SERVICE
+      //
+      // AI persistence added in next step.
+      // ========================================================
+
+      final result =
+      await reportService
+          .submitReport(
+        title:
+        widget.title,
+
+        category:
+        widget.category,
+
+        priority:
+        widget.priority,
+
+        description:
+        widget.description,
+
+        address:
+        widget.address,
+
+        landmark:
+        widget.landmark,
+
+        latitude:
+        widget.latitude,
+
+        longitude:
+        widget.longitude,
+
+        evidenceImages:
+        widget.evidenceImages,
+
+        onProgress:
+            (
+            ReportUploadProgress
+            progress,
+            ) {
           if (!mounted) {
             return;
           }
 
           setState(() {
-            uploadProgress = progress.progress.clamp(0.0, 1.0);
-            uploadMessage = progress.message;
+            uploadProgress =
+                progress.progress
+                    .clamp(
+                  0.0,
+                  1.0,
+                );
+
+            uploadMessage =
+                progress.message;
           });
         },
       );
@@ -117,74 +355,157 @@ class _ReportPreviewScreenState
         return;
       }
 
+      // ========================================================
+      // SUCCESS DIALOG
+      // ========================================================
+
       await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) {
+        context:
+        context,
+
+        barrierDismissible:
+        false,
+
+        builder:
+            (
+            dialogContext,
+            ) {
           return AlertDialog(
-            backgroundColor: AppColors.surface,
-            title: const Row(
+            backgroundColor:
+            AppColors.surface,
+
+            title:
+            const Row(
               children: [
                 Icon(
-                  Icons.check_circle_outline,
-                  color: AppColors.success,
+                  Icons
+                      .check_circle_outline,
+
+                  color:
+                  AppColors.success,
                 ),
-                SizedBox(width: 10),
-                Text('Report Submitted'),
+
+                SizedBox(
+                  width:
+                  10,
+                ),
+
+                Text(
+                  'Report Submitted',
+                ),
               ],
             ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+
+            content:
+            Column(
+              mainAxisSize:
+              MainAxisSize.min,
+
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
               children: [
                 const Text(
                   'Your infrastructure report was submitted successfully.',
                 ),
-                const SizedBox(height: 18),
+
+                const SizedBox(
+                  height:
+                  18,
+                ),
+
                 const Text(
                   'REFERENCE NUMBER',
-                  style: TextStyle(
-                    color: AppColors.textSecondary,
-                    fontSize: 10,
+
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    fontSize:
+                    10,
                   ),
                 ),
-                const SizedBox(height: 5),
+
+                const SizedBox(
+                  height:
+                  5,
+                ),
+
                 SelectableText(
                   result.referenceNumber,
-                  style: const TextStyle(
-                    color: AppColors.primary,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
+
+                  style:
+                  const TextStyle(
+                    color:
+                    AppColors.primary,
+
+                    fontSize:
+                    18,
+
+                    fontWeight:
+                    FontWeight.bold,
                   ),
                 ),
-                if (widget.latitude != null &&
-                    widget.longitude != null) ...[
-                  const SizedBox(height: 16),
+
+                if (
+                widget.latitude !=
+                    null &&
+                    widget.longitude !=
+                        null
+                ) ...[
+                  const SizedBox(
+                    height:
+                    16,
+                  ),
+
                   const Text(
                     'GPS LOCATION',
-                    style: TextStyle(
-                      color: AppColors.textSecondary,
-                      fontSize: 10,
+
+                    style:
+                    TextStyle(
+                      color:
+                      AppColors.textSecondary,
+
+                      fontSize:
+                      10,
                     ),
                   ),
-                  const SizedBox(height: 4),
+
+                  const SizedBox(
+                    height:
+                    4,
+                  ),
+
                   Text(
                     '${widget.latitude!.toStringAsFixed(6)}, '
                         '${widget.longitude!.toStringAsFixed(6)}',
-                    style: const TextStyle(
-                      color: AppColors.success,
-                      fontSize: 10,
+
+                    style:
+                    const TextStyle(
+                      color:
+                      AppColors.success,
+
+                      fontSize:
+                      10,
                     ),
                   ),
                 ],
               ],
             ),
+
             actions: [
               ElevatedButton(
                 onPressed: () {
-                  Navigator.pop(dialogContext);
+                  Navigator.pop(
+                    dialogContext,
+                  );
                 },
-                child: const Text('Done'),
+
+                child:
+                const Text(
+                  'Done',
+                ),
               ),
             ],
           );
@@ -195,41 +516,73 @@ class _ReportPreviewScreenState
         return;
       }
 
-      Navigator.of(context).popUntil(
-            (route) => route.isFirst,
+      // ========================================================
+      // RETURN HOME
+      // ========================================================
+
+      Navigator.of(
+        context,
+      ).popUntil(
+            (
+            route,
+            ) =>
+        route.isFirst,
       );
     } catch (e) {
       if (!mounted) {
         return;
       }
 
-      final String message = e.toString().replaceFirst(
+      final String message =
+      e
+          .toString()
+          .replaceFirst(
         'Exception: ',
         '',
       );
 
-      // Stay on the preview screen. All widget values and File objects
-      // remain available, so the Citizen can retry without re-entering data.
+      // ========================================================
+      // PRESERVE USER DATA FOR RETRY
+      // ========================================================
+
       setState(() {
-        submissionError = message;
-        uploadMessage = 'Submission failed. Your report data is still here.';
-        uploadProgress = 0;
+        submissionError =
+            message;
+
+        uploadMessage =
+        'Submission failed. Your report data is still here.';
+
+        uploadProgress =
+        0;
       });
 
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(
+        context,
+      ).hideCurrentSnackBar();
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
         SnackBar(
-          content: Text(message),
+          content:
+          Text(
+            message,
+          ),
         ),
       );
     } finally {
       if (mounted) {
         setState(() {
-          submitting = false;
+          submitting =
+          false;
         });
       }
     }
   }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
 
   @override
   Widget build(
@@ -239,8 +592,10 @@ class _ReportPreviewScreenState
       backgroundColor:
       AppColors.background,
 
-      body: SafeArea(
-        child: Column(
+      body:
+      SafeArea(
+        child:
+        Column(
           children: [
             Expanded(
               child:
@@ -250,14 +605,15 @@ class _ReportPreviewScreenState
                   20,
                 ),
 
-                child: Column(
+                child:
+                Column(
                   crossAxisAlignment:
                   CrossAxisAlignment.start,
 
                   children: [
-                    // ==========================================
+                    // =================================================
                     // HEADER
-                    // ==========================================
+                    // =================================================
 
                     Row(
                       children: [
@@ -322,75 +678,49 @@ class _ReportPreviewScreenState
                       20,
                     ),
 
-                    // ==========================================
+                    // =================================================
                     // EVIDENCE
-                    // ==========================================
+                    // =================================================
 
-                    if (widget
+                    if (
+                    widget
                         .evidenceImages
-                        .isNotEmpty)
-                      SizedBox(
+                        .isNotEmpty
+                    )
+                      _buildEvidenceSection(),
+
+                    if (
+                    widget
+                        .evidenceImages
+                        .isNotEmpty
+                    )
+                      const SizedBox(
                         height:
-                        190,
-
-                        child:
-                        ListView.separated(
-                          scrollDirection:
-                          Axis.horizontal,
-
-                          itemCount:
-                          widget
-                              .evidenceImages
-                              .length,
-
-                          separatorBuilder:
-                              (
-                              _,
-                              __,
-                              ) =>
-                          const SizedBox(
-                            width:
-                            8,
-                          ),
-
-                          itemBuilder:
-                              (
-                              context,
-                              index,
-                              ) {
-                            return ClipRRect(
-                              borderRadius:
-                              BorderRadius.circular(
-                                16,
-                              ),
-
-                              child:
-                              Image.file(
-                                widget.evidenceImages[
-                                index],
-
-                                width:
-                                270,
-
-                                height:
-                                190,
-
-                                fit:
-                                BoxFit.cover,
-                              ),
-                            );
-                          },
-                        ),
+                        16,
                       ),
 
-                    const SizedBox(
-                      height:
-                      16,
-                    ),
+                    // =================================================
+                    // FINAL SMART ASSIST RESULT
+                    // =================================================
 
-                    // ==========================================
+                    if (
+                    widget.finalAiAnalysis !=
+                        null
+                    ) ...[
+                      _buildFinalAiCard(
+                        widget
+                            .finalAiAnalysis!,
+                      ),
+
+                      const SizedBox(
+                        height:
+                        15,
+                      ),
+                    ],
+
+                    // =================================================
                     // DETAILS
-                    // ==========================================
+                    // =================================================
 
                     Container(
                       width:
@@ -531,9 +861,9 @@ class _ReportPreviewScreenState
                       15,
                     ),
 
-                    // ==========================================
+                    // =================================================
                     // LOCATION
-                    // ==========================================
+                    // =================================================
 
                     Container(
                       width:
@@ -595,15 +925,18 @@ class _ReportPreviewScreenState
                             ),
                           ),
 
-                          if (widget.landmark
-                              .isNotEmpty) ...[
+                          if (
+                          widget.landmark
+                              .isNotEmpty
+                          ) ...[
                             const SizedBox(
                               height:
                               7,
                             ),
 
                             Text(
-                              'Landmark: ${widget.landmark}',
+                              'Landmark: '
+                                  '${widget.landmark}',
 
                               style:
                               const TextStyle(
@@ -616,9 +949,12 @@ class _ReportPreviewScreenState
                             ),
                           ],
 
-                          if (widget.latitude != null &&
+                          if (
+                          widget.latitude !=
+                              null &&
                               widget.longitude !=
-                                  null) ...[
+                                  null
+                          ) ...[
                             const SizedBox(
                               height:
                               12,
@@ -702,116 +1038,266 @@ class _ReportPreviewScreenState
               ),
             ),
 
-            // ==============================================
-            // SUBMISSION PROGRESS / RETRY
-            // ==============================================
+            // =====================================================
+            // SUBMISSION PROGRESS
+            // =====================================================
 
             if (submitting)
               Container(
-                margin: const EdgeInsets.fromLTRB(18, 0, 18, 12),
-                padding: const EdgeInsets.all(13),
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withOpacity(0.07),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: AppColors.primaryDark,
+                margin:
+                const EdgeInsets.fromLTRB(
+                  18,
+                  0,
+                  18,
+                  12,
+                ),
+
+                padding:
+                const EdgeInsets.all(
+                  13,
+                ),
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  AppColors.primary
+                      .withOpacity(
+                    0.07,
+                  ),
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    12,
+                  ),
+
+                  border:
+                  Border.all(
+                    color:
+                    AppColors.primaryDark,
                   ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+
+                child:
+                Column(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
                   children: [
                     Row(
                       children: [
                         const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
+                          width:
+                          18,
+
+                          height:
+                          18,
+
+                          child:
+                          CircularProgressIndicator(
+                            strokeWidth:
+                            2,
                           ),
                         ),
-                        const SizedBox(width: 9),
+
+                        const SizedBox(
+                          width:
+                          9,
+                        ),
+
                         Expanded(
-                          child: Text(
-                            uploadMessage.isEmpty
+                          child:
+                          Text(
+                            uploadMessage
+                                .isEmpty
                                 ? 'Submitting report...'
                                 : uploadMessage,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
+
+                            style:
+                            const TextStyle(
+                              fontSize:
+                              10,
+
+                              fontWeight:
+                              FontWeight.w600,
                             ),
                           ),
                         ),
+
                         Text(
                           '${(uploadProgress * 100).round()}%',
-                          style: const TextStyle(
-                            color: AppColors.primary,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
+
+                          style:
+                          const TextStyle(
+                            color:
+                            AppColors.primary,
+
+                            fontSize:
+                            10,
+
+                            fontWeight:
+                            FontWeight.bold,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 9),
+
+                    const SizedBox(
+                      height:
+                      9,
+                    ),
+
                     ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: LinearProgressIndicator(
-                        value: uploadProgress.clamp(0.0, 1.0),
-                        minHeight: 6,
-                        backgroundColor: AppColors.border,
-                        color: AppColors.primary,
+                      borderRadius:
+                      BorderRadius.circular(
+                        10,
+                      ),
+
+                      child:
+                      LinearProgressIndicator(
+                        value:
+                        uploadProgress
+                            .clamp(
+                          0.0,
+                          1.0,
+                        ),
+
+                        minHeight:
+                        6,
+
+                        backgroundColor:
+                        AppColors.border,
+
+                        color:
+                        AppColors.primary,
                       ),
                     ),
                   ],
                 ),
               ),
 
-            if (!submitting && submissionError != null)
+            // =====================================================
+            // SUBMISSION ERROR / RETRY
+            // =====================================================
+
+            if (
+            !submitting &&
+                submissionError !=
+                    null
+            )
               Container(
-                margin: const EdgeInsets.fromLTRB(18, 0, 18, 12),
-                padding: const EdgeInsets.all(13),
-                decoration: BoxDecoration(
-                  color: AppColors.warning.withOpacity(0.07),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: AppColors.warning,
+                margin:
+                const EdgeInsets.fromLTRB(
+                  18,
+                  0,
+                  18,
+                  12,
+                ),
+
+                padding:
+                const EdgeInsets.all(
+                  13,
+                ),
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  AppColors.warning
+                      .withOpacity(
+                    0.07,
+                  ),
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    12,
+                  ),
+
+                  border:
+                  Border.all(
+                    color:
+                    AppColors.warning,
                   ),
                 ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+
+                child:
+                Row(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
                   children: [
                     const Icon(
-                      Icons.cloud_off_outlined,
-                      color: AppColors.warning,
-                      size: 20,
+                      Icons
+                          .cloud_off_outlined,
+
+                      color:
+                      AppColors.warning,
+
+                      size:
+                      20,
                     ),
-                    const SizedBox(width: 9),
+
+                    const SizedBox(
+                      width:
+                      9,
+                    ),
+
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      child:
+                      Column(
+                        crossAxisAlignment:
+                        CrossAxisAlignment.start,
+
                         children: [
                           const Text(
                             'Submission Not Sent',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 11,
+
+                            style:
+                            TextStyle(
+                              fontWeight:
+                              FontWeight.bold,
+
+                              fontSize:
+                              11,
                             ),
                           ),
-                          const SizedBox(height: 4),
+
+                          const SizedBox(
+                            height:
+                            4,
+                          ),
+
                           Text(
                             submissionError!,
-                            style: const TextStyle(
-                              color: AppColors.textSecondary,
-                              fontSize: 9,
-                              height: 1.4,
+
+                            style:
+                            const TextStyle(
+                              color:
+                              AppColors.textSecondary,
+
+                              fontSize:
+                              9,
+
+                              height:
+                              1.4,
                             ),
                           ),
-                          const SizedBox(height: 5),
+
+                          const SizedBox(
+                            height:
+                            5,
+                          ),
+
                           const Text(
-                            'Your entered details, images and location are preserved. '
-                                'Reconnect and tap Retry Submission.',
-                            style: TextStyle(
-                              color: AppColors.success,
-                              fontSize: 9,
+                            'Your entered details, images and '
+                                'location are preserved. Reconnect '
+                                'and tap Retry Submission.',
+
+                            style:
+                            TextStyle(
+                              color:
+                              AppColors.success,
+
+                              fontSize:
+                              9,
                             ),
                           ),
                         ],
@@ -821,9 +1307,9 @@ class _ReportPreviewScreenState
                 ),
               ),
 
-            // ==============================================
+            // =====================================================
             // BUTTONS
-            // ==============================================
+            // =====================================================
 
             Container(
               padding:
@@ -876,12 +1362,14 @@ class _ReportPreviewScreenState
                     child:
                     ElevatedButton(
                       style:
-                      ElevatedButton.styleFrom(
+                      ElevatedButton
+                          .styleFrom(
                         backgroundColor:
                         AppColors.primaryDark,
 
                         minimumSize:
-                        const Size.fromHeight(
+                        const Size
+                            .fromHeight(
                           54,
                         ),
                       ),
@@ -894,8 +1382,11 @@ class _ReportPreviewScreenState
                       child:
                       submitting
                           ? const SizedBox(
-                        width: 22,
-                        height: 22,
+                        width:
+                        22,
+
+                        height:
+                        22,
 
                         child:
                         CircularProgressIndicator(
@@ -907,7 +1398,8 @@ class _ReportPreviewScreenState
                         ),
                       )
                           : Text(
-                        submissionError == null
+                        submissionError ==
+                            null
                             ? '✓ Submit Report'
                             : '↻ Retry Submission',
                       ),
@@ -921,14 +1413,1119 @@ class _ReportPreviewScreenState
       ),
     );
   }
+
+  // ============================================================
+  // EVIDENCE SECTION
+  //
+  // Every evidence image gets its own AI card.
+  // ============================================================
+
+  Widget _buildEvidenceSection() {
+    return Column(
+      crossAxisAlignment:
+      CrossAxisAlignment.start,
+
+      children: [
+        const Text(
+          'EVIDENCE',
+
+          style:
+          TextStyle(
+            color:
+            AppColors.textSecondary,
+
+            fontSize:
+            10,
+
+            fontWeight:
+            FontWeight.w600,
+          ),
+        ),
+
+        const SizedBox(
+          height:
+          8,
+        ),
+
+        ...List.generate(
+          widget.evidenceImages.length,
+              (
+              index,
+              ) {
+            final File image =
+            widget
+                .evidenceImages[
+            index
+            ];
+
+            final ReportImageAiAnalysis?
+            analysis =
+            analysisForImage(
+              image,
+              index,
+            );
+
+            return Padding(
+              padding:
+              const EdgeInsets.only(
+                bottom:
+                10,
+              ),
+
+              child:
+              _buildEvidenceImageCard(
+                image:
+                image,
+
+                index:
+                index,
+
+                analysis:
+                analysis,
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  // ============================================================
+  // EVIDENCE IMAGE CARD
+  //
+  // IMAGE
+  //   ↓
+  // AI STATUS
+  //   ↓
+  // SUMMARY
+  //   ↓ tap
+  // EXPANDED RESULT
+  // ============================================================
+
+  Widget _buildEvidenceImageCard({
+    required File image,
+
+    required int index,
+
+    required ReportImageAiAnalysis?
+    analysis,
+  }) {
+    final bool expanded =
+    expandedImageAnalyses
+        .contains(
+      image.path,
+    );
+
+    return Container(
+      width:
+      double.infinity,
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.surface,
+
+        borderRadius:
+        BorderRadius.circular(
+          16,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.border,
+        ),
+      ),
+
+      child:
+      Column(
+        children: [
+          // =====================================================
+          // IMAGE
+          // =====================================================
+
+          ClipRRect(
+            borderRadius:
+            const BorderRadius.only(
+              topLeft:
+              Radius.circular(
+                15,
+              ),
+
+              topRight:
+              Radius.circular(
+                15,
+              ),
+            ),
+
+            child:
+            Image.file(
+              image,
+
+              width:
+              double.infinity,
+
+              height:
+              190,
+
+              fit:
+              BoxFit.cover,
+            ),
+          ),
+
+          // =====================================================
+          // AI AREA
+          // =====================================================
+
+          Padding(
+            padding:
+            const EdgeInsets.all(
+              12,
+            ),
+
+            child:
+            Column(
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding:
+                      const EdgeInsets
+                          .symmetric(
+                        horizontal:
+                        8,
+
+                        vertical:
+                        4,
+                      ),
+
+                      decoration:
+                      BoxDecoration(
+                        color:
+                        analysis !=
+                            null
+                            ? AppColors
+                            .success
+                            .withOpacity(
+                          0.10,
+                        )
+                            : AppColors
+                            .border
+                            .withOpacity(
+                          0.5,
+                        ),
+
+                        borderRadius:
+                        BorderRadius
+                            .circular(
+                          20,
+                        ),
+                      ),
+
+                      child:
+                      Text(
+                        analysis !=
+                            null
+                            ? '✓ AI Analysed'
+                            : 'AI Not Available',
+
+                        style:
+                        TextStyle(
+                          color:
+                          analysis !=
+                              null
+                              ? AppColors
+                              .success
+                              : AppColors
+                              .textSecondary,
+
+                          fontSize:
+                          9,
+
+                          fontWeight:
+                          FontWeight
+                              .w600,
+                        ),
+                      ),
+                    ),
+
+                    const Spacer(),
+
+                    Text(
+                      'Image ${index + 1}',
+
+                      style:
+                      const TextStyle(
+                        color:
+                        AppColors
+                            .textSecondary,
+
+                        fontSize:
+                        10,
+                      ),
+                    ),
+                  ],
+                ),
+
+                // =================================================
+                // COLLAPSED SUMMARY
+                // =================================================
+
+                if (analysis !=
+                    null) ...[
+                  const SizedBox(
+                    height:
+                    9,
+                  ),
+
+                  InkWell(
+                    onTap: () {
+                      toggleImageAnalysis(
+                        image.path,
+                      );
+                    },
+
+                    borderRadius:
+                    BorderRadius
+                        .circular(
+                      8,
+                    ),
+
+                    child:
+                    Padding(
+                      padding:
+                      const EdgeInsets
+                          .symmetric(
+                        vertical:
+                        5,
+                      ),
+
+                      child:
+                      Row(
+                        children: [
+                          Expanded(
+                            child:
+                            Text(
+                              analysis.issueDetected ==
+                                  true
+                                  ? '${analysis.issueLabel} • '
+                                  '${analysis.severity ?? 'Unknown'} • '
+                                  '${analysis.confidence ?? 'Low'} confidence'
+                                  : 'No clear infrastructure issue detected',
+
+                              style:
+                              const TextStyle(
+                                fontSize:
+                                10,
+
+                                fontWeight:
+                                FontWeight
+                                    .w600,
+                              ),
+                            ),
+                          ),
+
+                          Icon(
+                            expanded
+                                ? Icons
+                                .expand_less
+                                : Icons
+                                .expand_more,
+
+                            color:
+                            AppColors
+                                .primary,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+
+                // =================================================
+                // EXPANDED AI RESULT
+                // =================================================
+
+                if (
+                analysis !=
+                    null &&
+                    expanded
+                ) ...[
+                  const Divider(
+                    color:
+                    AppColors.border,
+                  ),
+
+                  const SizedBox(
+                    height:
+                    5,
+                  ),
+
+                  _AiInfoRow(
+                    label:
+                    'Detected Issue',
+
+                    value:
+                    analysis.issueDetected ==
+                        true
+                        ? analysis
+                        .issueLabel
+                        : 'No clear issue detected',
+                  ),
+
+                  _AiInfoRow(
+                    label:
+                    'Category',
+
+                    value:
+                    analysis.category ??
+                        'Other',
+                  ),
+
+                  _AiInfoRow(
+                    label:
+                    'Subcategory',
+
+                    value:
+                    analysis.subcategory ??
+                        'Unknown',
+                  ),
+
+                  _AiInfoRow(
+                    label:
+                    'Severity',
+
+                    value:
+                    analysis.severity ??
+                        'Unknown',
+                  ),
+
+                  _AiInfoRow(
+                    label:
+                    'Confidence',
+
+                    value:
+                    analysis.confidence ??
+                        'Low',
+                  ),
+
+                  _AiInfoRow(
+                    label:
+                    'Evidence Quality',
+
+                    value:
+                    analysis.evidenceQuality ??
+                        'Unknown',
+                  ),
+
+                  if (
+                  analysis.description
+                      ?.trim()
+                      .isNotEmpty ==
+                      true
+                  ) ...[
+                    const SizedBox(
+                      height:
+                      6,
+                    ),
+
+                    _AiTextBlock(
+                      label:
+                      'AI Observation',
+
+                      text:
+                      analysis.description!,
+                    ),
+                  ],
+
+                  if (
+                  analysis.safetyConcern
+                      ?.trim()
+                      .isNotEmpty ==
+                      true
+                  ) ...[
+                    const SizedBox(
+                      height:
+                      6,
+                    ),
+
+                    _AiTextBlock(
+                      label:
+                      'Safety Concern',
+
+                      text:
+                      analysis
+                          .safetyConcern!,
+
+                      warning:
+                      true,
+                    ),
+                  ],
+
+                  if (
+                  analysis
+                      .retakeRecommended
+                  ) ...[
+                    const SizedBox(
+                      height:
+                      6,
+                    ),
+
+                    _AiTextBlock(
+                      label:
+                      'Retake Recommended',
+
+                      text:
+                      analysis.retakeReason ??
+                          'A clearer evidence image may improve analysis accuracy.',
+
+                      warning:
+                      true,
+                    ),
+                  ],
+
+                  if (
+                  analysis
+                      .needsHumanReview
+                  ) ...[
+                    const SizedBox(
+                      height:
+                      6,
+                    ),
+
+                    const _AiTextBlock(
+                      label:
+                      'Human Review',
+
+                      text:
+                      'This image analysis may require additional human verification.',
+
+                      warning:
+                      true,
+                    ),
+                  ],
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // FINAL COMBINED SMART ASSIST CARD
+  // ============================================================
+
+  Widget _buildFinalAiCard(
+      ReportFinalAiAnalysis result,
+      ) {
+    final Color qualityColor =
+    result.shouldSuggestReportEdit
+        ? AppColors.warning
+        : AppColors.success;
+
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        16,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        const Color(
+          0xFF10253E,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          16,
+        ),
+
+        border:
+        Border.all(
+          color:
+          const Color(
+            0xFF8F80FF,
+          ).withOpacity(
+            0.45,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          // =====================================================
+          // HEADER
+          // =====================================================
+
+          Row(
+            children: [
+              const Icon(
+                Icons.auto_awesome,
+
+                color:
+                Color(
+                  0xFF8F80FF,
+                ),
+
+                size:
+                20,
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              const Expanded(
+                child:
+                Text(
+                  'Final Smart Assist Analysis',
+
+                  style:
+                  TextStyle(
+                    color:
+                    Color(
+                      0xFF8F80FF,
+                    ),
+
+                    fontSize:
+                    13,
+
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+              ),
+
+              Text(
+                '${result.analyzedImageCount} image'
+                    '${result.analyzedImageCount == 1 ? '' : 's'}',
+
+                style:
+                const TextStyle(
+                  color:
+                  AppColors
+                      .textSecondary,
+
+                  fontSize:
+                  9,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            12,
+          ),
+
+          // =====================================================
+          // REPORT QUALITY
+          // =====================================================
+
+          Container(
+            width:
+            double.infinity,
+
+            padding:
+            const EdgeInsets.all(
+              10,
+            ),
+
+            decoration:
+            BoxDecoration(
+              color:
+              qualityColor
+                  .withOpacity(
+                0.08,
+              ),
+
+              borderRadius:
+              BorderRadius
+                  .circular(
+                10,
+              ),
+
+              border:
+              Border.all(
+                color:
+                qualityColor
+                    .withOpacity(
+                  0.35,
+                ),
+              ),
+            ),
+
+            child:
+            Row(
+              children: [
+                Icon(
+                  result
+                      .shouldSuggestReportEdit
+                      ? Icons
+                      .warning_amber_rounded
+                      : Icons
+                      .check_circle_outline,
+
+                  color:
+                  qualityColor,
+
+                  size:
+                  17,
+                ),
+
+                const SizedBox(
+                  width:
+                  8,
+                ),
+
+                Expanded(
+                  child:
+                  Text(
+                    result.shouldSuggestReportEdit
+                        ? 'Report Needs Improvement'
+                        : 'Report Quality',
+
+                    style:
+                    TextStyle(
+                      color:
+                      qualityColor,
+
+                      fontSize:
+                      10,
+
+                      fontWeight:
+                      FontWeight.bold,
+                    ),
+                  ),
+                ),
+
+                Text(
+                  result
+                      .reportQualityLabel,
+
+                  style:
+                  TextStyle(
+                    color:
+                    qualityColor,
+
+                    fontSize:
+                    10,
+
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            12,
+          ),
+
+          // =====================================================
+          // FINAL RESULT
+          // =====================================================
+
+          _AiInfoRow(
+            label:
+            'Final Issue',
+
+            value:
+            result.issueDetected ==
+                true
+                ? result.issueLabel
+                : 'No clear issue detected',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Final Category',
+
+            value:
+            result.category ??
+                'Other',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Subcategory',
+
+            value:
+            result.subcategory ??
+                'Unknown',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Severity',
+
+            value:
+            result.severity ??
+                'Unknown',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Confidence',
+
+            value:
+            result.confidence ??
+                'Low',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Evidence Quality',
+
+            value:
+            result.evidenceQuality ??
+                'Unknown',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Consistency',
+
+            value:
+            result
+                .evidenceConsistencyLabel,
+          ),
+
+          _AiInfoRow(
+            label:
+            'Recommended Priority',
+
+            value:
+            result.recommendedPriority ??
+                result.severity ??
+                widget.priority,
+          ),
+
+          _AiInfoRow(
+            label:
+            'Title Quality',
+
+            value:
+            result.titleMeaningful ==
+                false
+                ? 'Needs Improvement'
+                : 'Meaningful',
+          ),
+
+          _AiInfoRow(
+            label:
+            'Description Quality',
+
+            value:
+            result.descriptionMeaningful ==
+                false
+                ? 'Needs Improvement'
+                : 'Meaningful',
+          ),
+
+          // =====================================================
+          // EVIDENCE CONFLICT
+          // =====================================================
+
+          if (
+          result.conflictingEvidence
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'Evidence Conflict',
+
+              text:
+              result.conflictingEvidenceReason ??
+                  'The evidence images do not fully agree.',
+
+              warning:
+              true,
+            ),
+          ],
+
+          // =====================================================
+          // HUMAN REVIEW
+          // =====================================================
+
+          if (
+          result.needsHumanReview
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'Human Review Recommended',
+
+              text:
+              result.humanReviewReason ??
+                  'The final AI assessment should be verified by a worker.',
+
+              warning:
+              true,
+            ),
+          ],
+
+          // =====================================================
+          // REPORT ISSUE
+          // =====================================================
+
+          if (
+          result.reportIssue
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'Report Quality Issue',
+
+              text:
+              result.reportIssue!,
+
+              warning:
+              true,
+            ),
+          ],
+
+          // =====================================================
+          // MISSING INFORMATION
+          // =====================================================
+
+          if (
+          result
+              .missingInformation
+              .isNotEmpty
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'Missing / Unclear Information',
+
+              text:
+              result
+                  .missingInformation
+                  .map(
+                    (
+                    item,
+                    ) =>
+                '• $item',
+              )
+                  .join(
+                '\n',
+              ),
+
+              warning:
+              true,
+            ),
+          ],
+
+          // =====================================================
+          // COMBINED SUMMARY
+          // =====================================================
+
+          if (
+          result.description
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'Combined Evidence Summary',
+
+              text:
+              result.description!,
+            ),
+          ],
+
+          // =====================================================
+          // SAFETY
+          // =====================================================
+
+          if (
+          result.safetyConcern
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'Safety Concern',
+
+              text:
+              result
+                  .safetyConcern!,
+
+              warning:
+              true,
+            ),
+          ],
+
+          // =====================================================
+          // SUGGESTED TITLE
+          // =====================================================
+
+          if (
+          result.suggestedTitle
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'AI Suggested Title',
+
+              text:
+              result.suggestedTitle!,
+            ),
+          ],
+
+          // =====================================================
+          // SUGGESTED DESCRIPTION
+          // =====================================================
+
+          if (
+          result
+              .suggestedDescription
+              ?.trim()
+              .isNotEmpty ==
+              true
+          ) ...[
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            _AiTextBlock(
+              label:
+              'AI Suggested Description',
+
+              text:
+              result
+                  .suggestedDescription!,
+            ),
+          ],
+
+          const SizedBox(
+            height:
+            10,
+          ),
+
+          // =====================================================
+          // HUMAN-IN-THE-LOOP STATUS
+          // =====================================================
+
+          if (
+          result.reviewedByUser
+          )
+            Text(
+              result.suggestionsApplied
+                  ? '✓ Citizen selected the final Smart Assist suggestions.'
+                  : '✓ Citizen reviewed Smart Assist and kept the original report information.',
+
+              style:
+              const TextStyle(
+                color:
+                AppColors.success,
+
+                fontSize:
+                9,
+
+                fontWeight:
+                FontWeight.w600,
+
+                height:
+                1.4,
+              ),
+            ),
+
+          if (
+          result.reviewedByUser
+          )
+            const SizedBox(
+              height:
+              8,
+            ),
+
+          const Text(
+            'AI-generated assessment based on all analyzed '
+                'evidence. Smart Assist is advisory and the final '
+                'report remains subject to human review.',
+
+            style:
+            TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              9,
+
+              fontStyle:
+              FontStyle.italic,
+
+              height:
+              1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ================================================================
 // INFO ITEM
 // ================================================================
 
-class _InfoItem extends StatelessWidget {
+class _InfoItem
+    extends StatelessWidget {
   final String label;
+
   final String value;
 
   const _InfoItem({
@@ -991,6 +2588,185 @@ class _InfoItem extends StatelessWidget {
             const TextStyle(
               fontWeight:
               FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ================================================================
+// AI INFO ROW
+// ================================================================
+
+class _AiInfoRow
+    extends StatelessWidget {
+  final String label;
+
+  final String value;
+
+  const _AiInfoRow({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Padding(
+      padding:
+      const EdgeInsets.only(
+        bottom:
+        7,
+      ),
+
+      child:
+      Row(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          SizedBox(
+            width:
+            125,
+
+            child:
+            Text(
+              label,
+
+              style:
+              const TextStyle(
+                color:
+                AppColors.textSecondary,
+
+                fontSize:
+                9,
+              ),
+            ),
+          ),
+
+          Expanded(
+            child:
+            Text(
+              value,
+
+              style:
+              const TextStyle(
+                fontSize:
+                10,
+
+                fontWeight:
+                FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ================================================================
+// AI TEXT BLOCK
+// ================================================================
+
+class _AiTextBlock
+    extends StatelessWidget {
+  final String label;
+
+  final String text;
+
+  final bool warning;
+
+  const _AiTextBlock({
+    required this.label,
+    required this.text,
+    this.warning = false,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        10,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        warning
+            ? AppColors.warning
+            .withOpacity(
+          0.07,
+        )
+            : AppColors
+            .surfaceLight,
+
+        borderRadius:
+        BorderRadius.circular(
+          10,
+        ),
+
+        border:
+        warning
+            ? Border.all(
+          color:
+          AppColors.warning
+              .withOpacity(
+            0.35,
+          ),
+        )
+            : null,
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Text(
+            label,
+
+            style:
+            TextStyle(
+              color:
+              warning
+                  ? AppColors.warning
+                  : AppColors
+                  .textSecondary,
+
+              fontSize:
+              9,
+
+              fontWeight:
+              FontWeight.w600,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            4,
+          ),
+
+          Text(
+            text,
+
+            style:
+            const TextStyle(
+              fontSize:
+              10,
+
+              height:
+              1.4,
             ),
           ),
         ],

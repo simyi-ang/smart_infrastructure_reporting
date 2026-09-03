@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../../models/nearby_report.dart';
+import '../../models/report_final_ai_analysis.dart';
 import '../../models/report_image_ai_analysis.dart';
 import '../../services/location_service.dart';
 import '../../services/nearby_report_service.dart';
@@ -11,8 +12,30 @@ import '../../theme/app_colors.dart';
 import 'map_picker_screen.dart';
 import 'report_preview_screen.dart';
 
+// ================================================================
+// CREATE REPORT LOCATION SCREEN
+//
+// Existing design and functionality preserved.
+//
+// Added multi-image Smart Assist support:
+//
+// evidenceImages
+//      ↓
+// imageAnalyses
+//      ↓
+// finalAiAnalysis
+//
+// This screen DOES NOT run AI.
+// It only preserves and forwards AI information from Evidence.
+//
+// ================================================================
+
 class CreateReportLocationScreen
     extends StatefulWidget {
+  // ============================================================
+  // FINAL EFFECTIVE REPORT INFORMATION
+  // ============================================================
+
   final String category;
 
   final String priority;
@@ -21,24 +44,64 @@ class CreateReportLocationScreen
 
   final String description;
 
+  // ============================================================
+  // EVIDENCE
+  // ============================================================
+
   final List<File> evidenceImages;
 
   // ============================================================
-  // AI SMART ASSIST RESULT
+  // INDIVIDUAL IMAGE AI RESULTS
   //
-  // Optional so the existing manual reporting flow still works
-  // when AI is unavailable or no analysis was completed.
+  // KEY:
+  // local evidence image path
+  //
+  // VALUE:
+  // analysis belonging to that image
   // ============================================================
 
-  final ReportImageAiAnalysis? aiAnalysis;
+  final Map<
+      String,
+      ReportImageAiAnalysis
+  > imageAnalyses;
+
+  // ============================================================
+  // FINAL COMBINED SMART ASSIST RESULT
+  // ============================================================
+
+  final ReportFinalAiAnalysis?
+  finalAiAnalysis;
+
+  // ============================================================
+  // LEGACY SINGLE IMAGE ANALYSIS
+  //
+  // Kept temporarily so older report flows remain compatible.
+  //
+  // Later ReportPreviewScreen can be fully migrated to the new
+  // multi-image structures.
+  // ============================================================
+
+  final ReportImageAiAnalysis?
+  aiAnalysis;
 
   const CreateReportLocationScreen({
     super.key,
+
     required this.category,
+
     required this.priority,
+
     required this.title,
+
     required this.description,
+
     required this.evidenceImages,
+
+    this.imageAnalyses =
+    const {},
+
+    this.finalAiAnalysis,
+
     this.aiAnalysis,
   });
 
@@ -48,13 +111,26 @@ class CreateReportLocationScreen
       _CreateReportLocationScreenState();
 }
 
+// ================================================================
+// STATE
+// ================================================================
+
 class _CreateReportLocationScreenState
     extends State<CreateReportLocationScreen> {
+  // ============================================================
+  // SERVICES
+  // ============================================================
+
   final LocationService locationService =
   LocationService();
 
-  final NearbyReportService nearbyReportService =
+  final NearbyReportService
+  nearbyReportService =
   NearbyReportService();
+
+  // ============================================================
+  // CONTROLLERS
+  // ============================================================
 
   final TextEditingController
   addressController =
@@ -64,35 +140,78 @@ class _CreateReportLocationScreenState
   landmarkController =
   TextEditingController();
 
+  // ============================================================
+  // LOCATION STATE
+  // ============================================================
+
   double? latitude;
 
   double? longitude;
 
-  // GPS accuracy in metres. This is only available when
-  // the location came from the phone/emulator GPS.
+  // GPS accuracy in metres.
+  //
+  // Available only when location comes from GPS.
   double? gpsAccuracy;
 
-  bool gettingLocation = false;
+  bool gettingLocation =
+  false;
 
-  bool locationDetected = false;
+  bool locationDetected =
+  false;
 
-  bool checkingNearby = false;
+  // ============================================================
+  // NEARBY REPORT CHECK
+  // ============================================================
 
-  List<NearbyReport> nearbyReports = [];
+  bool checkingNearby =
+  false;
 
-  NearbyReport? possibleDuplicate;
+  List<NearbyReport> nearbyReports =
+  [];
+
+  NearbyReport?
+  possibleDuplicate;
+
+  // ============================================================
+  // LEGACY ANALYSIS FALLBACK
+  //
+  // Current Preview screen may still expect one
+  // ReportImageAiAnalysis.
+  //
+  // Prefer explicitly supplied aiAnalysis.
+  //
+  // Otherwise use the first individual image analysis.
+  // ============================================================
+
+  ReportImageAiAnalysis?
+  get legacyAiAnalysis {
+    if (widget.aiAnalysis != null) {
+      return widget.aiAnalysis;
+    }
+
+    if (widget.imageAnalyses.isNotEmpty) {
+      return widget
+          .imageAnalyses
+          .values
+          .first;
+    }
+
+    return null;
+  }
 
   // ============================================================
   // GET CURRENT LOCATION
   // ============================================================
 
-  Future<void> detectCurrentLocation() async {
+  Future<void>
+  detectCurrentLocation() async {
     if (gettingLocation) {
       return;
     }
 
     setState(() {
-      gettingLocation = true;
+      gettingLocation =
+      true;
     });
 
     try {
@@ -121,13 +240,22 @@ class _CreateReportLocationScreenState
         true;
       });
 
+      // ========================================================
+      // NEARBY DUPLICATE CHECK
+      // ========================================================
+
       await checkNearbyReports();
 
       if (!mounted) {
         return;
       }
 
-      if (result.accuracy > 50) {
+      // ========================================================
+      // GPS QUALITY MESSAGE
+      // ========================================================
+
+      if (result.accuracy >
+          50) {
         showMessage(
           'Location detected, but GPS accuracy is low '
               '(±${result.accuracy.toStringAsFixed(0)} m). '
@@ -144,7 +272,9 @@ class _CreateReportLocationScreenState
       }
 
       final String message =
-      e.toString().replaceFirst(
+      e
+          .toString()
+          .replaceFirst(
         'Exception: ',
         '',
       );
@@ -155,7 +285,8 @@ class _CreateReportLocationScreenState
     } finally {
       if (mounted) {
         setState(() {
-          gettingLocation = false;
+          gettingLocation =
+          false;
         });
       }
     }
@@ -165,7 +296,8 @@ class _CreateReportLocationScreenState
   // MAP PICKER
   // ============================================================
 
-  Future<void> openMapPicker() async {
+  Future<void>
+  openMapPicker() async {
     double startingLatitude =
         latitude ??
             3.1390;
@@ -174,8 +306,14 @@ class _CreateReportLocationScreenState
         longitude ??
             101.6869;
 
-    if (latitude == null ||
-        longitude == null) {
+    // ==========================================================
+    // TRY CURRENT LOCATION FOR INITIAL MAP POSITION
+    // ==========================================================
+
+    if (
+    latitude == null ||
+        longitude == null
+    ) {
       try {
         final result =
         await locationService
@@ -187,7 +325,7 @@ class _CreateReportLocationScreenState
         startingLongitude =
             result.longitude;
       } catch (_) {
-        // Kuala Lumpur fallback for map starting position only.
+        // Kuala Lumpur fallback is used only to initialise map.
       }
     }
 
@@ -195,8 +333,13 @@ class _CreateReportLocationScreenState
       return;
     }
 
+    // ==========================================================
+    // OPEN MAP
+    // ==========================================================
+
     final MapPickerResult? result =
-    await Navigator.push<MapPickerResult>(
+    await Navigator
+        .push<MapPickerResult>(
       context,
 
       MaterialPageRoute(
@@ -215,6 +358,10 @@ class _CreateReportLocationScreenState
       return;
     }
 
+    // ==========================================================
+    // SAVE MAP RESULT
+    // ==========================================================
+
     setState(() {
       latitude =
           result.latitude;
@@ -222,6 +369,8 @@ class _CreateReportLocationScreenState
       longitude =
           result.longitude;
 
+      // Manually selected map point does not have device GPS
+      // accuracy metadata.
       gpsAccuracy =
       null;
 
@@ -236,27 +385,48 @@ class _CreateReportLocationScreenState
   }
 
   // ============================================================
-  // NEARBY REPORTS
+  // CHECK NEARBY REPORTS
   // ============================================================
 
-  Future<void> checkNearbyReports() async {
-    final double? currentLatitude =
+  Future<void>
+  checkNearbyReports() async {
+    final double?
+    currentLatitude =
         latitude;
 
-    final double? currentLongitude =
+    final double?
+    currentLongitude =
         longitude;
 
-    if (currentLatitude == null ||
-        currentLongitude == null) {
+    if (
+    currentLatitude == null ||
+        currentLongitude == null
+    ) {
       return;
     }
 
     setState(() {
-      checkingNearby = true;
+      checkingNearby =
+      true;
     });
 
     try {
-      final List<NearbyReport> reports =
+      // ========================================================
+      // IMPORTANT
+      //
+      // widget.category is already the EFFECTIVE category.
+      //
+      // Therefore:
+      //
+      // Keep Mine
+      //     → citizen category
+      //
+      // Apply AI
+      //     → final combined AI category
+      // ========================================================
+
+      final List<NearbyReport>
+      reports =
       await nearbyReportService
           .getNearbyReports(
         latitude:
@@ -272,11 +442,21 @@ class _CreateReportLocationScreenState
         500,
       );
 
-      NearbyReport? duplicate;
+      // ========================================================
+      // DUPLICATE WITHIN 100 METRES
+      // ========================================================
 
-      for (final report in reports) {
-        if (report.distanceMeters <=
-            100) {
+      NearbyReport?
+      duplicate;
+
+      for (
+      final NearbyReport report
+      in reports
+      ) {
+        if (
+        report.distanceMeters <=
+            100
+        ) {
           duplicate =
               report;
 
@@ -303,29 +483,40 @@ class _CreateReportLocationScreenState
         return;
       }
 
+      // Nearby checking must not prevent citizen reporting.
       setState(() {
-        nearbyReports = [];
+        nearbyReports =
+        [];
 
-        possibleDuplicate = null;
+        possibleDuplicate =
+        null;
 
-        checkingNearby = false;
+        checkingNearby =
+        false;
       });
     }
   }
 
   // ============================================================
-  // LOCATION ERROR
+  // LOCATION ERROR DIALOG
   // ============================================================
 
-  Future<void> showLocationErrorDialog(
+  Future<void>
+  showLocationErrorDialog(
       String message,
       ) async {
+    if (!mounted) {
+      return;
+    }
+
     await showDialog<void>(
       context:
       context,
 
       builder:
-          (dialogContext) {
+          (
+          dialogContext,
+          ) {
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
@@ -414,12 +605,18 @@ class _CreateReportLocationScreenState
   }
 
   // ============================================================
-  // PREVIEW
+  // PREVIEW REPORT
   // ============================================================
 
-  Future<void> previewReport() async {
+  Future<void>
+  previewReport() async {
     final String address =
-    addressController.text.trim();
+    addressController.text
+        .trim();
+
+    // ==========================================================
+    // ADDRESS REQUIRED
+    // ==========================================================
 
     if (address.isEmpty) {
       showMessage(
@@ -429,15 +626,24 @@ class _CreateReportLocationScreenState
       return;
     }
 
-    if (latitude == null ||
-        longitude == null) {
-      final bool? continueWithoutGps =
+    // ==========================================================
+    // MANUAL ADDRESS WITHOUT COORDINATES
+    // ==========================================================
+
+    if (
+    latitude == null ||
+        longitude == null
+    ) {
+      final bool?
+      continueWithoutGps =
       await showDialog<bool>(
         context:
         context,
 
         builder:
-            (dialogContext) {
+            (
+            dialogContext,
+            ) {
           return AlertDialog(
             backgroundColor:
             AppColors.surface,
@@ -449,8 +655,9 @@ class _CreateReportLocationScreenState
 
             content:
             const Text(
-              'You entered an address manually, but no GPS coordinates are attached. '
-                  'Using the map or GPS is recommended for accurate issue tracking.',
+              'You entered an address manually, but no GPS '
+                  'coordinates are attached. Using the map or GPS '
+                  'is recommended for accurate issue tracking.',
             ),
 
             actions: [
@@ -486,18 +693,30 @@ class _CreateReportLocationScreenState
         },
       );
 
-      if (continueWithoutGps !=
-          true) {
+      if (
+      continueWithoutGps !=
+          true
+      ) {
         return;
       }
     }
 
-    if (possibleDuplicate != null) {
-      final bool? continueDuplicate =
+    // ==========================================================
+    // DUPLICATE WARNING
+    // ==========================================================
+
+    if (
+    possibleDuplicate !=
+        null
+    ) {
+      final bool?
+      continueDuplicate =
       await _showDuplicateWarning();
 
-      if (continueDuplicate !=
-          true) {
+      if (
+      continueDuplicate !=
+          true
+      ) {
         return;
       }
     }
@@ -506,12 +725,30 @@ class _CreateReportLocationScreenState
       return;
     }
 
+    // ==========================================================
+    // PREVIEW
+    //
+    // IMPORTANT:
+    //
+    // ReportPreviewScreen currently still supports the legacy
+    // single aiAnalysis field.
+    //
+    // We retain all multi-image data here so this Location screen
+    // is already compatible with the upgraded Evidence screen.
+    //
+    // The next update will migrate ReportPreviewScreen itself.
+    // ==========================================================
+
     Navigator.push(
       context,
 
       MaterialPageRoute(
         builder: (_) =>
             ReportPreviewScreen(
+              // ====================================================
+              // FINAL EFFECTIVE REPORT INFORMATION
+              // ====================================================
+
               category:
               widget.category,
 
@@ -524,8 +761,16 @@ class _CreateReportLocationScreenState
               description:
               widget.description,
 
+              // ====================================================
+              // EVIDENCE
+              // ====================================================
+
               evidenceImages:
               widget.evidenceImages,
+
+              // ====================================================
+              // LOCATION
+              // ====================================================
 
               address:
               address,
@@ -540,8 +785,15 @@ class _CreateReportLocationScreenState
               longitude:
               longitude,
 
+              // ====================================================
+              // LEGACY AI
+              //
+              // This keeps current Preview compiling until the next
+              // screen is upgraded.
+              // ====================================================
+
               aiAnalysis:
-              widget.aiAnalysis,
+              legacyAiAnalysis,
             ),
       ),
     );
@@ -553,7 +805,8 @@ class _CreateReportLocationScreenState
 
   Future<bool?>
   _showDuplicateWarning() {
-    final NearbyReport? report =
+    final NearbyReport?
+    report =
         possibleDuplicate;
 
     if (report == null) {
@@ -567,7 +820,9 @@ class _CreateReportLocationScreenState
       context,
 
       builder:
-          (dialogContext) {
+          (
+          dialogContext,
+          ) {
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
@@ -607,7 +862,8 @@ class _CreateReportLocationScreenState
 
             children: [
               const Text(
-                'A similar infrastructure issue has already been reported very close to this location.',
+                'A similar infrastructure issue has already '
+                    'been reported very close to this location.',
               ),
 
               const SizedBox(
@@ -651,8 +907,7 @@ class _CreateReportLocationScreenState
                 style:
                 const TextStyle(
                   color:
-                  AppColors
-                      .textSecondary,
+                  AppColors.textSecondary,
                 ),
               ),
             ],
@@ -693,11 +948,12 @@ class _CreateReportLocationScreenState
   }
 
   // ============================================================
-  // GPS ACCURACY DISPLAY
+  // GPS ACCURACY TEXT
   // ============================================================
 
   String get _gpsAccuracyText {
-    final double? accuracy =
+    final double?
+    accuracy =
         gpsAccuracy;
 
     if (accuracy == null) {
@@ -719,8 +975,13 @@ class _CreateReportLocationScreenState
     return 'Low • ±${accuracy.toStringAsFixed(0)} m';
   }
 
+  // ============================================================
+  // GPS ACCURACY COLOR
+  // ============================================================
+
   Color get _gpsAccuracyColor {
-    final double? accuracy =
+    final double?
+    accuracy =
         gpsAccuracy;
 
     if (accuracy == null) {
@@ -745,11 +1006,17 @@ class _CreateReportLocationScreenState
   void showMessage(
       String message,
       ) {
-    ScaffoldMessenger.of(context)
-        .hideCurrentSnackBar();
+    if (!mounted) {
+      return;
+    }
 
-    ScaffoldMessenger.of(context)
-        .showSnackBar(
+    ScaffoldMessenger.of(
+      context,
+    ).hideCurrentSnackBar();
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(
       SnackBar(
         content:
         Text(
@@ -759,11 +1026,17 @@ class _CreateReportLocationScreenState
     );
   }
 
+  // ============================================================
+  // DISPOSE
+  // ============================================================
+
   @override
   void dispose() {
-    addressController.dispose();
+    addressController
+        .dispose();
 
-    landmarkController.dispose();
+    landmarkController
+        .dispose();
 
     super.dispose();
   }
@@ -796,13 +1069,12 @@ class _CreateReportLocationScreenState
                 child:
                 Column(
                   crossAxisAlignment:
-                  CrossAxisAlignment
-                      .start,
+                  CrossAxisAlignment.start,
 
                   children: [
-                    // ==========================================
+                    // =================================================
                     // HEADER
-                    // ==========================================
+                    // =================================================
 
                     Row(
                       children: [
@@ -810,27 +1082,23 @@ class _CreateReportLocationScreenState
                           decoration:
                           BoxDecoration(
                             color:
-                            AppColors
-                                .surface,
+                            AppColors.surface,
 
                             borderRadius:
-                            BorderRadius
-                                .circular(
+                            BorderRadius.circular(
                               12,
                             ),
 
                             border:
                             Border.all(
                               color:
-                              AppColors
-                                  .border,
+                              AppColors.border,
                             ),
                           ),
 
                           child:
                           IconButton(
-                            onPressed:
-                                () {
+                            onPressed: () {
                               Navigator.pop(
                                 context,
                               );
@@ -838,8 +1106,7 @@ class _CreateReportLocationScreenState
 
                             icon:
                             const Icon(
-                              Icons
-                                  .arrow_back,
+                              Icons.arrow_back,
                             ),
                           ),
                         ),
@@ -851,8 +1118,7 @@ class _CreateReportLocationScreenState
 
                         const Column(
                           crossAxisAlignment:
-                          CrossAxisAlignment
-                              .start,
+                          CrossAxisAlignment.start,
 
                           children: [
                             Text(
@@ -864,8 +1130,7 @@ class _CreateReportLocationScreenState
                                 22,
 
                                 fontWeight:
-                                FontWeight
-                                    .bold,
+                                FontWeight.bold,
                               ),
                             ),
 
@@ -880,8 +1145,7 @@ class _CreateReportLocationScreenState
                               style:
                               TextStyle(
                                 color:
-                                AppColors
-                                    .textSecondary,
+                                AppColors.textSecondary,
 
                                 fontSize:
                                 12,
@@ -897,6 +1161,10 @@ class _CreateReportLocationScreenState
                       18,
                     ),
 
+                    // =================================================
+                    // PROGRESS
+                    // =================================================
+
                     const _LocationProgress(),
 
                     const SizedBox(
@@ -904,9 +1172,9 @@ class _CreateReportLocationScreenState
                       24,
                     ),
 
-                    // ==========================================
-                    // GPS
-                    // ==========================================
+                    // =================================================
+                    // GPS / MAP CARD
+                    // =================================================
 
                     Container(
                       width:
@@ -923,8 +1191,7 @@ class _CreateReportLocationScreenState
                         AppColors.surface,
 
                         borderRadius:
-                        BorderRadius
-                            .circular(
+                        BorderRadius.circular(
                           18,
                         ),
 
@@ -932,10 +1199,8 @@ class _CreateReportLocationScreenState
                         Border.all(
                           color:
                           locationDetected
-                              ? AppColors
-                              .success
-                              : AppColors
-                              .primaryDark,
+                              ? AppColors.success
+                              : AppColors.primaryDark,
                         ),
                       ),
 
@@ -952,8 +1217,7 @@ class _CreateReportLocationScreenState
                             decoration:
                             BoxDecoration(
                               color:
-                              AppColors
-                                  .primary
+                              AppColors.primary
                                   .withOpacity(
                                 0.1,
                               ),
@@ -971,8 +1235,7 @@ class _CreateReportLocationScreenState
                               35,
 
                               color:
-                              AppColors
-                                  .primary,
+                              AppColors.primary,
                             ),
                           ),
 
@@ -992,8 +1255,7 @@ class _CreateReportLocationScreenState
                               16,
 
                               fontWeight:
-                              FontWeight
-                                  .bold,
+                              FontWeight.bold,
                             ),
                           ),
 
@@ -1003,7 +1265,8 @@ class _CreateReportLocationScreenState
                           ),
 
                           const Text(
-                            'Use GPS or choose the exact issue location from the map.',
+                            'Use GPS or choose the exact issue '
+                                'location from the map.',
 
                             textAlign:
                             TextAlign.center,
@@ -1011,8 +1274,7 @@ class _CreateReportLocationScreenState
                             style:
                             TextStyle(
                               color:
-                              AppColors
-                                  .textSecondary,
+                              AppColors.textSecondary,
 
                               fontSize:
                               11,
@@ -1027,6 +1289,10 @@ class _CreateReportLocationScreenState
                             16,
                           ),
 
+                          // ===========================================
+                          // CURRENT GPS
+                          // ===========================================
+
                           SizedBox(
                             width:
                             double.infinity,
@@ -1034,15 +1300,12 @@ class _CreateReportLocationScreenState
                             child:
                             ElevatedButton.icon(
                               style:
-                              ElevatedButton
-                                  .styleFrom(
+                              ElevatedButton.styleFrom(
                                 backgroundColor:
-                                AppColors
-                                    .primaryDark,
+                                AppColors.primaryDark,
 
                                 minimumSize:
-                                const Size
-                                    .fromHeight(
+                                const Size.fromHeight(
                                   48,
                                 ),
                               ),
@@ -1071,8 +1334,7 @@ class _CreateReportLocationScreenState
                                 ),
                               )
                                   : const Icon(
-                                Icons
-                                    .gps_fixed,
+                                Icons.gps_fixed,
                               ),
 
                               label:
@@ -1089,6 +1351,10 @@ class _CreateReportLocationScreenState
                             10,
                           ),
 
+                          // ===========================================
+                          // MAP
+                          // ===========================================
+
                           SizedBox(
                             width:
                             double.infinity,
@@ -1096,12 +1362,13 @@ class _CreateReportLocationScreenState
                             child:
                             OutlinedButton.icon(
                               onPressed:
-                              openMapPicker,
+                              gettingLocation
+                                  ? null
+                                  : openMapPicker,
 
                               icon:
                               const Icon(
-                                Icons
-                                    .map_outlined,
+                                Icons.map_outlined,
                               ),
 
                               label:
@@ -1114,12 +1381,14 @@ class _CreateReportLocationScreenState
                       ),
                     ),
 
-                    // ==========================================
-                    // COORDINATES
-                    // ==========================================
+                    // =================================================
+                    // COORDINATE / ACCURACY
+                    // =================================================
 
-                    if (latitude != null &&
-                        longitude != null) ...[
+                    if (
+                    latitude != null &&
+                        longitude != null
+                    ) ...[
                       const SizedBox(
                         height:
                         12,
@@ -1143,8 +1412,7 @@ class _CreateReportLocationScreenState
                           ),
 
                           borderRadius:
-                          BorderRadius
-                              .circular(
+                          BorderRadius.circular(
                             12,
                           ),
 
@@ -1168,8 +1436,7 @@ class _CreateReportLocationScreenState
                                       .check_circle_outline,
 
                                   color:
-                                  AppColors
-                                      .success,
+                                  AppColors.success,
 
                                   size:
                                   18,
@@ -1189,8 +1456,7 @@ class _CreateReportLocationScreenState
                                     style:
                                     const TextStyle(
                                       color:
-                                      AppColors
-                                          .textSecondary,
+                                      AppColors.textSecondary,
 
                                       fontSize:
                                       10,
@@ -1200,7 +1466,9 @@ class _CreateReportLocationScreenState
                               ],
                             ),
 
-                            if (gpsAccuracy != null) ...[
+                            if (
+                            gpsAccuracy != null
+                            ) ...[
                               const SizedBox(
                                 height:
                                 8,
@@ -1213,6 +1481,7 @@ class _CreateReportLocationScreenState
 
                                     color:
                                     _gpsAccuracyColor,
+
                                     size:
                                     16,
                                   ),
@@ -1225,14 +1494,17 @@ class _CreateReportLocationScreenState
                                   Expanded(
                                     child:
                                     Text(
-                                      'GPS Accuracy: $_gpsAccuracyText',
+                                      'GPS Accuracy: '
+                                          '$_gpsAccuracyText',
 
                                       style:
                                       TextStyle(
                                         color:
                                         _gpsAccuracyColor,
+
                                         fontSize:
                                         9,
+
                                         fontWeight:
                                         FontWeight.w600,
                                       ),
@@ -1246,9 +1518,9 @@ class _CreateReportLocationScreenState
                       ),
                     ],
 
-                    // ==========================================
-                    // NEARBY CHECK
-                    // ==========================================
+                    // =================================================
+                    // NEARBY CHECKING
+                    // =================================================
 
                     if (checkingNearby) ...[
                       const SizedBox(
@@ -1259,8 +1531,14 @@ class _CreateReportLocationScreenState
                       const LinearProgressIndicator(),
                     ],
 
-                    if (!checkingNearby &&
-                        nearbyReports.isNotEmpty) ...[
+                    // =================================================
+                    // NEARBY RESULTS
+                    // =================================================
+
+                    if (
+                    !checkingNearby &&
+                        nearbyReports.isNotEmpty
+                    ) ...[
                       const SizedBox(
                         height:
                         12,
@@ -1280,20 +1558,17 @@ class _CreateReportLocationScreenState
                           color:
                           possibleDuplicate !=
                               null
-                              ? AppColors
-                              .warning
+                              ? AppColors.warning
                               .withOpacity(
                             0.07,
                           )
-                              : AppColors
-                              .primary
+                              : AppColors.primary
                               .withOpacity(
                             0.05,
                           ),
 
                           borderRadius:
-                          BorderRadius
-                              .circular(
+                          BorderRadius.circular(
                             13,
                           ),
 
@@ -1302,18 +1577,15 @@ class _CreateReportLocationScreenState
                             color:
                             possibleDuplicate !=
                                 null
-                                ? AppColors
-                                .warning
-                                : AppColors
-                                .primaryDark,
+                                ? AppColors.warning
+                                : AppColors.primaryDark,
                           ),
                         ),
 
                         child:
                         Row(
                           crossAxisAlignment:
-                          CrossAxisAlignment
-                              .start,
+                          CrossAxisAlignment.start,
 
                           children: [
                             Icon(
@@ -1321,16 +1593,13 @@ class _CreateReportLocationScreenState
                                   null
                                   ? Icons
                                   .warning_amber_rounded
-                                  : Icons
-                                  .info_outline,
+                                  : Icons.info_outline,
 
                               color:
                               possibleDuplicate !=
                                   null
-                                  ? AppColors
-                                  .warning
-                                  : AppColors
-                                  .primary,
+                                  ? AppColors.warning
+                                  : AppColors.primary,
                             ),
 
                             const SizedBox(
@@ -1342,43 +1611,43 @@ class _CreateReportLocationScreenState
                               child:
                               Column(
                                 crossAxisAlignment:
-                                CrossAxisAlignment
-                                    .start,
+                                CrossAxisAlignment.start,
 
                                 children: [
                                   Text(
                                     possibleDuplicate !=
                                         null
                                         ? 'Possible Duplicate Detected'
-                                        : '${nearbyReports.length} similar issue(s) nearby',
+                                        : '${nearbyReports.length} '
+                                        'similar issue(s) nearby',
 
                                     style:
                                     const TextStyle(
                                       fontWeight:
-                                      FontWeight
-                                          .bold,
+                                      FontWeight.bold,
 
                                       fontSize:
                                       11,
                                     ),
                                   ),
 
-                                  if (nearbyReports
-                                      .isNotEmpty) ...[
+                                  if (
+                                  nearbyReports.isNotEmpty
+                                  ) ...[
                                     const SizedBox(
                                       height:
                                       4,
                                     ),
 
                                     Text(
-                                      'Closest: ${nearbyReports.first.title} • '
+                                      'Closest: '
+                                          '${nearbyReports.first.title} • '
                                           '${nearbyReports.first.distanceText}',
 
                                       style:
                                       const TextStyle(
                                         color:
-                                        AppColors
-                                            .textSecondary,
+                                        AppColors.textSecondary,
 
                                         fontSize:
                                         9,
@@ -1398,9 +1667,9 @@ class _CreateReportLocationScreenState
                       23,
                     ),
 
-                    // ==========================================
+                    // =================================================
                     // ADDRESS
-                    // ==========================================
+                    // =================================================
 
                     const _FieldLabel(
                       'ADDRESS',
@@ -1438,8 +1707,7 @@ class _CreateReportLocationScreenState
                               .location_on_outlined,
 
                           color:
-                          AppColors
-                              .primary,
+                          AppColors.primary,
                         ),
                       ),
                     ),
@@ -1449,9 +1717,9 @@ class _CreateReportLocationScreenState
                       20,
                     ),
 
-                    // ==========================================
+                    // =================================================
                     // LANDMARK
-                    // ==========================================
+                    // =================================================
 
                     const _FieldLabel(
                       'ADDITIONAL LANDMARK',
@@ -1473,12 +1741,10 @@ class _CreateReportLocationScreenState
 
                         prefixIcon:
                         const Icon(
-                          Icons
-                              .place_outlined,
+                          Icons.place_outlined,
 
                           color:
-                          AppColors
-                              .textSecondary,
+                          AppColors.textSecondary,
                         ),
                       ),
                     ),
@@ -1488,9 +1754,9 @@ class _CreateReportLocationScreenState
                       20,
                     ),
 
-                    // ==========================================
+                    // =================================================
                     // INFO
-                    // ==========================================
+                    // =================================================
 
                     Container(
                       width:
@@ -1510,33 +1776,28 @@ class _CreateReportLocationScreenState
                         ),
 
                         borderRadius:
-                        BorderRadius
-                            .circular(
+                        BorderRadius.circular(
                           13,
                         ),
 
                         border:
                         Border.all(
                           color:
-                          AppColors
-                              .primaryDark,
+                          AppColors.primaryDark,
                         ),
                       ),
 
                       child:
                       const Row(
                         crossAxisAlignment:
-                        CrossAxisAlignment
-                            .start,
+                        CrossAxisAlignment.start,
 
                         children: [
                           Icon(
-                            Icons
-                                .info_outline,
+                            Icons.info_outline,
 
                             color:
-                            AppColors
-                                .primary,
+                            AppColors.primary,
 
                             size:
                             18,
@@ -1550,15 +1811,17 @@ class _CreateReportLocationScreenState
                           Expanded(
                             child:
                             Text(
-                              'SmartCity automatically checks for similar reports within 500 metres. '
-                                  'Issues within 100 metres are flagged as possible duplicates. '
-                                  'For best results, GPS accuracy should normally be within ±50 metres.',
+                              'SmartCity automatically checks for '
+                                  'similar reports within 500 metres. '
+                                  'Issues within 100 metres are flagged '
+                                  'as possible duplicates. For best '
+                                  'results, GPS accuracy should normally '
+                                  'be within ±50 metres.',
 
                               style:
                               TextStyle(
                                 color:
-                                AppColors
-                                    .textSecondary,
+                                AppColors.textSecondary,
 
                                 fontSize:
                                 10,
@@ -1571,14 +1834,122 @@ class _CreateReportLocationScreenState
                         ],
                       ),
                     ),
+
+                    // =================================================
+                    // SMART ASSIST TRANSFER STATUS
+                    //
+                    // Small information box only.
+                    //
+                    // Does not change the existing flow.
+                    // =================================================
+
+                    if (
+                    widget.imageAnalyses.isNotEmpty ||
+                        widget.finalAiAnalysis !=
+                            null
+                    ) ...[
+                      const SizedBox(
+                        height:
+                        12,
+                      ),
+
+                      Container(
+                        width:
+                        double.infinity,
+
+                        padding:
+                        const EdgeInsets.all(
+                          13,
+                        ),
+
+                        decoration:
+                        BoxDecoration(
+                          color:
+                          const Color(
+                            0xFF8F80FF,
+                          ).withOpacity(
+                            0.06,
+                          ),
+
+                          borderRadius:
+                          BorderRadius.circular(
+                            13,
+                          ),
+
+                          border:
+                          Border.all(
+                            color:
+                            const Color(
+                              0xFF8F80FF,
+                            ).withOpacity(
+                              0.35,
+                            ),
+                          ),
+                        ),
+
+                        child:
+                        Row(
+                          crossAxisAlignment:
+                          CrossAxisAlignment.start,
+
+                          children: [
+                            const Icon(
+                              Icons.auto_awesome,
+
+                              color:
+                              Color(
+                                0xFF8F80FF,
+                              ),
+
+                              size:
+                              18,
+                            ),
+
+                            const SizedBox(
+                              width:
+                              9,
+                            ),
+
+                            Expanded(
+                              child:
+                              Text(
+                                widget.finalAiAnalysis !=
+                                    null
+                                    ? 'Smart Assist completed '
+                                    '${widget.finalAiAnalysis!.analyzedImageCount} '
+                                    'evidence image analysis'
+                                    '${widget.finalAiAnalysis!.analyzedImageCount == 1 ? '' : 'es'} '
+                                    'and created a final combined assessment.'
+                                    : '${widget.imageAnalyses.length} '
+                                    'individual evidence analysis'
+                                    '${widget.imageAnalyses.length == 1 ? '' : 'es'} '
+                                    'are attached to this report.',
+
+                                style:
+                                const TextStyle(
+                                  color:
+                                  AppColors.textSecondary,
+
+                                  fontSize:
+                                  10,
+
+                                  height:
+                                  1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
             ),
 
-            // ==============================================
+            // =====================================================
             // BOTTOM
-            // ==============================================
+            // =====================================================
 
             Container(
               padding:
@@ -1596,8 +1967,7 @@ class _CreateReportLocationScreenState
                   top:
                   BorderSide(
                     color:
-                    AppColors
-                        .border,
+                    AppColors.border,
                   ),
                 ),
               ),
@@ -1606,8 +1976,7 @@ class _CreateReportLocationScreenState
               Row(
                 children: [
                   OutlinedButton(
-                    onPressed:
-                        () {
+                    onPressed: () {
                       Navigator.pop(
                         context,
                       );
@@ -1628,15 +1997,12 @@ class _CreateReportLocationScreenState
                     child:
                     ElevatedButton(
                       style:
-                      ElevatedButton
-                          .styleFrom(
+                      ElevatedButton.styleFrom(
                         backgroundColor:
-                        AppColors
-                            .primaryDark,
+                        AppColors.primaryDark,
 
                         minimumSize:
-                        const Size
-                            .fromHeight(
+                        const Size.fromHeight(
                           54,
                         ),
                       ),
@@ -1661,7 +2027,7 @@ class _CreateReportLocationScreenState
 }
 
 // ================================================================
-// PROGRESS
+// LOCATION PROGRESS
 // ================================================================
 
 class _LocationProgress
@@ -1763,7 +2129,7 @@ class _LocationProgress
 }
 
 // ================================================================
-// LABEL
+// FIELD LABEL
 // ================================================================
 
 class _FieldLabel
@@ -1799,7 +2165,7 @@ class _FieldLabel
 }
 
 // ================================================================
-// INPUT
+// INPUT DECORATION
 // ================================================================
 
 InputDecoration _inputDecoration({
@@ -1813,8 +2179,7 @@ InputDecoration _inputDecoration({
     hintStyle:
     const TextStyle(
       color:
-      AppColors
-          .textSecondary,
+      AppColors.textSecondary,
     ),
 
     prefixIcon:
