@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
 import 'login_screen.dart';
+import '../../services/password_reset_security_service.dart';
 
 // ================================================================
 // FORGOT PASSWORD SCREEN
@@ -70,6 +71,22 @@ class _ForgotPasswordScreenState
   final AuthService authService =
   AuthService();
 
+  final PasswordResetSecurityService
+  passwordResetSecurityService =
+  PasswordResetSecurityService();
+
+  // ============================================================
+  // RESET LINK VALIDITY
+  // ============================================================
+
+  bool resetLinkExpired =
+  false;
+
+  int resetLinkSecondsRemaining =
+  0;
+
+  Timer? resetLinkTimer;
+
   // ============================================================
   // GENERAL UI STATE
   // ============================================================
@@ -116,8 +133,10 @@ class _ForgotPasswordScreenState
   Future<void> sendReset({
     bool resend = false,
   }) async {
-    if (loading ||
-        navigatingToLogin) {
+    if (
+    loading ||
+        navigatingToLogin
+    ) {
       return;
     }
 
@@ -125,8 +144,11 @@ class _ForgotPasswordScreenState
     // RESEND COOLDOWN
     // ==========================================================
 
-    if (resend &&
-        resendSecondsRemaining > 0) {
+    if (
+    resend &&
+        resendSecondsRemaining >
+            0
+    ) {
       return;
     }
 
@@ -138,7 +160,7 @@ class _ForgotPasswordScreenState
         .toLowerCase();
 
     // ==========================================================
-    // EMPTY EMAIL
+    // EMAIL VALIDATION
     // ==========================================================
 
     if (email.isEmpty) {
@@ -149,18 +171,18 @@ class _ForgotPasswordScreenState
       return;
     }
 
-    // ==========================================================
-    // BASIC EMAIL VALIDATION
-    // ==========================================================
-
     final RegExp emailPattern =
     RegExp(
-      r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
+      r'^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@'
+      r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+      r'(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$',
     );
 
-    if (!emailPattern.hasMatch(
+    if (
+    !emailPattern.hasMatch(
       email,
-    )) {
+    )
+    ) {
       showMessage(
         'Please enter a valid email address.',
       );
@@ -169,19 +191,13 @@ class _ForgotPasswordScreenState
     }
 
     setState(() {
-      loading = true;
+      loading =
+      true;
     });
 
     try {
       // ========================================================
-      // SMARTCITY AUTH SERVICE
-      //
-      // AuthService handles:
-      //
-      // - SmartCity password-reset monitoring
-      // - server-side repeated-request protection
-      // - Supabase reset email
-      // - recovery deep link
+      // SMARTCITY / SUPABASE PASSWORD RESET REQUEST
       // ========================================================
 
       final result =
@@ -195,16 +211,28 @@ class _ForgotPasswordScreenState
       }
 
       // ========================================================
-      // REQUEST TEMPORARILY BLOCKED
+      // TEMPORARILY BLOCKED
       // ========================================================
 
       if (!result.allowed) {
         submittedEmail =
             email;
 
+        resetLinkTimer?.cancel();
+
+        setState(() {
+          resetLinkSecondsRemaining =
+          0;
+
+          resetLinkExpired =
+          true;
+        });
+
         final int seconds =
-        result.retryAfterSeconds > 0
-            ? result.retryAfterSeconds
+        result.retryAfterSeconds >
+            0
+            ? result
+            .retryAfterSeconds
             : 15 * 60;
 
         _startBlockCountdown(
@@ -223,14 +251,32 @@ class _ForgotPasswordScreenState
       // ========================================================
       // REQUEST ACCEPTED
       //
-      // The UI deliberately does not confirm whether the email
-      // exists in SmartCity.
-      //
-      // This helps prevent account enumeration.
+      // SmartCity intentionally does not reveal whether the email
+      // exists. This preserves anti-enumeration behavior.
       // ========================================================
 
       submittedEmail =
           email;
+
+      // ========================================================
+      // START / RESTART 5-MINUTE RESET WINDOW
+      //
+      // This happens only after AuthService accepted the reset
+      // request.
+      // ========================================================
+
+      await passwordResetSecurityService
+          .startResetWindow(
+        email,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      await _loadResetWindow();
+
+      _startResetLinkCountdown();
 
       setState(() {
         viewState =
@@ -238,10 +284,14 @@ class _ForgotPasswordScreenState
                 .emailSent;
       });
 
+      // ========================================================
+      // 60-SECOND RESEND COOLDOWN
+      // ========================================================
+
       _startResendCountdown();
 
       // ========================================================
-      // REPEATED-REQUEST PROTECTION ACTIVATED
+      // REPEATED REQUEST PROTECTION
       // ========================================================
 
       if (result.protectionActivated) {
@@ -256,21 +306,27 @@ class _ForgotPasswordScreenState
       }
 
       final String message =
-      e.toString().replaceFirst(
+      e
+          .toString()
+          .replaceFirst(
         'Exception: ',
         '',
-      );
+      )
+          .trim();
 
       showMessage(
-        message.trim().isEmpty
+        message.isEmpty
             ? 'Unable to process the password reset request.'
             : message,
       );
     } finally {
-      if (mounted &&
-          !navigatingToLogin) {
+      if (
+      mounted &&
+          !navigatingToLogin
+      ) {
         setState(() {
-          loading = false;
+          loading =
+          false;
         });
       }
     }
@@ -317,6 +373,100 @@ class _ForgotPasswordScreenState
             setState(() {
               resendSecondsRemaining--;
             });
+          },
+        );
+  }
+
+  // ============================================================
+// LOAD RESET WINDOW
+// ============================================================
+
+  Future<void> _loadResetWindow() async {
+    if (submittedEmail.isEmpty) {
+      return;
+    }
+
+    final PasswordResetWindowStatus
+    status =
+    await passwordResetSecurityService
+        .getResetWindowStatus(
+      submittedEmail,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      resetLinkExpired =
+          status.expired;
+
+      resetLinkSecondsRemaining =
+          status.remaining
+              .inSeconds;
+    });
+  }
+
+// ============================================================
+// START LIVE RESET-LINK COUNTDOWN
+// ============================================================
+
+  void _startResetLinkCountdown() {
+    resetLinkTimer?.cancel();
+
+    resetLinkTimer =
+        Timer.periodic(
+          const Duration(
+            seconds: 1,
+          ),
+              (
+              Timer timer,
+              ) async {
+            if (
+            !mounted ||
+                navigatingToLogin
+            ) {
+              timer.cancel();
+
+              return;
+            }
+
+            if (submittedEmail.isEmpty) {
+              timer.cancel();
+
+              return;
+            }
+
+            final PasswordResetWindowStatus
+            status =
+            await passwordResetSecurityService
+                .getResetWindowStatus(
+              submittedEmail,
+            );
+
+            if (!mounted) {
+              timer.cancel();
+
+              return;
+            }
+
+            setState(() {
+              resetLinkExpired =
+                  status.expired;
+
+              resetLinkSecondsRemaining =
+                  status.remaining
+                      .inSeconds;
+            });
+
+            if (status.expired) {
+              timer.cancel();
+
+              setState(() {
+                resetLinkSecondsRemaining =
+                0;
+              });
+            }
           },
         );
   }
@@ -453,12 +603,15 @@ class _ForgotPasswordScreenState
   // ============================================================
 
   void editEmail() {
-    if (loading ||
-        navigatingToLogin) {
+    if (
+    loading ||
+        navigatingToLogin
+    ) {
       return;
     }
 
     resendTimer?.cancel();
+    resetLinkTimer?.cancel();
 
     setState(() {
       viewState =
@@ -467,6 +620,12 @@ class _ForgotPasswordScreenState
 
       resendSecondsRemaining =
       0;
+
+      resetLinkSecondsRemaining =
+      0;
+
+      resetLinkExpired =
+      false;
     });
   }
 
@@ -518,6 +677,10 @@ class _ForgotPasswordScreenState
     null;
 
     blockTimer =
+    null;
+
+    resetLinkTimer?.cancel();
+    resetLinkTimer =
     null;
 
     // ==========================================================
@@ -580,8 +743,8 @@ class _ForgotPasswordScreenState
   @override
   void dispose() {
     resendTimer?.cancel();
-
     blockTimer?.cancel();
+    resetLinkTimer?.cancel();
 
     emailController.dispose();
 
@@ -1330,8 +1493,8 @@ class _ForgotPasswordScreenState
           ),
 
           // =====================================================
-          // RECOVERY LINK INFORMATION
-          // =====================================================
+// RESET LINK TIMER
+// =====================================================
 
           Container(
             width:
@@ -1339,72 +1502,136 @@ class _ForgotPasswordScreenState
 
             padding:
             const EdgeInsets.all(
-              14,
+              18,
             ),
 
             decoration:
             BoxDecoration(
               color:
-              Colors.amber
-                  .withOpacity(
-                0.07,
-              ),
+              AppColors.surface,
 
               borderRadius:
               BorderRadius.circular(
-                14,
+                16,
               ),
 
               border:
               Border.all(
                 color:
-                Colors.amber
+                resetLinkExpired
+                    ? Colors.red
                     .withOpacity(
-                  0.35,
+                  0.60,
+                )
+                    : Colors.amber
+                    .withOpacity(
+                  0.40,
                 ),
               ),
             ),
 
             child:
-            const Row(
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
-
+            Column(
               children: [
                 Icon(
-                  Icons.schedule_outlined,
-
-                  color:
-                  Colors.amber,
+                  resetLinkExpired
+                      ? Icons
+                      .timer_off_outlined
+                      : Icons
+                      .timer_outlined,
 
                   size:
-                  21,
+                  28,
+
+                  color:
+                  resetLinkExpired
+                      ? Colors.red
+                      : Colors.amber,
                 ),
 
-                SizedBox(
-                  width:
+                const SizedBox(
+                  height:
                   10,
                 ),
 
-                Expanded(
-                  child:
-                  Text(
-                    'For your security, the recovery link is temporary. '
-                        'Open the newest reset email promptly and complete '
-                        'password recovery in SmartCity.',
+                Text(
+                  resetLinkExpired
+                      ? 'Reset Link Expired'
+                      : 'Password reset link expires in',
 
-                    style:
-                    TextStyle(
-                      color:
-                      AppColors
-                          .textSecondary,
+                  textAlign:
+                  TextAlign.center,
 
-                      fontSize:
-                      12,
+                  style:
+                  TextStyle(
+                    color:
+                    resetLinkExpired
+                        ? Colors.red
+                        : AppColors
+                        .textSecondary,
 
-                      height:
-                      1.45,
-                    ),
+                    fontSize:
+                    13,
+
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  8,
+                ),
+
+                Text(
+                  resetLinkExpired
+                      ? '00:00'
+                      : formatDuration(
+                    resetLinkSecondsRemaining,
+                  ),
+
+                  style:
+                  TextStyle(
+                    color:
+                    resetLinkExpired
+                        ? Colors.red
+                        : AppColors.primary,
+
+                    fontSize:
+                    32,
+
+                    fontWeight:
+                    FontWeight.bold,
+
+                    letterSpacing:
+                    1.5,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  8,
+                ),
+
+                Text(
+                  resetLinkExpired
+                      ? 'For security, request a new password reset link.'
+                      : 'Open the latest recovery email and complete '
+                      'password recovery before the timer reaches zero.',
+
+                  textAlign:
+                  TextAlign.center,
+
+                  style:
+                  const TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    fontSize:
+                    11,
+
+                    height:
+                    1.45,
                   ),
                 ),
               ],
@@ -1413,7 +1640,7 @@ class _ForgotPasswordScreenState
 
           const SizedBox(
             height:
-            28,
+            12,
           ),
 
           // =====================================================

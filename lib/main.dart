@@ -639,5 +639,6 @@ class _SmartCityAppState
           ? const AuthGate()
           : const WelcomeScreen(),
     );
+
   }
 }

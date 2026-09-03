@@ -57,30 +57,30 @@ class EmailVerificationResendResult {
 // ================================================================
 // EMAIL VERIFICATION SECURITY SERVICE
 //
-// PURPOSE
+// FEATURES
 //
-// This service provides SmartCity-side protection for:
+// - 5-minute verification validity
+// - persistent verification timer
+// - 60-second minimum resend interval
+// - maximum 3 successful resends in 10 minutes
+// - 15-minute temporary resend block
+// - failed Supabase resend does NOT consume an attempt
+// - successful resend starts a fresh 5-minute window
 //
-// - 5-minute verification window
-// - resend attempt tracking
-// - resend temporary blocking
-// - persisted timing across app restarts
+// IMPORTANT
 //
-// IMPORTANT:
+// This is an application security layer.
 //
-// This service does NOT replace Supabase Auth security.
-//
-// Supabase must still:
-// - generate the verification token
-// - validate the verification token
-// - enforce its own Auth rate limits
-//
-// SmartCity adds an additional application-level security layer.
+// Supabase still remains responsible for:
+// - generating the verification token
+// - validating the token
+// - actual token expiration
+// - Auth rate limits
 // ================================================================
 
 class EmailVerificationSecurityService {
   // ==============================================================
-  // CONFIG
+  // CONFIGURATION
   // ==============================================================
 
   static const Duration verificationValidity =
@@ -107,7 +107,7 @@ class EmailVerificationSecurityService {
   );
 
   // ==============================================================
-  // SHARED PREFERENCES KEY PREFIX
+  // STORAGE PREFIX
   // ==============================================================
 
   static const String _prefix =
@@ -126,7 +126,7 @@ class EmailVerificationSecurityService {
   }
 
   // ==============================================================
-  // EMAIL-SPECIFIC KEY
+  // KEY
   // ==============================================================
 
   String _key(
@@ -142,15 +142,15 @@ class EmailVerificationSecurityService {
   }
 
   // ==============================================================
-  // START NEW VERIFICATION WINDOW
+  // START INITIAL VERIFICATION WINDOW
   //
-  // Call this immediately after:
+  // Call this after signUp() succeeds.
   //
-  // signUp()
+  // This represents the initial verification email.
   //
-  // OR after a successful resend.
-  //
-  // This starts a fresh 5-minute SmartCity verification window.
+  // IMPORTANT:
+  // This does NOT increase resendAttempts because the signup email
+  // is not considered a resend.
   // ==============================================================
 
   Future<void> startVerificationWindow(
@@ -181,21 +181,41 @@ class EmailVerificationSecurityService {
         email,
         'expires_at',
       ),
-      expiresAt.toIso8601String(),
+      expiresAt
+          .toIso8601String(),
     );
 
-    // ============================================================
-    // STORE LAST SEND TIME
-    //
-    // Used to enforce minimum resend interval.
-    // ============================================================
-
+    // Initial signup email was just sent.
+    // Prevent immediate resend spam.
     await prefs.setString(
       _key(
         email,
         'last_sent_at',
       ),
       now.toIso8601String(),
+    );
+
+    // Start clean resend protection for a new registration.
+    await prefs.setInt(
+      _key(
+        email,
+        'resend_attempts',
+      ),
+      0,
+    );
+
+    await prefs.remove(
+      _key(
+        email,
+        'resend_window_started_at',
+      ),
+    );
+
+    await prefs.remove(
+      _key(
+        email,
+        'blocked_until',
+      ),
     );
   }
 
@@ -234,7 +254,7 @@ class EmailVerificationSecurityService {
       ),
     );
 
-    final int resendAttempts =
+    int resendAttempts =
         prefs.getInt(
           _key(
             email,
@@ -243,7 +263,7 @@ class EmailVerificationSecurityService {
         ) ??
             0;
 
-    final DateTime? blockedUntil =
+    DateTime? blockedUntil =
     _parseDate(
       prefs.getString(
         _key(
@@ -282,7 +302,7 @@ class EmailVerificationSecurityService {
     // RESEND BLOCK
     // ============================================================
 
-    final bool resendBlocked =
+    bool resendBlocked =
         blockedUntil != null &&
             now.isBefore(
               blockedUntil,
@@ -293,7 +313,7 @@ class EmailVerificationSecurityService {
 
     if (resendBlocked) {
       resendBlockRemaining =
-          blockedUntil.difference(
+          blockedUntil!.difference(
             now,
           );
     }
@@ -313,6 +333,13 @@ class EmailVerificationSecurityService {
         ),
       );
 
+      await prefs.remove(
+        _key(
+          email,
+          'resend_window_started_at',
+        ),
+      );
+
       await prefs.setInt(
         _key(
           email,
@@ -320,6 +347,63 @@ class EmailVerificationSecurityService {
         ),
         0,
       );
+
+      resendAttempts =
+      0;
+
+      blockedUntil =
+      null;
+
+      resendBlocked =
+      false;
+
+      resendBlockRemaining =
+          Duration.zero;
+    }
+
+    // ============================================================
+    // AUTO-RESET OLD RESEND WINDOW
+    //
+    // If 10 minutes passed since the resend window began and
+    // there is no active block, reset successful resend count.
+    // ============================================================
+
+    final DateTime? resendWindowStartedAt =
+    _parseDate(
+      prefs.getString(
+        _key(
+          email,
+          'resend_window_started_at',
+        ),
+      ),
+    );
+
+    if (
+    !resendBlocked &&
+        resendWindowStartedAt !=
+            null &&
+        now.difference(
+          resendWindowStartedAt,
+        ) >=
+            resendWindow
+    ) {
+      await prefs.remove(
+        _key(
+          email,
+          'resend_window_started_at',
+        ),
+      );
+
+      await prefs.setInt(
+        _key(
+          email,
+          'resend_attempts',
+        ),
+        0,
+      );
+
+      resendAttempts =
+      0;
     }
 
     return EmailVerificationSecurityStatus(
@@ -352,18 +436,24 @@ class EmailVerificationSecurityService {
   }
 
   // ==============================================================
-  // CHECK WHETHER RESEND CAN PROCEED
+  // CHECK WHETHER RESEND IS ALLOWED
   //
-  // Rules:
+  // IMPORTANT:
   //
-  // - blocked users cannot resend
-  // - minimum 60 seconds between resend attempts
-  // - max 3 resends in a 10-minute window
-  // - too many requests -> block for 15 minutes
+  // This method DOES NOT:
+  // - increment resendAttempts
+  // - restart the 5-minute verification timer
+  // - record a successful send
+  //
+  // It only determines whether Flutter is allowed to call:
+  //
+  // Supabase.auth.resend(...)
+  //
+  // Therefore, a network/API failure does not consume an attempt.
   // ==============================================================
 
   Future<EmailVerificationResendResult>
-  checkAndRecordResend(
+  checkResendAllowed(
       String email,
       ) async {
     final SharedPreferences prefs =
@@ -393,6 +483,15 @@ class EmailVerificationSecurityService {
           blockedUntil,
         )
     ) {
+      final int attempts =
+          prefs.getInt(
+            _key(
+              email,
+              'resend_attempts',
+            ),
+          ) ??
+              0;
+
       return EmailVerificationResendResult(
         allowed:
         false,
@@ -401,13 +500,7 @@ class EmailVerificationSecurityService {
         true,
 
         resendAttempts:
-        prefs.getInt(
-          _key(
-            email,
-            'resend_attempts',
-          ),
-        ) ??
-            0,
+        attempts,
 
         blockedUntil:
         blockedUntil,
@@ -419,7 +512,40 @@ class EmailVerificationSecurityService {
     }
 
     // ============================================================
-    // MINIMUM RESEND INTERVAL
+    // CLEAR EXPIRED BLOCK
+    // ============================================================
+
+    if (
+    blockedUntil != null &&
+        !now.isBefore(
+          blockedUntil,
+        )
+    ) {
+      await prefs.remove(
+        _key(
+          email,
+          'blocked_until',
+        ),
+      );
+
+      await prefs.remove(
+        _key(
+          email,
+          'resend_window_started_at',
+        ),
+      );
+
+      await prefs.setInt(
+        _key(
+          email,
+          'resend_attempts',
+        ),
+        0,
+      );
+    }
+
+    // ============================================================
+    // 60-SECOND MINIMUM SEND INTERVAL
     // ============================================================
 
     final DateTime? lastSentAt =
@@ -432,9 +558,7 @@ class EmailVerificationSecurityService {
       ),
     );
 
-    if (
-    lastSentAt != null
-    ) {
+    if (lastSentAt != null) {
       final Duration sinceLastSend =
       now.difference(
         lastSentAt,
@@ -444,11 +568,17 @@ class EmailVerificationSecurityService {
       sinceLastSend <
           minimumResendInterval
       ) {
-        final int remainingSeconds =
+        int remainingSeconds =
             minimumResendInterval
                 .inSeconds -
                 sinceLastSend
                     .inSeconds;
+
+        if (remainingSeconds <
+            1) {
+          remainingSeconds =
+          1;
+        }
 
         return EmailVerificationResendResult(
           allowed:
@@ -470,7 +600,8 @@ class EmailVerificationSecurityService {
           null,
 
           message:
-          'Please wait $remainingSeconds seconds '
+          'Please wait $remainingSeconds second'
+              '${remainingSeconds == 1 ? '' : 's'} '
               'before requesting another verification email.',
         );
       }
@@ -504,25 +635,24 @@ class EmailVerificationSecurityService {
     // ============================================================
 
     if (
-    resendWindowStartedAt ==
-        null ||
+    resendWindowStartedAt !=
+        null &&
         now.difference(
           resendWindowStartedAt,
-        ) >
+        ) >=
             resendWindow
     ) {
       resendWindowStartedAt =
-          now;
+      null;
 
       resendAttempts =
       0;
 
-      await prefs.setString(
+      await prefs.remove(
         _key(
           email,
           'resend_window_started_at',
         ),
-        now.toIso8601String(),
       );
 
       await prefs.setInt(
@@ -535,25 +665,15 @@ class EmailVerificationSecurityService {
     }
 
     // ============================================================
-    // INCREMENT ATTEMPT
-    // ============================================================
-
-    resendAttempts++;
-
-    await prefs.setInt(
-      _key(
-        email,
-        'resend_attempts',
-      ),
-      resendAttempts,
-    );
-
-    // ============================================================
-    // TOO MANY REQUESTS
+    // MAXIMUM SUCCESSFUL RESENDS ALREADY USED
+    //
+    // 3 successful resends are allowed.
+    //
+    // The next request activates the 15-minute block.
     // ============================================================
 
     if (
-    resendAttempts >
+    resendAttempts >=
         maxResendAttempts
     ) {
       final DateTime newBlockedUntil =
@@ -594,14 +714,6 @@ class EmailVerificationSecurityService {
     // ALLOWED
     // ============================================================
 
-    await prefs.setString(
-      _key(
-        email,
-        'last_sent_at',
-      ),
-      now.toIso8601String(),
-    );
-
     return EmailVerificationResendResult(
       allowed:
       true,
@@ -620,22 +732,132 @@ class EmailVerificationSecurityService {
   // ==============================================================
   // RECORD SUCCESSFUL RESEND
   //
-  // Call this AFTER Supabase resend succeeds.
+  // CALL ONLY AFTER:
   //
-  // A successful resend gives the new email another 5-minute
-  // SmartCity verification window.
+  // await Supabase.instance.client.auth.resend(...)
+  //
+  // succeeds.
+  //
+  // This:
+  // - increments successful resend count
+  // - records last successful send
+  // - creates resend window when needed
+  // - creates a fresh five-minute verification window
   // ==============================================================
 
   Future<void> recordSuccessfulResend(
       String email,
       ) async {
-    await startVerificationWindow(
-      email,
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
+
+    final DateTime now =
+    DateTime.now();
+
+    // ============================================================
+    // LOAD RESEND WINDOW
+    // ============================================================
+
+    DateTime? resendWindowStartedAt =
+    _parseDate(
+      prefs.getString(
+        _key(
+          email,
+          'resend_window_started_at',
+        ),
+      ),
+    );
+
+    int resendAttempts =
+        prefs.getInt(
+          _key(
+            email,
+            'resend_attempts',
+          ),
+        ) ??
+            0;
+
+    // ============================================================
+    // NEW / EXPIRED RESEND WINDOW
+    // ============================================================
+
+    if (
+    resendWindowStartedAt ==
+        null ||
+        now.difference(
+          resendWindowStartedAt,
+        ) >=
+            resendWindow
+    ) {
+      resendWindowStartedAt =
+          now;
+
+      resendAttempts =
+      0;
+
+      await prefs.setString(
+        _key(
+          email,
+          'resend_window_started_at',
+        ),
+        now.toIso8601String(),
+      );
+    }
+
+    // ============================================================
+    // INCREMENT ONLY AFTER SUCCESS
+    // ============================================================
+
+    resendAttempts++;
+
+    await prefs.setInt(
+      _key(
+        email,
+        'resend_attempts',
+      ),
+      resendAttempts,
+    );
+
+    // ============================================================
+    // LAST SUCCESSFUL EMAIL SEND
+    // ============================================================
+
+    await prefs.setString(
+      _key(
+        email,
+        'last_sent_at',
+      ),
+      now.toIso8601String(),
+    );
+
+    // ============================================================
+    // NEW VERIFICATION WINDOW
+    // ============================================================
+
+    await prefs.setString(
+      _key(
+        email,
+        'issued_at',
+      ),
+      now.toIso8601String(),
+    );
+
+    await prefs.setString(
+      _key(
+        email,
+        'expires_at',
+      ),
+      now
+          .add(
+        verificationValidity,
+      )
+          .toIso8601String(),
     );
   }
 
   // ==============================================================
-  // CHECK SMARTCITY VERIFICATION WINDOW
+  // CHECK WHETHER SMARTCITY VERIFICATION WINDOW IS VALID
   // ==============================================================
 
   Future<bool> isVerificationWindowValid(
@@ -659,10 +881,64 @@ class EmailVerificationSecurityService {
   }
 
   // ==============================================================
-  // CLEAR AFTER SUCCESS
+  // GET VERIFICATION EXPIRY
+  // ==============================================================
+
+  Future<DateTime?> getVerificationExpiresAt(
+      String email,
+      ) async {
+    final EmailVerificationSecurityStatus
+    status =
+    await getStatus(
+      email,
+    );
+
+    return status
+        .verificationExpiresAt;
+  }
+
+  // ==============================================================
+  // GET RESEND ATTEMPTS
+  // ==============================================================
+
+  Future<int> getResendAttempts(
+      String email,
+      ) async {
+    final EmailVerificationSecurityStatus
+    status =
+    await getStatus(
+      email,
+    );
+
+    return status
+        .resendAttempts;
+  }
+
+  // ==============================================================
+  // CHECK WHETHER RESEND IS BLOCKED
+  // ==============================================================
+
+  Future<bool> isResendBlocked(
+      String email,
+      ) async {
+    final EmailVerificationSecurityStatus
+    status =
+    await getStatus(
+      email,
+    );
+
+    return status
+        .resendBlocked;
+  }
+
+  // ==============================================================
+  // CLEAR AFTER SUCCESSFUL VERIFICATION
   //
-  // Call this after the email is confirmed and SmartCity accepts
-  // the completed registration.
+  // Call when:
+  //
+  // emailConfirmed == true
+  //
+  // and SmartCity accepts registration as complete.
   // ==============================================================
 
   Future<void> clear(
@@ -697,7 +973,9 @@ class EmailVerificationSecurityService {
   // ==============================================================
   // RESET RESEND PROTECTION
   //
-  // Useful for testing/admin recovery.
+  // Primarily useful while testing.
+  //
+  // Does NOT clear the verification timer.
   // ==============================================================
 
   Future<void> resetResendProtection(
@@ -727,6 +1005,35 @@ class EmailVerificationSecurityService {
         'resend_attempts',
       ),
       0,
+    );
+  }
+
+  // ==============================================================
+  // CLEAR VERIFICATION WINDOW ONLY
+  //
+  // Useful when a pending registration is abandoned without
+  // clearing resend-security information.
+  // ==============================================================
+
+  Future<void> clearVerificationWindow(
+      String email,
+      ) async {
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
+
+    await prefs.remove(
+      _key(
+        email,
+        'issued_at',
+      ),
+    );
+
+    await prefs.remove(
+      _key(
+        email,
+        'expires_at',
+      ),
     );
   }
 

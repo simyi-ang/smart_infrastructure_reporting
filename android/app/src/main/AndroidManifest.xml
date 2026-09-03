@@ -154,6 +154,22 @@
                     android:host="reset-password" />
             </intent-filter>
 
+            <!-- Email verification deep link -->
+            <intent-filter>
+                <action
+                    android:name="android.intent.action.VIEW" />
+
+                <category
+                    android:name="android.intent.category.DEFAULT" />
+
+                <category
+                    android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="smartcity"
+                    android:host="email-verified" />
+            </intent-filter>
+
         </activity>
 
 

@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ============================================================
 // PASSWORD RESET SECURITY RESULT
@@ -60,6 +61,33 @@ class PasswordResetSecurityResult {
   }
 }
 
+class PasswordResetWindowStatus {
+  final DateTime? issuedAt;
+  final DateTime? expiresAt;
+
+  final bool expired;
+
+  final Duration remaining;
+
+  const PasswordResetWindowStatus({
+    required this.issuedAt,
+    required this.expiresAt,
+    required this.expired,
+    required this.remaining,
+  });
+}
+
+class PasswordResetRequestResult {
+  final PasswordResetSecurityResult security;
+
+  final PasswordResetWindowStatus window;
+
+  const PasswordResetRequestResult({
+    required this.security,
+    required this.window,
+  });
+}
+
 // ============================================================
 // PASSWORD RESET SECURITY SERVICE
 // ============================================================
@@ -67,6 +95,180 @@ class PasswordResetSecurityResult {
 class PasswordResetSecurityService {
   final SupabaseClient _supabase =
       Supabase.instance.client;
+
+  static const Duration resetLinkValidity =
+  Duration(
+    minutes: 5,
+  );
+
+  static const String _prefix =
+      'password_reset_security';
+
+  String _normalizeEmail(
+      String email,
+      ) {
+    return email
+        .trim()
+        .toLowerCase();
+  }
+
+  String _key(
+      String email,
+      String field,
+      ) {
+    final String cleanEmail =
+    _normalizeEmail(
+      email,
+    );
+
+    return '${_prefix}_${cleanEmail}_$field';
+  }
+
+  Future<void> startResetWindow(
+      String email,
+      ) async {
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
+
+    final DateTime now =
+    DateTime.now();
+
+    final DateTime expiresAt =
+    now.add(
+      resetLinkValidity,
+    );
+
+    await prefs.setString(
+      _key(
+        email,
+        'issued_at',
+      ),
+      now.toIso8601String(),
+    );
+
+    await prefs.setString(
+      _key(
+        email,
+        'expires_at',
+      ),
+      expiresAt.toIso8601String(),
+    );
+  }
+
+  Future<PasswordResetWindowStatus>
+  getResetWindowStatus(
+      String email,
+      ) async {
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
+
+    final DateTime now =
+    DateTime.now();
+
+    final String? issuedAtValue =
+    prefs.getString(
+      _key(
+        email,
+        'issued_at',
+      ),
+    );
+
+    final String? expiresAtValue =
+    prefs.getString(
+      _key(
+        email,
+        'expires_at',
+      ),
+    );
+
+    final DateTime? issuedAt =
+    issuedAtValue == null
+        ? null
+        : DateTime.tryParse(
+      issuedAtValue,
+    );
+
+    final DateTime? expiresAt =
+    expiresAtValue == null
+        ? null
+        : DateTime.tryParse(
+      expiresAtValue,
+    );
+
+    final bool expired =
+        expiresAt != null &&
+            !now.isBefore(
+              expiresAt,
+            );
+
+    Duration remaining =
+        Duration.zero;
+
+    if (
+    expiresAt != null &&
+        now.isBefore(
+          expiresAt,
+        )
+    ) {
+      remaining =
+          expiresAt.difference(
+            now,
+          );
+    }
+
+    return PasswordResetWindowStatus(
+      issuedAt:
+      issuedAt,
+
+      expiresAt:
+      expiresAt,
+
+      expired:
+      expired,
+
+      remaining:
+      remaining,
+    );
+  }
+
+  Future<bool> isResetWindowValid(
+      String email,
+      ) async {
+    final PasswordResetWindowStatus status =
+    await getResetWindowStatus(
+      email,
+    );
+
+    if (status.expiresAt == null) {
+      return false;
+    }
+
+    return !status.expired;
+  }
+
+  Future<void> clearResetWindow(
+      String email,
+      ) async {
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
+
+    await prefs.remove(
+      _key(
+        email,
+        'issued_at',
+      ),
+    );
+
+    await prefs.remove(
+      _key(
+        email,
+        'expires_at',
+      ),
+    );
+  }
 
   // ============================================================
   // CHECK AND RECORD RESET REQUEST

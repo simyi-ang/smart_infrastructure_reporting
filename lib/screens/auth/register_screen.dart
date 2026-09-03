@@ -8,6 +8,7 @@ import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
 import 'account_already_exists_screen.dart';
 import 'email_verification_screen.dart';
+import '../../services/email_verification_security_service.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({
@@ -21,6 +22,7 @@ class RegisterScreen extends StatefulWidget {
 
 class _RegisterScreenState
     extends State<RegisterScreen> {
+
   final GlobalKey<FormState> _formKey =
   GlobalKey<FormState>();
 
@@ -41,6 +43,10 @@ class _RegisterScreenState
 
   final AuthService authService =
   AuthService();
+
+  final EmailVerificationSecurityService
+  emailVerificationSecurityService =
+  EmailVerificationSecurityService();
 
   final ImagePicker _imagePicker =
   ImagePicker();
@@ -905,6 +911,18 @@ class _RegisterScreenState
           'Unable to start registration.',
         );
       }
+
+      // ========================================================
+      // START SMARTCITY EMAIL VERIFICATION WINDOW
+      //
+      // Initial verification email is valid in SmartCity for
+      // 5 minutes.
+      // ========================================================
+
+      await emailVerificationSecurityService
+          .startVerificationWindow(
+        email,
+      );
 
       // ========================================================
       // EMAIL VERIFICATION REQUIRED

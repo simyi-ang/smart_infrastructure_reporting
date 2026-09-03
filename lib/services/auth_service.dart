@@ -228,13 +228,15 @@ class AuthService {
 
     try {
       final AuthResponse response =
-      await _supabase.auth
-          .signUp(
+      await _supabase.auth.signUp(
         email:
         cleanEmail,
 
         password:
         password,
+
+        emailRedirectTo:
+        'smartcity://email-verified',
 
         data: {
           'full_name':
