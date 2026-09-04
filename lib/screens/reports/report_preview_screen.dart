@@ -1,12 +1,18 @@
+import 'dart:async';
 import 'dart:io';
+
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_player/video_player.dart';
 
 import 'package:flutter/material.dart';
 
 import '../../models/report_final_ai_analysis.dart';
 import '../../models/report_image_ai_analysis.dart';
+import '../../models/report_draft.dart';
 
 import '../../services/connectivity_service.dart';
 import '../../services/report_service.dart';
+import '../../services/report_draft_service.dart';
 import '../../theme/app_colors.dart';
 
 // ================================================================
@@ -58,6 +64,8 @@ class ReportPreviewScreen
 
   final List<File> evidenceImages;
 
+  final List<File> evidenceVideos;
+
   // ============================================================
   // LOCATION
   // ============================================================
@@ -69,6 +77,12 @@ class ReportPreviewScreen
   final double? latitude;
 
   final double? longitude;
+
+  final double? locationAccuracy;
+
+  final String? detectedAddress;
+
+  final String? locationVerificationStatus;
 
   // ============================================================
   // INDIVIDUAL IMAGE AI RESULTS
@@ -114,6 +128,8 @@ class ReportPreviewScreen
 
     required this.evidenceImages,
 
+    this.evidenceVideos = const <File>[],
+
     required this.address,
 
     required this.landmark,
@@ -121,6 +137,12 @@ class ReportPreviewScreen
     this.latitude,
 
     this.longitude,
+
+    this.locationAccuracy,
+
+    this.detectedAddress,
+
+    this.locationVerificationStatus,
 
     this.imageAnalyses =
     const {},
@@ -167,6 +189,285 @@ class _ReportPreviewScreenState
       '';
 
   String? submissionError;
+
+  bool savingPreviewDraft =
+  false;
+
+  bool previewDraftSaveFailed =
+  false;
+
+  bool _allowPop =
+  false;
+
+  String? get _userId =>
+      Supabase.instance.client.auth.currentUser?.id;
+
+  // ============================================================
+  // INIT — SAVE EXACT PREVIEW STEP
+  // ============================================================
+
+  @override
+  void initState() {
+    super.initState();
+
+    unawaited(
+      _savePreviewDraft(),
+    );
+  }
+
+  // ============================================================
+  // SAVE PREVIEW DRAFT
+  // ============================================================
+
+  Future<bool> _savePreviewDraft() async {
+    final String? userId = _userId;
+
+    if (userId == null) {
+      return false;
+    }
+
+    if (mounted) {
+      setState(() {
+        savingPreviewDraft = true;
+        previewDraftSaveFailed = false;
+      });
+    }
+
+    try {
+      final ReportDraft? existing =
+      await ReportDraftService.loadDraft(
+        userId: userId,
+      );
+
+      final ReportDraft base =
+          existing ??
+              ReportDraft.empty();
+
+      final ReportDraft updated =
+      base.copyWith(
+        category: widget.category,
+        priority: widget.priority,
+        title: widget.title,
+        description: widget.description,
+
+        landmark:
+        widget.landmark.trim().isEmpty
+            ? null
+            : widget.landmark.trim(),
+
+        manualAddress:
+        widget.address.trim().isEmpty
+            ? null
+            : widget.address.trim(),
+
+        latitude: widget.latitude,
+        longitude: widget.longitude,
+
+        locationAccuracy:
+        widget.locationAccuracy,
+
+        detectedAddress:
+        widget.detectedAddress,
+
+        locationVerificationStatus:
+        widget.locationVerificationStatus,
+
+        currentStep: 4,
+
+        evidenceImagePaths:
+        widget.evidenceImages
+            .map(
+              (File file) => file.path,
+        )
+            .toList(),
+
+        evidenceVideoPaths:
+        widget.evidenceVideos
+            .map(
+              (File file) => file.path,
+        )
+            .toList(),
+
+        updatedAt: DateTime.now(),
+      );
+
+      await ReportDraftService.saveDraft(
+        userId: userId,
+        draft: updated,
+      );
+
+      if (mounted) {
+        setState(() {
+          savingPreviewDraft = false;
+          previewDraftSaveFailed = false;
+        });
+      }
+
+      return true;
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          savingPreviewDraft = false;
+          previewDraftSaveFailed = true;
+        });
+      }
+
+      return false;
+    }
+  }
+
+  // ============================================================
+  // SAFE BACK
+  // ============================================================
+
+  Future<void> _goBackSafely() async {
+    if (submitting || savingPreviewDraft) {
+      return;
+    }
+
+    final bool saved =
+    await _savePreviewDraft();
+
+    if (!saved || !mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).hideCurrentSnackBar();
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
+        const SnackBar(
+          content:
+          Text(
+            'Your preview draft could not be saved. '
+                'Please try again.',
+          ),
+        ),
+      );
+
+      return;
+    }
+
+    _allowPop = true;
+
+    if (mounted) {
+      Navigator.pop(
+        context,
+      );
+    }
+  }
+
+  // ============================================================
+  // VIDEO PREVIEW
+  // ============================================================
+
+  Future<void> _previewVideo(
+      File videoFile,
+      ) async {
+    if (!await videoFile.exists()) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
+        const SnackBar(
+          content:
+          Text(
+            'This saved draft video is no longer available.',
+          ),
+        ),
+      );
+
+      return;
+    }
+
+    final VideoPlayerController controller =
+    VideoPlayerController.file(
+      videoFile,
+    );
+
+    try {
+      await controller.initialize();
+
+      if (!mounted) {
+        return;
+      }
+
+      await showDialog<void>(
+        context: context,
+        builder:
+            (
+            dialogContext,
+            ) {
+          return AlertDialog(
+            backgroundColor:
+            AppColors.surface,
+
+            contentPadding:
+            const EdgeInsets.all(
+              12,
+            ),
+
+            content:
+            AspectRatio(
+              aspectRatio:
+              controller.value.aspectRatio == 0
+                  ? 16 / 9
+                  : controller.value.aspectRatio,
+
+              child:
+              VideoPlayer(
+                controller,
+              ),
+            ),
+
+            actions: [
+              TextButton.icon(
+                onPressed:
+                    () {
+                  if (
+                  controller.value.isPlaying
+                  ) {
+                    controller.pause();
+                  } else {
+                    controller.play();
+                  }
+                },
+
+                icon:
+                const Icon(
+                  Icons.play_arrow_rounded,
+                ),
+
+                label:
+                const Text(
+                  'Play / Pause',
+                ),
+              ),
+
+              TextButton(
+                onPressed:
+                    () {
+                  Navigator.pop(
+                    dialogContext,
+                  );
+                },
+
+                child:
+                const Text(
+                  'Close',
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      await controller.dispose();
+    }
+  }
 
   // ============================================================
   // EXPANDED IMAGE ANALYSES
@@ -255,6 +556,45 @@ class _ReportPreviewScreenState
 
   Future<void> submitReport() async {
     if (submitting) {
+      return;
+    }
+
+    final bool draftSaved =
+    await _savePreviewDraft();
+
+    if (!draftSaved || !mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
+        const SnackBar(
+          content:
+          Text(
+            'Your report draft could not be saved. '
+                'Please try again before submitting.',
+          ),
+        ),
+      );
+
+      return;
+    }
+
+    // IMPORTANT:
+    // Current ReportService uploads image evidence only.
+    // Never silently discard an attached video.
+    if (widget.evidenceVideos.isNotEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
+        const SnackBar(
+          content:
+          Text(
+            'Video evidence is safely preserved in the draft, '
+                'but video upload must be enabled in ReportService '
+                'before this report can be submitted.',
+          ),
+        ),
+      );
+
       return;
     }
 
@@ -353,6 +693,24 @@ class _ReportPreviewScreenState
 
       if (!mounted) {
         return;
+      }
+
+      // ========================================================
+      // CLEAR ACTIVE DRAFT ONLY AFTER REMOTE SUCCESS
+      // ========================================================
+
+      final String? userId =
+          _userId;
+
+      if (userId != null) {
+        try {
+          await ReportDraftService.clearDraft(
+            userId: userId,
+          );
+        } catch (_) {
+          // Remote submission already succeeded.
+          // Local cleanup failure must not turn success into failure.
+        }
       }
 
       // ========================================================
@@ -588,76 +946,367 @@ class _ReportPreviewScreenState
   Widget build(
       BuildContext context,
       ) {
-    return Scaffold(
-      backgroundColor:
-      AppColors.background,
+    return PopScope(
+      canPop:
+      _allowPop,
 
-      body:
-      SafeArea(
-        child:
-        Column(
-          children: [
-            Expanded(
-              child:
-              SingleChildScrollView(
-                padding:
-                const EdgeInsets.all(
-                  20,
-                ),
+      onPopInvokedWithResult:
+          (
+          didPop,
+          result,
+          ) async {
+        if (didPop) {
+          return;
+        }
 
+        await _goBackSafely();
+      },
+
+      child:
+      Scaffold(
+        backgroundColor:
+        AppColors.background,
+
+        body:
+        SafeArea(
+          child:
+          Column(
+            children: [
+              Expanded(
                 child:
-                Column(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
+                SingleChildScrollView(
+                  padding:
+                  const EdgeInsets.all(
+                    20,
+                  ),
 
-                  children: [
-                    // =================================================
-                    // HEADER
-                    // =================================================
+                  child:
+                  Column(
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
 
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed:
-                          submitting
-                              ? null
-                              : () {
-                            Navigator.pop(
-                              context,
-                            );
-                          },
+                    children: [
+                      // =================================================
+                      // HEADER
+                      // =================================================
 
-                          icon:
-                          const Icon(
-                            Icons.arrow_back,
+                      Row(
+                        children: [
+                          IconButton(
+                            onPressed:
+                            submitting ||
+                                savingPreviewDraft
+                                ? null
+                                : _goBackSafely,
+
+                            icon:
+                            const Icon(
+                              Icons.arrow_back,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width:
+                            8,
+                          ),
+
+                          const Column(
+                            crossAxisAlignment:
+                            CrossAxisAlignment.start,
+
+                            children: [
+                              Text(
+                                'Preview Report',
+
+                                style:
+                                TextStyle(
+                                  fontSize:
+                                  22,
+
+                                  fontWeight:
+                                  FontWeight.bold,
+                                ),
+                              ),
+
+                              Text(
+                                'Review before submitting',
+
+                                style:
+                                TextStyle(
+                                  color:
+                                  AppColors.textSecondary,
+
+                                  fontSize:
+                                  12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height:
+                        20,
+                      ),
+
+                      // =================================================
+                      // DRAFT STATUS
+                      // =================================================
+
+                      Container(
+                        width:
+                        double.infinity,
+
+                        padding:
+                        const EdgeInsets.symmetric(
+                          horizontal:
+                          12,
+
+                          vertical:
+                          10,
+                        ),
+
+                        decoration:
+                        BoxDecoration(
+                          color:
+                          (
+                              previewDraftSaveFailed
+                                  ? AppColors.warning
+                                  : AppColors.success
+                          ).withOpacity(
+                            0.07,
+                          ),
+
+                          borderRadius:
+                          BorderRadius.circular(
+                            12,
+                          ),
+
+                          border:
+                          Border.all(
+                            color:
+                            (
+                                previewDraftSaveFailed
+                                    ? AppColors.warning
+                                    : AppColors.success
+                            ).withOpacity(
+                              0.45,
+                            ),
                           ),
                         ),
 
+                        child:
+                        Row(
+                          children: [
+                            Icon(
+                              savingPreviewDraft
+                                  ? Icons.sync_rounded
+                                  : previewDraftSaveFailed
+                                  ? Icons.cloud_off_outlined
+                                  : Icons.cloud_done_outlined,
+
+                              color:
+                              previewDraftSaveFailed
+                                  ? AppColors.warning
+                                  : AppColors.success,
+
+                              size:
+                              17,
+                            ),
+
+                            const SizedBox(
+                              width:
+                              8,
+                            ),
+
+                            Expanded(
+                              child:
+                              Text(
+                                savingPreviewDraft
+                                    ? 'Saving preview draft...'
+                                    : previewDraftSaveFailed
+                                    ? 'Preview draft could not be saved'
+                                    : 'Preview saved in draft',
+
+                                style:
+                                TextStyle(
+                                  color:
+                                  previewDraftSaveFailed
+                                      ? AppColors.warning
+                                      : AppColors.success,
+
+                                  fontSize:
+                                  10,
+
+                                  fontWeight:
+                                  FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height:
+                        14,
+                      ),
+
+                      // =================================================
+                      // EVIDENCE
+                      // =================================================
+
+                      if (
+                      widget.evidenceImages.isNotEmpty ||
+                          widget.evidenceVideos.isNotEmpty
+                      )
+                        _buildEvidenceSection(),
+
+                      if (
+                      widget.evidenceImages.isNotEmpty ||
+                          widget.evidenceVideos.isNotEmpty
+                      )
                         const SizedBox(
-                          width:
-                          8,
+                          height:
+                          16,
                         ),
 
-                        const Column(
+                      // =================================================
+                      // FINAL SMART ASSIST RESULT
+                      // =================================================
+
+                      if (
+                      widget.finalAiAnalysis !=
+                          null
+                      ) ...[
+                        _buildFinalAiCard(
+                          widget
+                              .finalAiAnalysis!,
+                        ),
+
+                        const SizedBox(
+                          height:
+                          15,
+                        ),
+                      ],
+
+                      // =================================================
+                      // DETAILS
+                      // =================================================
+
+                      Container(
+                        width:
+                        double.infinity,
+
+                        padding:
+                        const EdgeInsets.all(
+                          16,
+                        ),
+
+                        decoration:
+                        BoxDecoration(
+                          color:
+                          AppColors.surface,
+
+                          borderRadius:
+                          BorderRadius.circular(
+                            16,
+                          ),
+
+                          border:
+                          Border.all(
+                            color:
+                            AppColors.border,
+                          ),
+                        ),
+
+                        child:
+                        Column(
                           crossAxisAlignment:
                           CrossAxisAlignment.start,
 
                           children: [
                             Text(
-                              'Preview Report',
+                              widget.title,
 
                               style:
-                              TextStyle(
+                              const TextStyle(
                                 fontSize:
-                                22,
+                                18,
 
                                 fontWeight:
                                 FontWeight.bold,
                               ),
                             ),
 
-                            Text(
-                              'Review before submitting',
+                            const SizedBox(
+                              height:
+                              16,
+                            ),
+
+                            Row(
+                              children: [
+                                Expanded(
+                                  child:
+                                  _InfoItem(
+                                    label:
+                                    'CATEGORY',
+
+                                    value:
+                                    widget.category,
+                                  ),
+                                ),
+
+                                const SizedBox(
+                                  width:
+                                  10,
+                                ),
+
+                                Expanded(
+                                  child:
+                                  _InfoItem(
+                                    label:
+                                    'PRIORITY',
+
+                                    value:
+                                    widget.priority,
+                                  ),
+                                ),
+                              ],
+                            ),
+
+                            const SizedBox(
+                              height:
+                              10,
+                            ),
+
+                            _InfoItem(
+                              label:
+                              'EVIDENCE',
+
+                              value:
+                              '${widget.evidenceImages.length} photo(s) • '
+                                  '${widget.evidenceVideos.length} video(s)',
+                            ),
+
+                            const SizedBox(
+                              height:
+                              18,
+                            ),
+
+                            const Divider(
+                              color:
+                              AppColors.border,
+                            ),
+
+                            const SizedBox(
+                              height:
+                              8,
+                            ),
+
+                            const Text(
+                              'DESCRIPTION',
 
                               style:
                               TextStyle(
@@ -665,278 +1314,433 @@ class _ReportPreviewScreenState
                                 AppColors.textSecondary,
 
                                 fontSize:
-                                12,
+                                10,
                               ),
+                            ),
+
+                            const SizedBox(
+                              height:
+                              6,
+                            ),
+
+                            Text(
+                              widget.description,
                             ),
                           ],
                         ),
-                      ],
-                    ),
-
-                    const SizedBox(
-                      height:
-                      20,
-                    ),
-
-                    // =================================================
-                    // EVIDENCE
-                    // =================================================
-
-                    if (
-                    widget
-                        .evidenceImages
-                        .isNotEmpty
-                    )
-                      _buildEvidenceSection(),
-
-                    if (
-                    widget
-                        .evidenceImages
-                        .isNotEmpty
-                    )
-                      const SizedBox(
-                        height:
-                        16,
-                      ),
-
-                    // =================================================
-                    // FINAL SMART ASSIST RESULT
-                    // =================================================
-
-                    if (
-                    widget.finalAiAnalysis !=
-                        null
-                    ) ...[
-                      _buildFinalAiCard(
-                        widget
-                            .finalAiAnalysis!,
                       ),
 
                       const SizedBox(
                         height:
                         15,
                       ),
-                    ],
 
-                    // =================================================
-                    // DETAILS
-                    // =================================================
+                      // =================================================
+                      // LOCATION
+                      // =================================================
 
-                    Container(
-                      width:
-                      double.infinity,
+                      Container(
+                        width:
+                        double.infinity,
 
-                      padding:
-                      const EdgeInsets.all(
-                        16,
-                      ),
-
-                      decoration:
-                      BoxDecoration(
-                        color:
-                        AppColors.surface,
-
-                        borderRadius:
-                        BorderRadius.circular(
+                        padding:
+                        const EdgeInsets.all(
                           16,
                         ),
 
-                        border:
-                        Border.all(
+                        decoration:
+                        BoxDecoration(
                           color:
-                          AppColors.border,
-                        ),
-                      ),
+                          AppColors.surface,
 
-                      child:
-                      Column(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
-
-                        children: [
-                          Text(
-                            widget.title,
-
-                            style:
-                            const TextStyle(
-                              fontSize:
-                              18,
-
-                              fontWeight:
-                              FontWeight.bold,
-                            ),
-                          ),
-
-                          const SizedBox(
-                            height:
+                          borderRadius:
+                          BorderRadius.circular(
                             16,
                           ),
 
-                          Row(
-                            children: [
-                              Expanded(
-                                child:
-                                _InfoItem(
-                                  label:
-                                  'CATEGORY',
-
-                                  value:
-                                  widget.category,
-                                ),
-                              ),
-
-                              const SizedBox(
-                                width:
-                                10,
-                              ),
-
-                              Expanded(
-                                child:
-                                _InfoItem(
-                                  label:
-                                  'PRIORITY',
-
-                                  value:
-                                  widget.priority,
-                                ),
-                              ),
-                            ],
-                          ),
-
-                          const SizedBox(
-                            height:
-                            10,
-                          ),
-
-                          _InfoItem(
-                            label:
-                            'EVIDENCE',
-
-                            value:
-                            '${widget.evidenceImages.length} photo(s)',
-                          ),
-
-                          const SizedBox(
-                            height:
-                            18,
-                          ),
-
-                          const Divider(
+                          border:
+                          Border.all(
                             color:
                             AppColors.border,
                           ),
-
-                          const SizedBox(
-                            height:
-                            8,
-                          ),
-
-                          const Text(
-                            'DESCRIPTION',
-
-                            style:
-                            TextStyle(
-                              color:
-                              AppColors.textSecondary,
-
-                              fontSize:
-                              10,
-                            ),
-                          ),
-
-                          const SizedBox(
-                            height:
-                            6,
-                          ),
-
-                          Text(
-                            widget.description,
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(
-                      height:
-                      15,
-                    ),
-
-                    // =================================================
-                    // LOCATION
-                    // =================================================
-
-                    Container(
-                      width:
-                      double.infinity,
-
-                      padding:
-                      const EdgeInsets.all(
-                        16,
-                      ),
-
-                      decoration:
-                      BoxDecoration(
-                        color:
-                        AppColors.surface,
-
-                        borderRadius:
-                        BorderRadius.circular(
-                          16,
                         ),
 
-                        border:
-                        Border.all(
-                          color:
-                          AppColors.border,
-                        ),
-                      ),
+                        child:
+                        Column(
+                          crossAxisAlignment:
+                          CrossAxisAlignment.start,
 
-                      child:
-                      Column(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'LOCATION',
 
-                        children: [
-                          const Text(
-                            'LOCATION',
+                              style:
+                              TextStyle(
+                                color:
+                                AppColors.textSecondary,
 
-                            style:
-                            TextStyle(
-                              color:
-                              AppColors.textSecondary,
-
-                              fontSize:
-                              10,
+                                fontSize:
+                                10,
+                              ),
                             ),
-                          ),
 
-                          const SizedBox(
-                            height:
-                            7,
-                          ),
-
-                          Text(
-                            '📍 ${widget.address}',
-
-                            style:
-                            const TextStyle(
-                              fontWeight:
-                              FontWeight.bold,
-                            ),
-                          ),
-
-                          if (
-                          widget.landmark
-                              .isNotEmpty
-                          ) ...[
                             const SizedBox(
                               height:
                               7,
                             ),
 
                             Text(
-                              'Landmark: '
-                                  '${widget.landmark}',
+                              '📍 ${widget.address}',
+
+                              style:
+                              const TextStyle(
+                                fontWeight:
+                                FontWeight.bold,
+                              ),
+                            ),
+
+                            if (
+                            widget.landmark
+                                .isNotEmpty
+                            ) ...[
+                              const SizedBox(
+                                height:
+                                7,
+                              ),
+
+                              Text(
+                                'Landmark: '
+                                    '${widget.landmark}',
+
+                                style:
+                                const TextStyle(
+                                  color:
+                                  AppColors.textSecondary,
+
+                                  fontSize:
+                                  11,
+                                ),
+                              ),
+                            ],
+
+                            if (
+                            widget.latitude !=
+                                null &&
+                                widget.longitude !=
+                                    null
+                            ) ...[
+                              const SizedBox(
+                                height:
+                                12,
+                              ),
+
+                              Container(
+                                width:
+                                double.infinity,
+
+                                padding:
+                                const EdgeInsets.all(
+                                  10,
+                                ),
+
+                                decoration:
+                                BoxDecoration(
+                                  color:
+                                  AppColors.success
+                                      .withOpacity(
+                                    0.07,
+                                  ),
+
+                                  borderRadius:
+                                  BorderRadius.circular(
+                                    10,
+                                  ),
+
+                                  border:
+                                  Border.all(
+                                    color:
+                                    AppColors.success
+                                        .withOpacity(
+                                      0.45,
+                                    ),
+                                  ),
+                                ),
+
+                                child:
+                                Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.gps_fixed,
+
+                                      color:
+                                      AppColors.success,
+
+                                      size:
+                                      16,
+                                    ),
+
+                                    const SizedBox(
+                                      width:
+                                      8,
+                                    ),
+
+                                    Expanded(
+                                      child:
+                                      Text(
+                                        '${widget.latitude!.toStringAsFixed(6)}, '
+                                            '${widget.longitude!.toStringAsFixed(6)}',
+
+                                        style:
+                                        const TextStyle(
+                                          color:
+                                          AppColors.textSecondary,
+
+                                          fontSize:
+                                          9,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // =====================================================
+              // SUBMISSION PROGRESS
+              // =====================================================
+
+              if (submitting)
+                Container(
+                  margin:
+                  const EdgeInsets.fromLTRB(
+                    18,
+                    0,
+                    18,
+                    12,
+                  ),
+
+                  padding:
+                  const EdgeInsets.all(
+                    13,
+                  ),
+
+                  decoration:
+                  BoxDecoration(
+                    color:
+                    AppColors.primary
+                        .withOpacity(
+                      0.07,
+                    ),
+
+                    borderRadius:
+                    BorderRadius.circular(
+                      12,
+                    ),
+
+                    border:
+                    Border.all(
+                      color:
+                      AppColors.primaryDark,
+                    ),
+                  ),
+
+                  child:
+                  Column(
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
+
+                    children: [
+                      Row(
+                        children: [
+                          const SizedBox(
+                            width:
+                            18,
+
+                            height:
+                            18,
+
+                            child:
+                            CircularProgressIndicator(
+                              strokeWidth:
+                              2,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width:
+                            9,
+                          ),
+
+                          Expanded(
+                            child:
+                            Text(
+                              uploadMessage
+                                  .isEmpty
+                                  ? 'Submitting report...'
+                                  : uploadMessage,
+
+                              style:
+                              const TextStyle(
+                                fontSize:
+                                10,
+
+                                fontWeight:
+                                FontWeight.w600,
+                              ),
+                            ),
+                          ),
+
+                          Text(
+                            '${(uploadProgress * 100).round()}%',
+
+                            style:
+                            const TextStyle(
+                              color:
+                              AppColors.primary,
+
+                              fontSize:
+                              10,
+
+                              fontWeight:
+                              FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height:
+                        9,
+                      ),
+
+                      ClipRRect(
+                        borderRadius:
+                        BorderRadius.circular(
+                          10,
+                        ),
+
+                        child:
+                        LinearProgressIndicator(
+                          value:
+                          uploadProgress
+                              .clamp(
+                            0.0,
+                            1.0,
+                          ),
+
+                          minHeight:
+                          6,
+
+                          backgroundColor:
+                          AppColors.border,
+
+                          color:
+                          AppColors.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              // =====================================================
+              // SUBMISSION ERROR / RETRY
+              // =====================================================
+
+              if (
+              !submitting &&
+                  submissionError !=
+                      null
+              )
+                Container(
+                  margin:
+                  const EdgeInsets.fromLTRB(
+                    18,
+                    0,
+                    18,
+                    12,
+                  ),
+
+                  padding:
+                  const EdgeInsets.all(
+                    13,
+                  ),
+
+                  decoration:
+                  BoxDecoration(
+                    color:
+                    AppColors.warning
+                        .withOpacity(
+                      0.07,
+                    ),
+
+                    borderRadius:
+                    BorderRadius.circular(
+                      12,
+                    ),
+
+                    border:
+                    Border.all(
+                      color:
+                      AppColors.warning,
+                    ),
+                  ),
+
+                  child:
+                  Row(
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
+
+                    children: [
+                      const Icon(
+                        Icons
+                            .cloud_off_outlined,
+
+                        color:
+                        AppColors.warning,
+
+                        size:
+                        20,
+                      ),
+
+                      const SizedBox(
+                        width:
+                        9,
+                      ),
+
+                      Expanded(
+                        child:
+                        Column(
+                          crossAxisAlignment:
+                          CrossAxisAlignment.start,
+
+                          children: [
+                            const Text(
+                              'Submission Not Sent',
+
+                              style:
+                              TextStyle(
+                                fontWeight:
+                                FontWeight.bold,
+
+                                fontSize:
+                                11,
+                              ),
+                            ),
+
+                            const SizedBox(
+                              height:
+                              4,
+                            ),
+
+                            Text(
+                              submissionError!,
 
                               style:
                               const TextStyle(
@@ -944,471 +1748,139 @@ class _ReportPreviewScreenState
                                 AppColors.textSecondary,
 
                                 fontSize:
-                                11,
+                                9,
+
+                                height:
+                                1.4,
                               ),
                             ),
-                          ],
 
-                          if (
-                          widget.latitude !=
-                              null &&
-                              widget.longitude !=
-                                  null
-                          ) ...[
                             const SizedBox(
                               height:
-                              12,
+                              5,
                             ),
 
-                            Container(
-                              width:
-                              double.infinity,
+                            const Text(
+                              'Your entered details, images and '
+                                  'location are preserved. Reconnect '
+                                  'and tap Retry Submission.',
 
-                              padding:
-                              const EdgeInsets.all(
-                                10,
-                              ),
-
-                              decoration:
-                              BoxDecoration(
+                              style:
+                              TextStyle(
                                 color:
-                                AppColors.success
-                                    .withOpacity(
-                                  0.07,
-                                ),
+                                AppColors.success,
 
-                                borderRadius:
-                                BorderRadius.circular(
-                                  10,
-                                ),
-
-                                border:
-                                Border.all(
-                                  color:
-                                  AppColors.success
-                                      .withOpacity(
-                                    0.45,
-                                  ),
-                                ),
-                              ),
-
-                              child:
-                              Row(
-                                children: [
-                                  const Icon(
-                                    Icons.gps_fixed,
-
-                                    color:
-                                    AppColors.success,
-
-                                    size:
-                                    16,
-                                  ),
-
-                                  const SizedBox(
-                                    width:
-                                    8,
-                                  ),
-
-                                  Expanded(
-                                    child:
-                                    Text(
-                                      '${widget.latitude!.toStringAsFixed(6)}, '
-                                          '${widget.longitude!.toStringAsFixed(6)}',
-
-                                      style:
-                                      const TextStyle(
-                                        color:
-                                        AppColors.textSecondary,
-
-                                        fontSize:
-                                        9,
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                                fontSize:
+                                9,
                               ),
                             ),
                           ],
-                        ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ),
 
-            // =====================================================
-            // SUBMISSION PROGRESS
-            // =====================================================
+              // =====================================================
+              // BUTTONS
+              // =====================================================
 
-            if (submitting)
               Container(
-                margin:
-                const EdgeInsets.fromLTRB(
-                  18,
-                  0,
-                  18,
-                  12,
-                ),
-
                 padding:
                 const EdgeInsets.all(
-                  13,
+                  18,
                 ),
 
                 decoration:
-                BoxDecoration(
-                  color:
-                  AppColors.primary
-                      .withOpacity(
-                    0.07,
-                  ),
-
-                  borderRadius:
-                  BorderRadius.circular(
-                    12,
-                  ),
-
+                const BoxDecoration(
                   border:
-                  Border.all(
-                    color:
-                    AppColors.primaryDark,
-                  ),
-                ),
-
-                child:
-                Column(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
-
-                  children: [
-                    Row(
-                      children: [
-                        const SizedBox(
-                          width:
-                          18,
-
-                          height:
-                          18,
-
-                          child:
-                          CircularProgressIndicator(
-                            strokeWidth:
-                            2,
-                          ),
-                        ),
-
-                        const SizedBox(
-                          width:
-                          9,
-                        ),
-
-                        Expanded(
-                          child:
-                          Text(
-                            uploadMessage
-                                .isEmpty
-                                ? 'Submitting report...'
-                                : uploadMessage,
-
-                            style:
-                            const TextStyle(
-                              fontSize:
-                              10,
-
-                              fontWeight:
-                              FontWeight.w600,
-                            ),
-                          ),
-                        ),
-
-                        Text(
-                          '${(uploadProgress * 100).round()}%',
-
-                          style:
-                          const TextStyle(
-                            color:
-                            AppColors.primary,
-
-                            fontSize:
-                            10,
-
-                            fontWeight:
-                            FontWeight.bold,
-                          ),
-                        ),
-                      ],
+                  Border(
+                    top:
+                    BorderSide(
+                      color:
+                      AppColors.border,
                     ),
-
-                    const SizedBox(
-                      height:
-                      9,
-                    ),
-
-                    ClipRRect(
-                      borderRadius:
-                      BorderRadius.circular(
-                        10,
-                      ),
-
-                      child:
-                      LinearProgressIndicator(
-                        value:
-                        uploadProgress
-                            .clamp(
-                          0.0,
-                          1.0,
-                        ),
-
-                        minHeight:
-                        6,
-
-                        backgroundColor:
-                        AppColors.border,
-
-                        color:
-                        AppColors.primary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // =====================================================
-            // SUBMISSION ERROR / RETRY
-            // =====================================================
-
-            if (
-            !submitting &&
-                submissionError !=
-                    null
-            )
-              Container(
-                margin:
-                const EdgeInsets.fromLTRB(
-                  18,
-                  0,
-                  18,
-                  12,
-                ),
-
-                padding:
-                const EdgeInsets.all(
-                  13,
-                ),
-
-                decoration:
-                BoxDecoration(
-                  color:
-                  AppColors.warning
-                      .withOpacity(
-                    0.07,
-                  ),
-
-                  borderRadius:
-                  BorderRadius.circular(
-                    12,
-                  ),
-
-                  border:
-                  Border.all(
-                    color:
-                    AppColors.warning,
                   ),
                 ),
 
                 child:
                 Row(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
-
                   children: [
-                    const Icon(
-                      Icons
-                          .cloud_off_outlined,
+                    OutlinedButton.icon(
+                      onPressed:
+                      submitting ||
+                          savingPreviewDraft
+                          ? null
+                          : _goBackSafely,
 
-                      color:
-                      AppColors.warning,
+                      icon:
+                      const Icon(
+                        Icons.edit,
+                      ),
 
-                      size:
-                      20,
+                      label:
+                      const Text(
+                        'Edit',
+                      ),
                     ),
 
                     const SizedBox(
                       width:
-                      9,
+                      10,
                     ),
 
                     Expanded(
                       child:
-                      Column(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                      ElevatedButton(
+                        style:
+                        ElevatedButton
+                            .styleFrom(
+                          backgroundColor:
+                          AppColors.primaryDark,
 
-                        children: [
-                          const Text(
-                            'Submission Not Sent',
-
-                            style:
-                            TextStyle(
-                              fontWeight:
-                              FontWeight.bold,
-
-                              fontSize:
-                              11,
-                            ),
+                          minimumSize:
+                          const Size
+                              .fromHeight(
+                            54,
                           ),
+                        ),
 
-                          const SizedBox(
-                            height:
-                            4,
+                        onPressed:
+                        submitting
+                            ? null
+                            : submitReport,
+
+                        child:
+                        submitting
+                            ? const SizedBox(
+                          width:
+                          22,
+
+                          height:
+                          22,
+
+                          child:
+                          CircularProgressIndicator(
+                            strokeWidth:
+                            2.5,
+
+                            color:
+                            Colors.white,
                           ),
-
-                          Text(
-                            submissionError!,
-
-                            style:
-                            const TextStyle(
-                              color:
-                              AppColors.textSecondary,
-
-                              fontSize:
-                              9,
-
-                              height:
-                              1.4,
-                            ),
-                          ),
-
-                          const SizedBox(
-                            height:
-                            5,
-                          ),
-
-                          const Text(
-                            'Your entered details, images and '
-                                'location are preserved. Reconnect '
-                                'and tap Retry Submission.',
-
-                            style:
-                            TextStyle(
-                              color:
-                              AppColors.success,
-
-                              fontSize:
-                              9,
-                            ),
-                          ),
-                        ],
+                        )
+                            : Text(
+                          submissionError ==
+                              null
+                              ? '✓ Submit Report'
+                              : '↻ Retry Submission',
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-
-            // =====================================================
-            // BUTTONS
-            // =====================================================
-
-            Container(
-              padding:
-              const EdgeInsets.all(
-                18,
-              ),
-
-              decoration:
-              const BoxDecoration(
-                border:
-                Border(
-                  top:
-                  BorderSide(
-                    color:
-                    AppColors.border,
-                  ),
-                ),
-              ),
-
-              child:
-              Row(
-                children: [
-                  OutlinedButton.icon(
-                    onPressed:
-                    submitting
-                        ? null
-                        : () {
-                      Navigator.pop(
-                        context,
-                      );
-                    },
-
-                    icon:
-                    const Icon(
-                      Icons.edit,
-                    ),
-
-                    label:
-                    const Text(
-                      'Edit',
-                    ),
-                  ),
-
-                  const SizedBox(
-                    width:
-                    10,
-                  ),
-
-                  Expanded(
-                    child:
-                    ElevatedButton(
-                      style:
-                      ElevatedButton
-                          .styleFrom(
-                        backgroundColor:
-                        AppColors.primaryDark,
-
-                        minimumSize:
-                        const Size
-                            .fromHeight(
-                          54,
-                        ),
-                      ),
-
-                      onPressed:
-                      submitting
-                          ? null
-                          : submitReport,
-
-                      child:
-                      submitting
-                          ? const SizedBox(
-                        width:
-                        22,
-
-                        height:
-                        22,
-
-                        child:
-                        CircularProgressIndicator(
-                          strokeWidth:
-                          2.5,
-
-                          color:
-                          Colors.white,
-                        ),
-                      )
-                          : Text(
-                        submissionError ==
-                            null
-                            ? '✓ Submit Report'
-                            : '↻ Retry Submission',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1486,6 +1958,185 @@ class _ReportPreviewScreenState
             );
           },
         ),
+
+        if (
+        widget.evidenceVideos.isNotEmpty
+        ) ...[
+          const SizedBox(
+            height:
+            4,
+          ),
+
+          const Text(
+            'VIDEO EVIDENCE',
+
+            style:
+            TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              10,
+
+              fontWeight:
+              FontWeight.w600,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          ...List.generate(
+            widget.evidenceVideos.length,
+                (
+                index,
+                ) {
+              final File video =
+              widget.evidenceVideos[index];
+
+              return Padding(
+                padding:
+                const EdgeInsets.only(
+                  bottom:
+                  10,
+                ),
+
+                child:
+                InkWell(
+                  onTap:
+                      () {
+                    _previewVideo(
+                      video,
+                    );
+                  },
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    14,
+                  ),
+
+                  child:
+                  Container(
+                    width:
+                    double.infinity,
+
+                    padding:
+                    const EdgeInsets.all(
+                      12,
+                    ),
+
+                    decoration:
+                    BoxDecoration(
+                      color:
+                      AppColors.surface,
+
+                      borderRadius:
+                      BorderRadius.circular(
+                        14,
+                      ),
+
+                      border:
+                      Border.all(
+                        color:
+                        AppColors.border,
+                      ),
+                    ),
+
+                    child:
+                    Row(
+                      children: [
+                        Container(
+                          width:
+                          58,
+
+                          height:
+                          48,
+
+                          decoration:
+                          BoxDecoration(
+                            color:
+                            AppColors.primary
+                                .withOpacity(
+                              0.08,
+                            ),
+
+                            borderRadius:
+                            BorderRadius.circular(
+                              10,
+                            ),
+                          ),
+
+                          child:
+                          const Icon(
+                            Icons.videocam_outlined,
+
+                            color:
+                            AppColors.primary,
+                          ),
+                        ),
+
+                        const SizedBox(
+                          width:
+                          12,
+                        ),
+
+                        Expanded(
+                          child:
+                          Column(
+                            crossAxisAlignment:
+                            CrossAxisAlignment.start,
+
+                            children: [
+                              Text(
+                                'Video ${index + 1}',
+
+                                style:
+                                const TextStyle(
+                                  fontSize:
+                                  11,
+
+                                  fontWeight:
+                                  FontWeight.bold,
+                                ),
+                              ),
+
+                              const SizedBox(
+                                height:
+                                4,
+                              ),
+
+                              const Text(
+                                'Saved local video evidence • tap to preview',
+
+                                style:
+                                TextStyle(
+                                  color:
+                                  AppColors.textSecondary,
+
+                                  fontSize:
+                                  9,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        const Icon(
+                          Icons.play_circle_outline_rounded,
+
+                          color:
+                          AppColors.primary,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
       ],
     );
   }

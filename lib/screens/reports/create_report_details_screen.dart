@@ -456,9 +456,25 @@ class _CreateReportDetailsScreenState
       existing?.hasContextEvidence ??
           false,
 
+// ==========================================================
+// PRESERVE PHOTO EVIDENCE
+// ==========================================================
+
       evidenceImagePaths:
       existing?.evidenceImagePaths ??
-          const [],
+          const <String>[],
+
+    // ==========================================================
+    // PRESERVE VIDEO EVIDENCE
+    //
+    // IMPORTANT:
+    // Details screen does not own evidence.
+    // It must preserve whatever Evidence screen already saved.
+    // ==========================================================
+
+      evidenceVideoPaths:
+      existing?.evidenceVideoPaths ??
+          const <String>[],
 
       createdAt:
       existing?.createdAt ??

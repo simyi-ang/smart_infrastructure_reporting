@@ -3067,6 +3067,19 @@ class _CreateReportEvidenceScreenState
                   evidenceImages,
                 ),
 
+                evidenceVideos:
+                List<File>.from(
+                  evidenceVideos,
+                ),
+
+                imageAnalyses:
+                Map<String, ReportImageAiAnalysis>.from(
+                  imageAnalyses,
+                ),
+
+                finalAiAnalysis:
+                finalAiAnalysis,
+
                 aiAnalysis:
                 legacyAnalysis,
               ),
