@@ -391,24 +391,39 @@ class ReportDraftService {
     required String userId,
     required File sourceFile,
   }) async {
+    // ============================================================
+    // 1. SOURCE MUST EXIST
+    // ============================================================
+
     if (!await sourceFile.exists()) {
       throw Exception(
         'The selected evidence video is no longer available.',
       );
     }
 
+    // ============================================================
+    // 2. GET PERMANENT VIDEO DRAFT DIRECTORY
+    // ============================================================
+
     final Directory directory =
     await _getEvidenceDirectory(
       userId: userId,
-      evidenceType:
-      _videosFolder,
+      evidenceType: _videosFolder,
     );
+
+    // ============================================================
+    // 3. DETERMINE EXTENSION
+    // ============================================================
 
     final String extension =
     _fileExtension(
       sourceFile.path,
       fallback: '.mp4',
     );
+
+    // ============================================================
+    // 4. CREATE UNIQUE FILE NAME
+    // ============================================================
 
     final String fileName =
         'video_'
@@ -420,10 +435,21 @@ class ReportDraftService {
         '${Platform.pathSeparator}'
         '$fileName';
 
+    // ============================================================
+    // 5. COPY CAMERA / GALLERY / COMPRESSED VIDEO
+    //
+    // The source may be temporary.
+    // The destination is application document storage.
+    // ============================================================
+
     final File copiedFile =
     await sourceFile.copy(
       destinationPath,
     );
+
+    // ============================================================
+    // 6. VERIFY PERMANENT FILE
+    // ============================================================
 
     if (!await copiedFile.exists()) {
       throw Exception(
@@ -431,11 +457,32 @@ class ReportDraftService {
       );
     }
 
-    await addEvidenceVideo(
-      userId: userId,
-      videoPath:
-      copiedFile.path,
-    );
+    final int copiedBytes =
+    await copiedFile.length();
+
+    if (copiedBytes <= 0) {
+      try {
+        await copiedFile.delete();
+      } catch (_) {
+        // Ignore cleanup failure.
+      }
+
+      throw Exception(
+        'The preserved evidence video is empty.',
+      );
+    }
+
+    // ============================================================
+    // IMPORTANT
+    //
+    // DO NOT call addEvidenceVideo() here.
+    //
+    // The Evidence screen owns the current evidence state and will
+    // save evidenceVideoPaths through _saveDraft().
+    //
+    // This prevents two independent SharedPreferences writes from
+    // racing against each other.
+    // ============================================================
 
     return copiedFile.path;
   }

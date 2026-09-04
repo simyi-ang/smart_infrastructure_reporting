@@ -13,6 +13,7 @@ import '../../models/report_image_ai_analysis.dart';
 import '../../services/ai_evidence_service.dart';
 import '../../services/image_compression_service.dart';
 import '../../services/report_draft_service.dart';
+import '../../services/video_compression_service.dart';
 
 import '../../theme/app_colors.dart';
 
@@ -87,6 +88,9 @@ class _CreateReportEvidenceScreenState
 
   final ImageCompressionService compressionService =
   const ImageCompressionService();
+
+  final VideoCompressionService videoCompressionService =
+  const VideoCompressionService();
 
   final AiEvidenceService aiEvidenceService =
   AiEvidenceService();
@@ -180,6 +184,13 @@ class _CreateReportEvidenceScreenState
   bool isNavigating = false;
 
   bool _allowPop = false;
+
+  int totalCompressedVideoBytes = 0;
+
+  int compressedVideoCount = 0;
+
+  String videoCompressionMessage =
+      'Short videos are optimized before upload.';
 
   // ============================================================
   // IMAGE COMPRESSION
@@ -312,7 +323,25 @@ class _CreateReportEvidenceScreenState
   void didChangeAppLifecycleState(
       AppLifecycleState state,
       ) {
-    if (state ==
+    // ============================================================
+    // IMPORTANT:
+    //
+    // Opening Android camera/gallery temporarily changes the
+    // Flutter lifecycle to inactive/paused.
+    //
+    // Do NOT save the evidence draft while an external picker is
+    // active because the newly captured file has not yet been
+    // added to evidenceImages/evidenceVideos.
+    // ============================================================
+
+    if (
+    loadingImage ||
+        loadingVideo) {
+      return;
+    }
+
+    if (
+    state ==
         AppLifecycleState.inactive ||
         state ==
             AppLifecycleState.paused ||
@@ -331,8 +360,7 @@ class _CreateReportEvidenceScreenState
   // ============================================================
 
   Future<void> _restoreDraft() async {
-    final String? userId =
-        _userId;
+    final String? userId = _userId;
 
     if (userId == null) {
       if (mounted) {
@@ -346,14 +374,17 @@ class _CreateReportEvidenceScreenState
 
     try {
       final ReportDraft? draft =
-      await ReportDraftService
-          .loadDraft(
+      await ReportDraftService.loadDraft(
         userId: userId,
       );
 
       if (!mounted) {
         return;
       }
+
+      // ============================================================
+      // NO EXISTING DRAFT
+      // ============================================================
 
       if (draft == null) {
         setState(() {
@@ -367,59 +398,103 @@ class _CreateReportEvidenceScreenState
         return;
       }
 
+      // ============================================================
+      // RESTORE PHOTOS
+      // ============================================================
+
       final List<File> restoredImages =
       <File>[];
 
       for (final String path
       in draft.evidenceImagePaths) {
-        final File file =
-        File(path);
+        try {
+          final File file = File(path);
 
-        if (await file.exists()) {
-          restoredImages.add(
-            file,
-          );
+          if (await file.exists()) {
+            restoredImages.add(
+              file,
+            );
+          }
+        } catch (_) {
+          // Ignore missing or inaccessible image.
         }
       }
+
+      // ============================================================
+      // RESTORE VIDEOS
+      // ============================================================
 
       final List<File> restoredVideos =
       <File>[];
 
       for (final String path
       in draft.evidenceVideoPaths) {
-        final File file =
-        File(path);
+        try {
+          final File file = File(path);
 
-        if (await file.exists()) {
-          restoredVideos.add(
-            file,
-          );
+          if (await file.exists()) {
+            restoredVideos.add(
+              file,
+            );
+          }
+        } catch (_) {
+          // Ignore missing or inaccessible video.
         }
       }
 
-      int restoredBytes = 0;
+      // ============================================================
+      // RESTORE TOTAL PHOTO SIZE
+      // ============================================================
+
+      int restoredImageBytes = 0;
 
       for (final File file
       in restoredImages) {
         try {
-          restoredBytes +=
+          restoredImageBytes +=
           await file.length();
         } catch (_) {
           // Ignore file-size failure.
         }
       }
 
-      if (draft.category.trim().isNotEmpty) {
+      // ============================================================
+      // RESTORE TOTAL VIDEO SIZE
+      // ============================================================
+
+      int restoredVideoBytes = 0;
+
+      for (final File file
+      in restoredVideos) {
+        try {
+          restoredVideoBytes +=
+          await file.length();
+        } catch (_) {
+          // Ignore file-size failure.
+        }
+      }
+
+      // ============================================================
+      // RESTORE REPORT DETAILS
+      // ============================================================
+
+      if (draft.category
+          .trim()
+          .isNotEmpty) {
         selectedCategory =
             draft.category;
       }
 
-      if (draft.priority.trim().isNotEmpty) {
+      if (draft.priority
+          .trim()
+          .isNotEmpty) {
         selectedPriority =
             draft.priority;
       }
 
-      if (draft.title.trim().isNotEmpty) {
+      if (draft.title
+          .trim()
+          .isNotEmpty) {
         selectedTitle =
             draft.title;
       }
@@ -431,12 +506,28 @@ class _CreateReportEvidenceScreenState
             draft.description;
       }
 
+      if (!mounted) {
+        return;
+      }
+
+      // ============================================================
+      // RESTORE SCREEN STATE
+      // ============================================================
+
       setState(() {
+        // ----------------------------------------------------------
+        // Images
+        // ----------------------------------------------------------
+
         evidenceImages
           ..clear()
           ..addAll(
             restoredImages,
           );
+
+        // ----------------------------------------------------------
+        // Videos
+        // ----------------------------------------------------------
 
         evidenceVideos
           ..clear()
@@ -444,19 +535,60 @@ class _CreateReportEvidenceScreenState
             restoredVideos,
           );
 
+        // ----------------------------------------------------------
+        // Image size
+        // ----------------------------------------------------------
+
         totalCompressedBytes =
-            restoredBytes;
+            restoredImageBytes;
+
+        // ----------------------------------------------------------
+        // Video size
+        // ----------------------------------------------------------
+
+        totalCompressedVideoBytes =
+            restoredVideoBytes;
+
+        // ----------------------------------------------------------
+        // Image compression message
+        // ----------------------------------------------------------
 
         compressionMessage =
         restoredImages.isEmpty
             ? 'Evidence photos are optimized before upload.'
-            : '${restoredImages.length} saved photo(s) restored from draft.';
+            : '${restoredImages.length} saved photo'
+            '${restoredImages.length == 1 ? '' : 's'} '
+            'restored from draft.';
 
-        restoringDraft =
-        false;
+        // ----------------------------------------------------------
+        // Video compression message
+        // ----------------------------------------------------------
+
+        videoCompressionMessage =
+        restoredVideos.isEmpty
+            ? 'Short videos are optimized before upload.'
+            : '${restoredVideos.length} saved video'
+            '${restoredVideos.length == 1 ? '' : 's'} '
+            'restored from draft.';
+
+        // ----------------------------------------------------------
+        // Reset video compression statistics.
+        //
+        // We know the saved videos are already prepared, but unless
+        // compression metadata is stored separately in ReportDraft,
+        // we should not guess how many were actually compressed.
+        // ----------------------------------------------------------
+
+        compressedVideoCount = 0;
+
+        restoringDraft = false;
+        draftSaveFailed = false;
       });
 
-      // Load video durations after restoring.
+      // ============================================================
+      // RESTORE VIDEO DURATIONS
+      // ============================================================
+
       for (final File video
       in restoredVideos) {
         await _loadVideoDuration(
@@ -468,27 +600,39 @@ class _CreateReportEvidenceScreenState
         return;
       }
 
+      // ============================================================
+      // SAVE CLEANED DRAFT AGAIN
+      //
+      // If any image/video file was missing, this rewrites the draft
+      // using only files that still exist.
+      // ============================================================
+
+      final bool saved =
       await _saveDraft(
         currentStep: 2,
       );
+
+      if (!saved &&
+          mounted) {
+        setState(() {
+          draftSaveFailed = true;
+        });
+      }
     } catch (_) {
       if (!mounted) {
         return;
       }
 
       setState(() {
-        restoringDraft =
-        false;
-
-        draftSaveFailed =
-        true;
+        restoringDraft = false;
+        draftSaveFailed = true;
       });
     }
   }
 
-  // ============================================================
-  // BUILD CURRENT DRAFT
-  // ============================================================
+// ============================================================
+// BUILD CURRENT DRAFT
+// ============================================================
 
   Future<ReportDraft> _buildCurrentDraft({
     required int currentStep,
@@ -499,10 +643,16 @@ class _CreateReportEvidenceScreenState
     ReportDraft base =
     ReportDraft.empty();
 
+    // ============================================================
+    // LOAD EXISTING DRAFT FIRST
+    //
+    // This preserves fields owned by other steps such as:
+    // location, GPS accuracy, voice context, etc.
+    // ============================================================
+
     if (userId != null) {
       final ReportDraft? existing =
-      await ReportDraftService
-          .loadDraft(
+      await ReportDraftService.loadDraft(
         userId: userId,
       );
 
@@ -510,6 +660,10 @@ class _CreateReportEvidenceScreenState
         base = existing;
       }
     }
+
+    // ============================================================
+    // BUILD UPDATED EVIDENCE DRAFT
+    // ============================================================
 
     return base.copyWith(
       category:
@@ -546,15 +700,21 @@ class _CreateReportEvidenceScreenState
     );
   }
 
-  // ============================================================
-  // SAVE DRAFT
-  // ============================================================
+// ============================================================
+// SAVE DRAFT
+// ============================================================
 
   Future<bool> _saveDraft({
     required int currentStep,
   }) {
     final Completer<bool> completer =
     Completer<bool>();
+
+    // ============================================================
+    // QUEUE DRAFT SAVES
+    //
+    // Prevents multiple async saves from overwriting each other.
+    // ============================================================
 
     _saveQueue =
         _saveQueue.then(
@@ -563,20 +723,19 @@ class _CreateReportEvidenceScreenState
                 _userId;
 
             if (userId == null) {
-              completer.complete(
-                false,
-              );
+              if (!completer.isCompleted) {
+                completer.complete(
+                  false,
+                );
+              }
 
               return;
             }
 
             if (mounted) {
               setState(() {
-                savingDraft =
-                true;
-
-                draftSaveFailed =
-                false;
+                savingDraft = true;
+                draftSaveFailed = false;
               });
             }
 
@@ -598,31 +757,29 @@ class _CreateReportEvidenceScreenState
 
               if (mounted) {
                 setState(() {
-                  savingDraft =
-                  false;
-
-                  draftSaveFailed =
-                  false;
+                  savingDraft = false;
+                  draftSaveFailed = false;
                 });
               }
 
-              completer.complete(
-                true,
-              );
+              if (!completer.isCompleted) {
+                completer.complete(
+                  true,
+                );
+              }
             } catch (_) {
               if (mounted) {
                 setState(() {
-                  savingDraft =
-                  false;
-
-                  draftSaveFailed =
-                  true;
+                  savingDraft = false;
+                  draftSaveFailed = true;
                 });
               }
 
-              completer.complete(
-                false,
-              );
+              if (!completer.isCompleted) {
+                completer.complete(
+                  false,
+                );
+              }
             }
           },
         );
@@ -630,27 +787,44 @@ class _CreateReportEvidenceScreenState
     return completer.future;
   }
 
-  // ============================================================
-  // SAVE EFFECTIVE AI VALUES
-  // ============================================================
+// ============================================================
+// SAVE EFFECTIVE AI VALUES
+// ============================================================
 
   Future<void> _saveEffectiveReportValues() async {
+    final bool saved =
     await _saveDraft(
       currentStep: 2,
     );
+
+    if (!saved ||
+        !mounted) {
+      return;
+    }
   }
 
-  // ============================================================
-  // VIDEO DURATION
-  // ============================================================
+// ============================================================
+// VIDEO DURATION
+// ============================================================
 
   Future<Duration?> _loadVideoDuration(
       File videoFile,
       ) async {
-    VideoPlayerController?
-    controller;
+    VideoPlayerController? controller;
 
     try {
+      // ==========================================================
+      // VIDEO MUST STILL EXIST
+      // ==========================================================
+
+      if (!await videoFile.exists()) {
+        videoDurations.remove(
+          videoFile.path,
+        );
+
+        return null;
+      }
+
       controller =
           VideoPlayerController.file(
             videoFile,
@@ -671,15 +845,19 @@ class _CreateReportEvidenceScreenState
 
       return duration;
     } catch (_) {
+      videoDurations.remove(
+        videoFile.path,
+      );
+
       return null;
     } finally {
       await controller?.dispose();
     }
   }
 
-  // ============================================================
-  // FORMAT VIDEO DURATION
-  // ============================================================
+// ============================================================
+// FORMAT VIDEO DURATION
+// ============================================================
 
   String _formatVideoDuration(
       Duration? duration,
@@ -692,16 +870,15 @@ class _CreateReportEvidenceScreenState
         duration.inMinutes;
 
     final int seconds =
-        duration.inSeconds %
-            60;
+        duration.inSeconds % 60;
 
     return '$minutes:'
         '${seconds.toString().padLeft(2, '0')}';
   }
 
-  // ============================================================
-  // DRAFT STATUS TEXT
-  // ============================================================
+// ============================================================
+// DRAFT STATUS TEXT
+// ============================================================
 
   String get _draftStatusText {
     if (restoringDraft) {
@@ -716,12 +893,17 @@ class _CreateReportEvidenceScreenState
       return 'Draft could not be saved';
     }
 
+    if (evidenceVideos.isNotEmpty ||
+        evidenceImages.isNotEmpty) {
+      return 'Evidence saved in draft';
+    }
+
     return 'Draft protected';
   }
 
-  // ============================================================
-  // DRAFT STATUS ICON
-  // ============================================================
+// ============================================================
+// DRAFT STATUS ICON
+// ============================================================
 
   IconData get _draftStatusIcon {
     if (restoringDraft ||
@@ -730,17 +912,15 @@ class _CreateReportEvidenceScreenState
     }
 
     if (draftSaveFailed) {
-      return Icons
-          .cloud_off_outlined;
+      return Icons.cloud_off_outlined;
     }
 
-    return Icons
-        .cloud_done_outlined;
+    return Icons.cloud_done_outlined;
   }
 
-  // ============================================================
-  // DRAFT STATUS COLOR
-  // ============================================================
+// ============================================================
+// DRAFT STATUS COLOR
+// ============================================================
 
   Color get _draftStatusColor {
     if (draftSaveFailed) {
@@ -1905,9 +2085,9 @@ class _CreateReportEvidenceScreenState
     }
   }
 
-// ============================================================
-// PREPARE VIDEO
-// ============================================================
+  // ============================================================
+  // PREPARE VIDEO
+  // ============================================================
 
   Future<void> _prepareVideo(
       File sourceFile,
@@ -1924,19 +2104,46 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    if (!await sourceFile.exists()) {
+    // ============================================================
+    // 0. CHECK EVIDENCE LIMIT
+    // ============================================================
+
+    if (
+    evidenceImages.length +
+        evidenceVideos.length >=
+        maxEvidenceItems) {
       showMessage(
-        'The selected video '
-            'is no longer available.',
+        'You can add up to '
+            '$maxEvidenceItems evidence items.',
       );
 
       return;
     }
 
-    VideoPlayerController?
-    controller;
+    if (!await sourceFile.exists()) {
+      showMessage(
+        'The selected video is no longer available.',
+      );
+
+      return;
+    }
+
+    VideoPlayerController? controller;
+
+    File? temporaryCompressedFile;
+
+    File? persistentFile;
+
+    String? persistentPath;
+
+    bool addedToUi =
+    false;
 
     try {
+      // ==========================================================
+      // 1. CHECK ORIGINAL VIDEO
+      // ==========================================================
+
       controller =
           VideoPlayerController.file(
             sourceFile,
@@ -1944,38 +2151,179 @@ class _CreateReportEvidenceScreenState
 
       await controller.initialize();
 
-      final Duration duration =
+      final Duration originalDuration =
           controller.value.duration;
 
-      if (duration >
+      await controller.dispose();
+      controller = null;
+
+      if (
+      originalDuration >
           maxVideoDuration) {
         showMessage(
-          'Please choose a video '
-              'that is 30 seconds or shorter.',
+          'Please choose a video that is '
+              '30 seconds or shorter.',
         );
 
         return;
       }
 
-      final String persistentPath =
-      await ReportDraftService
-          .persistEvidenceVideo(
-        userId:
-        userId,
+      if (
+      originalDuration <=
+          Duration.zero) {
+        showMessage(
+          'The selected video could not be read.',
+        );
 
-        sourceFile:
+        return;
+      }
+
+      if (mounted) {
+        setState(() {
+          videoCompressionMessage =
+          'Optimizing video...';
+        });
+      }
+
+      // ==========================================================
+      // 2. COMPRESS VIDEO
+      // ==========================================================
+
+      final VideoCompressionResult result =
+      await videoCompressionService
+          .compressEvidenceVideo(
         sourceFile,
       );
 
-      final File persistentFile =
-      File(
-        persistentPath,
+      final File preparedVideo =
+          result.file;
+
+      if (result.compressed) {
+        temporaryCompressedFile =
+            preparedVideo;
+      }
+
+      if (!await preparedVideo.exists()) {
+        throw Exception(
+          'Prepared video could not be found.',
+        );
+      }
+
+      // ==========================================================
+      // 3. VERIFY PREPARED VIDEO
+      // ==========================================================
+
+      controller =
+          VideoPlayerController.file(
+            preparedVideo,
+          );
+
+      await controller.initialize();
+
+      final Duration preparedDuration =
+          controller.value.duration;
+
+      await controller.dispose();
+      controller = null;
+
+      if (
+      preparedDuration >
+          maxVideoDuration) {
+        throw Exception(
+          'Prepared video exceeds the '
+              '30-second evidence limit.',
+        );
+      }
+
+      if (
+      preparedDuration <=
+          Duration.zero) {
+        throw Exception(
+          'Prepared video could not be verified.',
+        );
+      }
+
+      // ==========================================================
+      // 4. COPY INTO PERMANENT DRAFT STORAGE
+      //
+      // IMPORTANT:
+      // Do NOT save preparedVideo.path into the draft.
+      // The compression result may be a temporary/cache file.
+      // ==========================================================
+
+      persistentPath =
+      await ReportDraftService
+          .persistEvidenceVideo(
+        userId: userId,
+        sourceFile: preparedVideo,
       );
 
-      if (!await persistentFile
-          .exists()) {
+      persistentFile =
+          File(
+            persistentPath,
+          );
+
+      if (!await persistentFile.exists()) {
         throw Exception(
-          'Unable to preserve video.',
+          'Unable to preserve the video '
+              'in draft storage.',
+        );
+      }
+
+      // ==========================================================
+      // 5. VERIFY THE PERMANENT COPY
+      //
+      // We verify the actual file that will be restored later,
+      // not only the temporary compression output.
+      // ==========================================================
+
+      controller =
+          VideoPlayerController.file(
+            persistentFile,
+          );
+
+      await controller.initialize();
+
+      final Duration persistentDuration =
+          controller.value.duration;
+
+      await controller.dispose();
+      controller = null;
+
+      if (
+      persistentDuration >
+          maxVideoDuration ||
+          persistentDuration <=
+              Duration.zero) {
+        throw Exception(
+          'The saved draft video could not be verified.',
+        );
+      }
+
+      final int persistentBytes =
+      await persistentFile.length();
+
+      if (persistentBytes <= 0) {
+        throw Exception(
+          'The saved draft video is empty.',
+        );
+      }
+
+      // ==========================================================
+      // 6. PREVENT DUPLICATE PATH
+      // ==========================================================
+
+      final bool alreadyAdded =
+      evidenceVideos.any(
+            (File video) =>
+        video.path ==
+            persistentFile!.path,
+      );
+
+      if (alreadyAdded) {
+        throw Exception(
+          'This video is already included '
+              'in the report draft.',
         );
       }
 
@@ -1983,37 +2331,205 @@ class _CreateReportEvidenceScreenState
         return;
       }
 
+      // ==========================================================
+      // 7. ADD PERMANENT FILE TO UI STATE
+      //
+      // _buildCurrentDraft() should read evidenceVideos and save
+      // these permanent paths into evidenceVideoPaths.
+      // ==========================================================
+
       setState(() {
         evidenceVideos.add(
-          persistentFile,
+          persistentFile!,
         );
 
         videoDurations[
-        persistentFile.path] =
-            duration;
+        persistentFile!.path
+        ] = persistentDuration;
+
+        // Use the permanent file's actual size.
+        totalCompressedVideoBytes +=
+            persistentBytes;
+
+        if (result.compressed) {
+          compressedVideoCount++;
+
+          videoCompressionMessage =
+          'Video optimized: '
+              '${videoCompressionService.formatBytes(result.originalBytes)} '
+              '→ '
+              '${videoCompressionService.formatBytes(persistentBytes)} '
+              '(${result.savedPercentage.toStringAsFixed(0)}% smaller)';
+        } else {
+          videoCompressionMessage =
+          'Video prepared and saved to draft.';
+        }
       });
 
+      addedToUi =
+      true;
+
+      // ==========================================================
+      // 8. SAVE REPORT DRAFT
+      //
+      // IMPORTANT:
+      // Check the result. Do not claim the video was saved if
+      // SharedPreferences / draft serialization failed.
+      // ==========================================================
+
+      final bool draftSaved =
       await _saveDraft(
-        currentStep:
-        2,
+        currentStep: 2,
       );
 
-      showMessage(
-        'Video added to your draft.',
+      if (!draftSaved) {
+        throw Exception(
+          'The video was prepared, but the '
+              'report draft could not be saved.',
+        );
+      }
+
+      // ==========================================================
+      // 9. VERIFY DRAFT ACTUALLY CONTAINS VIDEO PATH
+      //
+      // This catches the exact situation where the file exists
+      // but evidenceVideoPaths was not written into the draft.
+      // ==========================================================
+
+      final ReportDraft? savedDraft =
+      await ReportDraftService.loadDraft(
+        userId: userId,
       );
+
+      if (savedDraft == null) {
+        throw Exception(
+          'The saved report draft could not be reloaded.',
+        );
+      }
+
+      final bool pathSaved =
+      savedDraft.evidenceVideoPaths.any(
+            (String path) =>
+        path ==
+            persistentPath,
+      );
+
+      if (!pathSaved) {
+        throw Exception(
+          'The video file was saved, but its '
+              'draft reference was not preserved.',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      // ==========================================================
+      // 10. SUCCESS
+      // ==========================================================
+
+      if (result.compressed) {
+        showMessage(
+          'Video optimized and saved to your draft.',
+        );
+      } else {
+        showMessage(
+          'Video saved to your draft.',
+        );
+      }
     } catch (e) {
+      // ==========================================================
+      // ROLLBACK UI STATE WHEN DRAFT SAVE FAILED
+      // ==========================================================
+
+      if (
+      addedToUi &&
+          persistentFile != null &&
+          mounted) {
+        final String failedPath =
+            persistentFile.path;
+
+        int removedBytes =
+        0;
+
+        try {
+          if (await persistentFile.exists()) {
+            removedBytes =
+            await persistentFile.length();
+          }
+        } catch (_) {
+          // Ignore size lookup failure.
+        }
+
+        setState(() {
+          evidenceVideos.removeWhere(
+                (File video) =>
+            video.path ==
+                failedPath,
+          );
+
+          videoDurations.remove(
+            failedPath,
+          );
+
+          totalCompressedVideoBytes =
+              (
+                  totalCompressedVideoBytes -
+                      removedBytes
+              )
+                  .clamp(
+                0,
+                1 << 62,
+              )
+                  .toInt();
+
+          videoCompressionMessage =
+          'Video could not be saved to draft.';
+        });
+      }
+
       showMessage(
         'Unable to prepare video: '
             '${_cleanException(e)}',
       );
     } finally {
-      await controller?.dispose();
+      // ==========================================================
+      // 11. CLEAN CONTROLLER
+      // ==========================================================
+
+      try {
+        await controller?.dispose();
+      } catch (_) {
+        // Ignore cleanup errors.
+      }
+
+      // ==========================================================
+      // 12. DELETE ONLY TEMPORARY COMPRESSED OUTPUT
+      //
+      // Never delete:
+      // - sourceFile
+      // - persistentFile
+      // ==========================================================
+
+      if (temporaryCompressedFile != null) {
+        try {
+          await videoCompressionService
+              .deleteTemporaryCompressedFile(
+            temporaryCompressedFile,
+            originalFile: sourceFile,
+          );
+        } catch (_) {
+          // Temporary cleanup failure must not invalidate
+          // an otherwise successfully saved draft.
+        }
+      }
     }
   }
 
   // ============================================================
-// VIDEO PREVIEW
-// ============================================================
+  // VIDEO PREVIEW
+  // ============================================================
 
   Future<void> previewVideo(
       File videoFile,
@@ -2271,25 +2787,52 @@ class _CreateReportEvidenceScreenState
   Future<void> removeVideo(
       int index,
       ) async {
+    // ============================================================
+    // VALIDATE
+    // ============================================================
+
     if (index < 0 ||
-        index >=
-            evidenceVideos.length ||
+        index >= evidenceVideos.length ||
         isBusy) {
       return;
     }
 
-    final String? userId =
-        _userId;
+    final String? userId = _userId;
 
     if (userId == null) {
+      showMessage(
+        'Your session is unavailable. '
+            'Please sign in again.',
+      );
+
       return;
     }
 
-    final File file =
-    evidenceVideos[index];
+    final File file = evidenceVideos[index];
 
-    final String path =
-        file.path;
+    final String path = file.path;
+
+    // ============================================================
+    // GET VIDEO SIZE BEFORE DELETING IT
+    // ============================================================
+
+    int videoBytes = 0;
+
+    try {
+      if (await file.exists()) {
+        videoBytes = await file.length();
+      }
+    } catch (_) {
+      videoBytes = 0;
+    }
+
+    // ============================================================
+    // UPDATE SCREEN
+    // ============================================================
+
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       evidenceVideos.removeAt(
@@ -2299,19 +2842,83 @@ class _CreateReportEvidenceScreenState
       videoDurations.remove(
         path,
       );
+
+      // Remove this video's size from the prepared total.
+      totalCompressedVideoBytes =
+          (totalCompressedVideoBytes - videoBytes)
+              .clamp(
+            0,
+            1 << 62,
+          )
+              .toInt();
+
+      // Keep the compression count sensible.
+      if (compressedVideoCount > 0) {
+        compressedVideoCount--;
+      }
+
+      // ==========================================================
+      // UPDATE MESSAGE
+      // ==========================================================
+
+      if (evidenceVideos.isEmpty) {
+        totalCompressedVideoBytes = 0;
+
+        compressedVideoCount = 0;
+
+        videoCompressionMessage =
+        'Short videos are optimized before upload.';
+      } else {
+        videoCompressionMessage =
+        '${evidenceVideos.length} video'
+            '${evidenceVideos.length == 1 ? '' : 's'} '
+            'prepared for upload.';
+      }
     });
 
-    await ReportDraftService
-        .removeEvidenceVideo(
-      userId:
-      userId,
+    // ============================================================
+    // DELETE PERSISTENT DRAFT VIDEO
+    // ============================================================
 
-      videoPath:
-      path,
+    try {
+      await ReportDraftService.removeEvidenceVideo(
+        userId: userId,
+        videoPath: path,
+      );
+    } catch (e) {
+      // The UI has already removed the item, but make the user
+      // aware if local cleanup did not complete successfully.
+      if (mounted) {
+        showMessage(
+          'Video removed, but local file cleanup '
+              'could not be completed.',
+        );
+      }
+    }
+
+    // ============================================================
+    // SAVE UPDATED DRAFT
+    // ============================================================
+
+    final bool saved = await _saveDraft(
+      currentStep: 2,
     );
 
-    await _saveDraft(
-      currentStep: 2,
+    if (!mounted) {
+      return;
+    }
+
+    if (!saved) {
+      showMessage(
+        'Video was removed, but the draft could not '
+            'be updated. Please try again.',
+      );
+
+      return;
+    }
+
+    showMessage(
+      'Video removed from your draft.',
     );
   }
 
@@ -3096,6 +3703,20 @@ class _CreateReportEvidenceScreenState
                                       height: 1.4,
                                     ),
                                   ),
+
+                                  if (evidenceVideos.isNotEmpty) ...[
+                                    const SizedBox(
+                                      height: 6,
+                                    ),
+                                    Text(
+                                      videoCompressionMessage,
+                                      style: const TextStyle(
+                                        color: AppColors.textSecondary,
+                                        fontSize: 10,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ],
 
                                   const SizedBox(
                                     height: 5,
