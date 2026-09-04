@@ -308,10 +308,10 @@ class VideoEvidenceAiService {
 
           // Keep aspect ratio by setting width only.
           maxWidth:
-          1280,
+          512,
 
           quality:
-          82,
+          60,
 
           timeMs:
           timeMs,

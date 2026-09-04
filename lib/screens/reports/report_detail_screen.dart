@@ -1,9 +1,35 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../models/infrastructure_report.dart';
 import '../../services/report_service.dart';
 import '../../theme/app_colors.dart';
+
+// ================================================================
+// REPORT DETAIL SCREEN
+//
+// Supports:
+// - report details
+// - multiple report_images
+// - multiple report_evidence videos
+// - private signed URLs
+// - image preview + zoom
+// - video playback
+// - GPS map
+// - report status timeline
+//
+// IMPORTANT:
+// Photos and videos intentionally remain in their existing tables:
+//
+// Photos:
+// report_images
+//
+// Videos:
+// report_evidence
+//
+// This preserves the current image AI architecture.
+// ================================================================
 
 class ReportDetailScreen extends StatefulWidget {
   final String reportId;
@@ -20,16 +46,54 @@ class ReportDetailScreen extends StatefulWidget {
 
 class _ReportDetailScreenState
     extends State<ReportDetailScreen> {
+  // ============================================================
+  // SERVICES
+  // ============================================================
+
   final ReportService reportService =
   ReportService();
 
+  // ============================================================
+  // REPORT
+  // ============================================================
+
   InfrastructureReport? report;
 
-  List<String> evidenceUrls = [];
+  // ============================================================
+  // EVIDENCE
+  // ============================================================
 
-  List<Map<String, dynamic>> statusHistory = [];
+  final List<String> evidenceImageUrls =
+  <String>[];
 
-  bool loading = true;
+  final List<Map<String, dynamic>>
+  evidenceVideos =
+  <Map<String, dynamic>>[];
+
+  int get totalEvidenceCount =>
+      evidenceImageUrls.length +
+          evidenceVideos.length;
+
+  // ============================================================
+  // STATUS HISTORY
+  // ============================================================
+
+  final List<Map<String, dynamic>>
+  statusHistory =
+  <Map<String, dynamic>>[];
+
+  // ============================================================
+  // STATE
+  // ============================================================
+
+  bool loading =
+  true;
+
+  String? loadingError;
+
+  // ============================================================
+  // INITIALIZATION
+  // ============================================================
 
   @override
   void initState() {
@@ -38,10 +102,29 @@ class _ReportDetailScreenState
     loadReport();
   }
 
+  // ============================================================
+  // LOAD REPORT
+  // ============================================================
+
   Future<void> loadReport() async {
+    if (mounted) {
+      setState(() {
+        loading =
+        true;
+
+        loadingError =
+        null;
+      });
+    }
+
     try {
-      final result =
-      await reportService.getReportById(
+      // ========================================================
+      // REPORT
+      // ========================================================
+
+      final InfrastructureReport? result =
+      await reportService
+          .getReportById(
         widget.reportId,
       );
 
@@ -51,13 +134,50 @@ class _ReportDetailScreenState
         );
       }
 
-      final images =
-      await reportService
-          .getReportSignedImageUrls(
-        widget.reportId,
-      );
+      // ========================================================
+      // IMAGES
+      //
+      // Do not fail the whole report if evidence loading fails.
+      // ========================================================
 
-      List<Map<String, dynamic>> history = [];
+      List<String> images =
+      <String>[];
+
+      try {
+        images =
+        await reportService
+            .getReportSignedImageUrls(
+          widget.reportId,
+        );
+      } catch (_) {
+        // Keep report usable.
+      }
+
+      // ========================================================
+      // VIDEOS
+      // ========================================================
+
+      List<Map<String, dynamic>>
+      videos =
+      <Map<String, dynamic>>[];
+
+      try {
+        videos =
+        await reportService
+            .getReportVideoEvidence(
+          widget.reportId,
+        );
+      } catch (_) {
+        // Keep report usable.
+      }
+
+      // ========================================================
+      // STATUS HISTORY
+      // ========================================================
+
+      List<Map<String, dynamic>>
+      history =
+      <Map<String, dynamic>>[];
 
       try {
         history =
@@ -66,37 +186,109 @@ class _ReportDetailScreenState
           widget.reportId,
         );
       } catch (_) {
-        // Older databases may not have history rows yet.
-        // The screen still works using the current report status.
+        // Older databases or reports can still use
+        // current report.status.
       }
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
-        report = result;
-        evidenceUrls = images;
-        statusHistory = history;
-        loading = false;
+        report =
+            result;
+
+        evidenceImageUrls
+          ..clear()
+          ..addAll(
+            images,
+          );
+
+        evidenceVideos
+          ..clear()
+          ..addAll(
+            videos,
+          );
+
+        statusHistory
+          ..clear()
+          ..addAll(
+            history,
+          );
+
+        loading =
+        false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+
+      final String message =
+      _cleanError(
+        e,
+      );
 
       setState(() {
-        loading = false;
+        loading =
+        false;
+
+        loadingError =
+            message;
       });
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
-        SnackBar(
-          content: Text(
-            e.toString(),
-          ),
-        ),
+      _showMessage(
+        message,
       );
     }
   }
 
-  String getStatusText(String status) {
+  // ============================================================
+  // ERROR CLEANER
+  // ============================================================
+
+  String _cleanError(
+      Object error,
+      ) {
+    return error
+        .toString()
+        .replaceFirst(
+      'Exception: ',
+      '',
+    )
+        .trim();
+  }
+
+  // ============================================================
+  // MESSAGE
+  // ============================================================
+
+  void _showMessage(
+      String message,
+      ) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(
+      SnackBar(
+        content:
+        Text(
+          message,
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // STATUS TEXT
+  // ============================================================
+
+  String getStatusText(
+      String status,
+      ) {
     switch (status) {
       case 'verified':
         return 'VERIFIED';
@@ -110,12 +302,19 @@ class _ReportDetailScreenState
       case 'rejected':
         return 'REJECTED';
 
+      case 'pending':
       default:
         return 'PENDING';
     }
   }
 
-  Color getStatusColor(String status) {
+  // ============================================================
+  // STATUS COLOR
+  // ============================================================
+
+  Color getStatusColor(
+      String status,
+      ) {
     switch (status) {
       case 'completed':
         return AppColors.success;
@@ -126,13 +325,22 @@ class _ReportDetailScreenState
       case 'rejected':
         return AppColors.danger;
 
+      case 'verified':
+      case 'in_progress':
       default:
         return AppColors.primary;
     }
   }
 
-  String formatDate(DateTime date) {
-    const months = [
+  // ============================================================
+  // DATE
+  // ============================================================
+
+  String formatDate(
+      DateTime date,
+      ) {
+    const List<String> months =
+    <String>[
       'Jan',
       'Feb',
       'Mar',
@@ -147,10 +355,17 @@ class _ReportDetailScreenState
       'Dec',
     ];
 
-    return '${date.day} '
-        '${months[date.month - 1]} '
-        '${date.year}';
+    final DateTime local =
+    date.toLocal();
+
+    return '${local.day} '
+        '${months[local.month - 1]} '
+        '${local.year}';
   }
+
+  // ============================================================
+  // DATE + TIME
+  // ============================================================
 
   String formatDateTime(
       DateTime date,
@@ -176,8 +391,13 @@ class _ReportDetailScreenState
         '${two(local.minute)}';
   }
 
+  // ============================================================
+  // MAP
+  // ============================================================
+
   Future<void> viewReportOnMap() async {
-    final current =
+    final InfrastructureReport?
+    current =
         report;
 
     if (current == null) {
@@ -186,329 +406,1401 @@ class _ReportDetailScreenState
 
     if (current.latitude == null ||
         current.longitude == null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
-        const SnackBar(
-          content: Text(
-            'This report does not have GPS coordinates.',
-          ),
-        ),
+      _showMessage(
+        'This report does not have GPS coordinates.',
       );
 
       return;
     }
 
-    await Navigator.push(
+    await Navigator.push<void>(
       context,
-      MaterialPageRoute(
-        builder: (_) =>
-            _ReportMapScreen(
-              title:
-              current.title,
-              referenceNumber:
-              current.referenceNumber,
-              address:
-              current.address,
-              latitude:
-              current.latitude!,
-              longitude:
-              current.longitude!,
-            ),
+      MaterialPageRoute<void>(
+        builder:
+            (
+            BuildContext context,
+            ) {
+          return _ReportMapScreen(
+            title:
+            current.title,
+
+            referenceNumber:
+            current.referenceNumber,
+
+            address:
+            current.address,
+
+            latitude:
+            current.latitude!,
+
+            longitude:
+            current.longitude!,
+          );
+        },
       ),
     );
   }
 
+  // ============================================================
+  // IMAGE VIEWER
+  // ============================================================
+
+  Future<void> _openImageViewer({
+    required int initialIndex,
+  }) async {
+    if (evidenceImageUrls.isEmpty) {
+      return;
+    }
+
+    int selectedIndex =
+    initialIndex.clamp(
+      0,
+      evidenceImageUrls.length - 1,
+    );
+
+    await showDialog<void>(
+      context:
+      context,
+
+      barrierColor:
+      Colors.black87,
+
+      builder:
+          (
+          BuildContext dialogContext,
+          ) {
+        return StatefulBuilder(
+          builder:
+              (
+              BuildContext context,
+              StateSetter setDialogState,
+              ) {
+            final String url =
+            evidenceImageUrls[
+            selectedIndex];
+
+            return Dialog(
+              backgroundColor:
+              Colors.transparent,
+
+              insetPadding:
+              const EdgeInsets.all(
+                12,
+              ),
+
+              child:
+              Container(
+                constraints:
+                BoxConstraints(
+                  maxHeight:
+                  MediaQuery.of(
+                    context,
+                  ).size.height *
+                      0.88,
+                ),
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  AppColors.surface,
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    18,
+                  ),
+                ),
+
+                clipBehavior:
+                Clip.antiAlias,
+
+                child:
+                Column(
+                  mainAxisSize:
+                  MainAxisSize.min,
+
+                  children: [
+                    // ==========================================
+                    // HEADER
+                    // ==========================================
+
+                    Padding(
+                      padding:
+                      const EdgeInsets.fromLTRB(
+                        16,
+                        8,
+                        6,
+                        8,
+                      ),
+
+                      child:
+                      Row(
+                        children: [
+                          Expanded(
+                            child:
+                            Text(
+                              'Photo ${selectedIndex + 1} '
+                                  'of ${evidenceImageUrls.length}',
+
+                              style:
+                              const TextStyle(
+                                fontSize:
+                                13,
+
+                                fontWeight:
+                                FontWeight.bold,
+                              ),
+                            ),
+                          ),
+
+                          IconButton(
+                            onPressed:
+                                () {
+                              Navigator.pop(
+                                dialogContext,
+                              );
+                            },
+
+                            icon:
+                            const Icon(
+                              Icons.close_rounded,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const Divider(
+                      height:
+                      1,
+
+                      color:
+                      AppColors.border,
+                    ),
+
+                    // ==========================================
+                    // IMAGE
+                    // ==========================================
+
+                    Flexible(
+                      child:
+                      Container(
+                        width:
+                        double.infinity,
+
+                        color:
+                        Colors.black,
+
+                        alignment:
+                        Alignment.center,
+
+                        child:
+                        InteractiveViewer(
+                          minScale:
+                          0.8,
+
+                          maxScale:
+                          5,
+
+                          child:
+                          Image.network(
+                            url,
+
+                            fit:
+                            BoxFit.contain,
+
+                            loadingBuilder:
+                                (
+                                BuildContext context,
+                                Widget child,
+                                ImageChunkEvent?
+                                loadingProgress,
+                                ) {
+                              if (loadingProgress ==
+                                  null) {
+                                return child;
+                              }
+
+                              return const SizedBox(
+                                height:
+                                320,
+
+                                child:
+                                Center(
+                                  child:
+                                  CircularProgressIndicator(),
+                                ),
+                              );
+                            },
+
+                            errorBuilder:
+                                (
+                                BuildContext context,
+                                Object error,
+                                StackTrace?
+                                stackTrace,
+                                ) {
+                              return const SizedBox(
+                                height:
+                                320,
+
+                                child:
+                                Center(
+                                  child:
+                                  Icon(
+                                    Icons
+                                        .broken_image_outlined,
+
+                                    color:
+                                    AppColors
+                                        .textSecondary,
+
+                                    size:
+                                    46,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // ==========================================
+                    // IMAGE NAVIGATION
+                    // ==========================================
+
+                    if (evidenceImageUrls.length >
+                        1)
+                      Padding(
+                        padding:
+                        const EdgeInsets.all(
+                          10,
+                        ),
+
+                        child:
+                        Row(
+                          children: [
+                            Expanded(
+                              child:
+                              OutlinedButton.icon(
+                                onPressed:
+                                selectedIndex <=
+                                    0
+                                    ? null
+                                    : () {
+                                  setDialogState(
+                                        () {
+                                      selectedIndex--;
+                                    },
+                                  );
+                                },
+
+                                icon:
+                                const Icon(
+                                  Icons
+                                      .chevron_left_rounded,
+                                ),
+
+                                label:
+                                const Text(
+                                  'Previous',
+                                ),
+                              ),
+                            ),
+
+                            const SizedBox(
+                              width:
+                              10,
+                            ),
+
+                            Expanded(
+                              child:
+                              OutlinedButton.icon(
+                                onPressed:
+                                selectedIndex >=
+                                    evidenceImageUrls.length -
+                                        1
+                                    ? null
+                                    : () {
+                                  setDialogState(
+                                        () {
+                                      selectedIndex++;
+                                    },
+                                  );
+                                },
+
+                                icon:
+                                const Icon(
+                                  Icons
+                                      .chevron_right_rounded,
+                                ),
+
+                                label:
+                                const Text(
+                                  'Next',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // VIDEO VIEWER
+  // ============================================================
+
+  Future<void> _openVideoViewer({
+    required Map<String, dynamic> video,
+    required int index,
+  }) async {
+    final String url =
+        video['signed_url']
+            ?.toString()
+            .trim() ??
+            '';
+
+    if (url.isEmpty) {
+      _showMessage(
+        'This evidence video is unavailable.',
+      );
+
+      return;
+    }
+
+    final Uri? uri =
+    Uri.tryParse(
+      url,
+    );
+
+    if (uri == null) {
+      _showMessage(
+        'This evidence video has an invalid URL.',
+      );
+
+      return;
+    }
+
+    final VideoPlayerController
+    controller =
+    VideoPlayerController.networkUrl(
+      uri,
+    );
+
+    try {
+      await controller.initialize();
+
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+
+      await showDialog<void>(
+        context:
+        context,
+
+        barrierColor:
+        Colors.black87,
+
+        builder:
+            (
+            BuildContext context,
+            ) {
+          return _ReportVideoDialog(
+            controller:
+            controller,
+
+            title:
+            'Video ${index + 1}',
+          );
+        },
+      );
+    } catch (e) {
+      if (mounted) {
+        _showMessage(
+          'Unable to play this evidence video.',
+        );
+      }
+    } finally {
+      try {
+        await controller.dispose();
+      } catch (_) {
+        // Ignore cleanup failure.
+      }
+    }
+  }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+      BuildContext context,
+      ) {
+    // ==========================================================
+    // LOADING
+    // ==========================================================
+
     if (loading) {
       return const Scaffold(
         backgroundColor:
         AppColors.background,
-        body: Center(
-          child:
-          CircularProgressIndicator(),
-        ),
-      );
-    }
 
-    final current = report;
-
-    if (current == null) {
-      return const Scaffold(
-        backgroundColor:
-        AppColors.background,
-        body: Center(
+        body:
+        SafeArea(
           child:
-          Text(
-            'Report not found.',
+          Center(
+            child:
+            CircularProgressIndicator(),
           ),
         ),
       );
     }
 
-    final statusColor =
+    // ==========================================================
+    // REPORT FAILED
+    // ==========================================================
+
+    final InfrastructureReport?
+    current =
+        report;
+
+    if (current == null) {
+      return Scaffold(
+        backgroundColor:
+        AppColors.background,
+
+        body:
+        SafeArea(
+          child:
+          Center(
+            child:
+            Padding(
+              padding:
+              const EdgeInsets.all(
+                24,
+              ),
+
+              child:
+              Column(
+                mainAxisSize:
+                MainAxisSize.min,
+
+                children: [
+                  const Icon(
+                    Icons
+                        .error_outline_rounded,
+
+                    color:
+                    AppColors.textSecondary,
+
+                    size:
+                    44,
+                  ),
+
+                  const SizedBox(
+                    height:
+                    12,
+                  ),
+
+                  Text(
+                    loadingError ??
+                        'Report not found.',
+
+                    textAlign:
+                    TextAlign.center,
+
+                    style:
+                    const TextStyle(
+                      color:
+                      AppColors
+                          .textSecondary,
+                    ),
+                  ),
+
+                  const SizedBox(
+                    height:
+                    14,
+                  ),
+
+                  FilledButton.icon(
+                    onPressed:
+                    loadReport,
+
+                    icon:
+                    const Icon(
+                      Icons.refresh_rounded,
+                    ),
+
+                    label:
+                    const Text(
+                      'Try Again',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final Color statusColor =
     getStatusColor(
       current.status,
     );
+
+    // ==========================================================
+    // SCREEN
+    // ==========================================================
 
     return Scaffold(
       backgroundColor:
       AppColors.background,
 
-      body: SafeArea(
+      body:
+      SafeArea(
         child:
-        SingleChildScrollView(
-          padding:
-          const EdgeInsets.all(
-            18,
-          ),
+        RefreshIndicator(
+          onRefresh:
+          loadReport,
 
-          child: Column(
-            crossAxisAlignment:
-            CrossAxisAlignment
-                .start,
+          child:
+          SingleChildScrollView(
+            physics:
+            const AlwaysScrollableScrollPhysics(),
 
-            children: [
-              // ==============================================
-              // HEADER
-              // ==============================================
+            padding:
+            const EdgeInsets.all(
+              18,
+            ),
 
-              Row(
-                children: [
-                  Container(
-                    decoration:
-                    BoxDecoration(
-                      color:
-                      AppColors
-                          .surface,
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
 
-                      borderRadius:
-                      BorderRadius
-                          .circular(
-                        12,
-                      ),
+              children: [
+                // ==============================================
+                // HEADER
+                // ==============================================
 
-                      border:
-                      Border.all(
+                Row(
+                  children: [
+                    Container(
+                      decoration:
+                      BoxDecoration(
                         color:
-                        AppColors
-                            .border,
-                      ),
-                    ),
+                        AppColors.surface,
 
-                    child:
-                    IconButton(
-                      onPressed: () {
-                        Navigator.pop(
-                          context,
-                        );
-                      },
-
-                      icon:
-                      const Icon(
-                        Icons
-                            .arrow_back,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(
-                    width: 12,
-                  ),
-
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-
-                      children: [
-                        const Text(
-                          'Report Details',
-
-                          style:
-                          TextStyle(
-                            fontSize:
-                            22,
-
-                            fontWeight:
-                            FontWeight
-                                .bold,
-                          ),
+                        borderRadius:
+                        BorderRadius.circular(
+                          12,
                         ),
 
-                        const SizedBox(
-                          height: 2,
+                        border:
+                        Border.all(
+                          color:
+                          AppColors.border,
                         ),
-
-                        Text(
-                          current
-                              .referenceNumber,
-
-                          style:
-                          const TextStyle(
-                            color:
-                            AppColors
-                                .textSecondary,
-
-                            fontSize:
-                            11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  Container(
-                    padding:
-                    const EdgeInsets
-                        .symmetric(
-                      horizontal:
-                      10,
-
-                      vertical:
-                      6,
-                    ),
-
-                    decoration:
-                    BoxDecoration(
-                      color:
-                      statusColor
-                          .withOpacity(
-                        0.12,
                       ),
 
-                      borderRadius:
-                      BorderRadius
-                          .circular(
-                        20,
-                      ),
+                      child:
+                      IconButton(
+                        tooltip:
+                        'Back',
 
-                      border:
-                      Border.all(
-                        color:
-                        statusColor,
-                      ),
-                    ),
+                        onPressed:
+                            () {
+                          Navigator.pop(
+                            context,
+                          );
+                        },
 
-                    child:
-                    Text(
-                      '• ${getStatusText(current.status)}',
-
-                      style:
-                      TextStyle(
-                        color:
-                        statusColor,
-
-                        fontSize:
-                        9,
-
-                        fontWeight:
-                        FontWeight
-                            .bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(
-                height: 18,
-              ),
-
-              // ==============================================
-              // IMAGE
-              // ==============================================
-
-              if (evidenceUrls
-                  .isNotEmpty)
-                ClipRRect(
-                  borderRadius:
-                  BorderRadius
-                      .circular(
-                    17,
-                  ),
-
-                  child:
-                  Image.network(
-                    evidenceUrls
-                        .first,
-
-                    width:
-                    double.infinity,
-
-                    height:
-                    190,
-
-                    fit:
-                    BoxFit.cover,
-
-                    errorBuilder:
-                        (
-                        context,
-                        error,
-                        stackTrace,
-                        ) {
-                      return Container(
-                        height:
-                        190,
-
-                        color:
-                        AppColors
-                            .surface,
-
-                        alignment:
-                        Alignment
-                            .center,
-
-                        child:
+                        icon:
                         const Icon(
-                          Icons
-                              .broken_image_outlined,
+                          Icons.arrow_back,
+                        ),
+                      ),
+                    ),
 
+                    const SizedBox(
+                      width:
+                      12,
+                    ),
+
+                    Expanded(
+                      child:
+                      Column(
+                        crossAxisAlignment:
+                        CrossAxisAlignment.start,
+
+                        children: [
+                          const Text(
+                            'Report Details',
+
+                            style:
+                            TextStyle(
+                              fontSize:
+                              22,
+
+                              fontWeight:
+                              FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height:
+                            2,
+                          ),
+
+                          Text(
+                            current
+                                .referenceNumber,
+
+                            style:
+                            const TextStyle(
+                              color:
+                              AppColors
+                                  .textSecondary,
+
+                              fontSize:
+                              11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    Container(
+                      padding:
+                      const EdgeInsets.symmetric(
+                        horizontal:
+                        10,
+
+                        vertical:
+                        6,
+                      ),
+
+                      decoration:
+                      BoxDecoration(
+                        color:
+                        statusColor
+                            .withOpacity(
+                          0.12,
+                        ),
+
+                        borderRadius:
+                        BorderRadius.circular(
+                          20,
+                        ),
+
+                        border:
+                        Border.all(
+                          color:
+                          statusColor,
+                        ),
+                      ),
+
+                      child:
+                      Text(
+                        '• ${getStatusText(current.status)}',
+
+                        style:
+                        TextStyle(
+                          color:
+                          statusColor,
+
+                          fontSize:
+                          9,
+
+                          fontWeight:
+                          FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(
+                  height:
+                  18,
+                ),
+
+                // ==============================================
+                // EVIDENCE
+                // ==============================================
+
+                _ReportEvidenceSection(
+                  imageUrls:
+                  evidenceImageUrls,
+
+                  videos:
+                  evidenceVideos,
+
+                  onOpenImage:
+                      (
+                      int index,
+                      ) {
+                    _openImageViewer(
+                      initialIndex:
+                      index,
+                    );
+                  },
+
+                  onOpenVideo:
+                      (
+                      Map<String, dynamic>
+                      video,
+
+                      int index,
+                      ) {
+                    _openVideoViewer(
+                      video:
+                      video,
+
+                      index:
+                      index,
+                    );
+                  },
+                ),
+
+                const SizedBox(
+                  height:
+                  18,
+                ),
+
+                // ==============================================
+                // TITLE
+                // ==============================================
+
+                Text(
+                  current.title,
+
+                  style:
+                  const TextStyle(
+                    fontSize:
+                    18,
+
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  5,
+                ),
+
+                Row(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
+                  children: [
+                    const Icon(
+                      Icons
+                          .location_on_outlined,
+
+                      size:
+                      16,
+
+                      color:
+                      AppColors.primary,
+                    ),
+
+                    const SizedBox(
+                      width:
+                      4,
+                    ),
+
+                    Expanded(
+                      child:
+                      Text(
+                        current.address,
+
+                        style:
+                        const TextStyle(
                           color:
                           AppColors
                               .textSecondary,
 
-                          size:
-                          40,
+                          fontSize:
+                          11,
+
+                          height:
+                          1.4,
                         ),
-                      );
-                    },
+                      ),
+                    ),
+                  ],
+                ),
+
+                // ==============================================
+                // LANDMARK
+                // ==============================================
+
+                if (current.landmark != null &&
+                    current.landmark!
+                        .trim()
+                        .isNotEmpty) ...[
+                  const SizedBox(
+                    height:
+                    6,
+                  ),
+
+                  Text(
+                    'Landmark: ${current.landmark}',
+
+                    style:
+                    const TextStyle(
+                      color:
+                      AppColors.textSecondary,
+
+                      fontSize:
+                      10,
+                    ),
+                  ),
+                ],
+
+                // ==============================================
+                // MAP
+                // ==============================================
+
+                if (current.latitude !=
+                    null &&
+                    current.longitude !=
+                        null) ...[
+                  const SizedBox(
+                    height:
+                    11,
+                  ),
+
+                  SizedBox(
+                    width:
+                    double.infinity,
+
+                    child:
+                    OutlinedButton.icon(
+                      onPressed:
+                      viewReportOnMap,
+
+                      icon:
+                      const Icon(
+                        Icons.map_outlined,
+                      ),
+
+                      label:
+                      const Text(
+                        'View Report on Map',
+                      ),
+                    ),
+                  ),
+                ],
+
+                const SizedBox(
+                  height:
+                  16,
+                ),
+
+                // ==============================================
+                // INFO CARD
+                // ==============================================
+
+                Container(
+                  width:
+                  double.infinity,
+
+                  padding:
+                  const EdgeInsets.all(
+                    15,
+                  ),
+
+                  decoration:
+                  BoxDecoration(
+                    color:
+                    AppColors.surface,
+
+                    borderRadius:
+                    BorderRadius.circular(
+                      16,
+                    ),
+
+                    border:
+                    Border.all(
+                      color:
+                      AppColors.border,
+                    ),
+                  ),
+
+                  child:
+                  Column(
+                    children: [
+                      Row(
+                        crossAxisAlignment:
+                        CrossAxisAlignment.start,
+
+                        children: [
+                          Expanded(
+                            child:
+                            _DetailItem(
+                              label:
+                              'CATEGORY',
+
+                              value:
+                              current.category,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width:
+                            12,
+                          ),
+
+                          Expanded(
+                            child:
+                            _DetailItem(
+                              label:
+                              'PRIORITY',
+
+                              value:
+                              current.priority,
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height:
+                        15,
+                      ),
+
+                      Row(
+                        crossAxisAlignment:
+                        CrossAxisAlignment.start,
+
+                        children: [
+                          Expanded(
+                            child:
+                            _DetailItem(
+                              label:
+                              'SUBMITTED',
+
+                              value:
+                              formatDate(
+                                current
+                                    .createdAt,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width:
+                            12,
+                          ),
+
+                          Expanded(
+                            child:
+                            _DetailItem(
+                              label:
+                              'DEPARTMENT',
+
+                              value:
+                              current
+                                  .assignedDepartment ??
+                                  'Not assigned',
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height:
+                        16,
+                      ),
+
+                      const Divider(
+                        color:
+                        AppColors.border,
+                      ),
+
+                      const SizedBox(
+                        height:
+                        10,
+                      ),
+
+                      Row(
+                        children: [
+                          const Text(
+                            'PROGRESS',
+
+                            style:
+                            TextStyle(
+                              color:
+                              AppColors
+                                  .textSecondary,
+
+                              fontSize:
+                              9,
+                            ),
+                          ),
+
+                          const Spacer(),
+
+                          Text(
+                            '${current.progressPercentage}%',
+
+                            style:
+                            const TextStyle(
+                              color:
+                              AppColors.primary,
+
+                              fontWeight:
+                              FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height:
+                        7,
+                      ),
+
+                      ClipRRect(
+                        borderRadius:
+                        BorderRadius.circular(
+                          10,
+                        ),
+
+                        child:
+                        LinearProgressIndicator(
+                          value:
+                          (current.progressPercentage /
+                              100)
+                              .clamp(
+                            0.0,
+                            1.0,
+                          ),
+
+                          minHeight:
+                          5,
+
+                          backgroundColor:
+                          AppColors.border,
+
+                          color:
+                          statusColor,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
 
-              const SizedBox(
-                height: 14,
-              ),
-
-              // ==============================================
-              // TITLE
-              // ==============================================
-
-              Text(
-                current.title,
-
-                style:
-                const TextStyle(
-                  fontSize:
-                  18,
-
-                  fontWeight:
-                  FontWeight
-                      .bold,
+                const SizedBox(
+                  height:
+                  15,
                 ),
-              ),
 
-              const SizedBox(
-                height: 4,
-              ),
+                // ==============================================
+                // DESCRIPTION
+                // ==============================================
 
+                Container(
+                  width:
+                  double.infinity,
+
+                  padding:
+                  const EdgeInsets.all(
+                    15,
+                  ),
+
+                  decoration:
+                  BoxDecoration(
+                    color:
+                    AppColors.surface,
+
+                    borderRadius:
+                    BorderRadius.circular(
+                      16,
+                    ),
+
+                    border:
+                    Border.all(
+                      color:
+                      AppColors.border,
+                    ),
+                  ),
+
+                  child:
+                  Column(
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
+
+                    children: [
+                      const Text(
+                        'DESCRIPTION',
+
+                        style:
+                        TextStyle(
+                          color:
+                          AppColors
+                              .textSecondary,
+
+                          fontSize:
+                          9,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height:
+                        9,
+                      ),
+
+                      Text(
+                        current.description,
+
+                        style:
+                        const TextStyle(
+                          height:
+                          1.45,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  20,
+                ),
+
+                // ==============================================
+                // TIMELINE
+                // ==============================================
+
+                const Text(
+                  'Timeline',
+
+                  style:
+                  TextStyle(
+                    fontSize:
+                    17,
+
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  15,
+                ),
+
+                if (statusHistory.isEmpty) ...[
+                  _TimelineItem(
+                    complete:
+                    true,
+
+                    title:
+                    'Report Submitted',
+
+                    subtitle:
+                    formatDateTime(
+                      current.createdAt,
+                    ),
+
+                    description:
+                    'Report submitted through SmartCity.',
+                  ),
+
+                  _TimelineItem(
+                    complete:
+                    current.status !=
+                        'pending',
+
+                    title:
+                    'Current Status',
+
+                    subtitle:
+                    getStatusText(
+                      current.status,
+                    ),
+
+                    description:
+                    'Current workflow status from the report record.',
+
+                    last:
+                    true,
+                  ),
+                ] else ...[
+                  ...List.generate(
+                    statusHistory.length,
+                        (
+                        int index,
+                        ) {
+                      final Map<String, dynamic>
+                      item =
+                      statusHistory[
+                      index];
+
+                      final String status =
+                          item['status']
+                              ?.toString()
+                              .trim() ??
+                              'pending';
+
+                      final DateTime date =
+                          DateTime.tryParse(
+                            item['created_at']
+                                ?.toString() ??
+                                '',
+                          ) ??
+                              current.createdAt;
+
+                      final String note =
+                          item['note']
+                              ?.toString()
+                              .trim() ??
+                              '';
+
+                      return _TimelineItem(
+                        complete:
+                        true,
+
+                        title:
+                        getStatusText(
+                          status,
+                        ),
+
+                        subtitle:
+                        formatDateTime(
+                          date,
+                        ),
+
+                        description:
+                        note.isNotEmpty
+                            ? note
+                            : 'Report status updated.',
+
+                        last:
+                        index ==
+                            statusHistory.length -
+                                1,
+                      );
+                    },
+                  ),
+                ],
+
+                const SizedBox(
+                  height:
+                  30,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ================================================================
+// REPORT EVIDENCE SECTION
+// ================================================================
+
+class _ReportEvidenceSection
+    extends StatelessWidget {
+  final List<String> imageUrls;
+
+  final List<Map<String, dynamic>>
+  videos;
+
+  final ValueChanged<int>
+  onOpenImage;
+
+  final void Function(
+      Map<String, dynamic> video,
+      int index,
+      ) onOpenVideo;
+
+  const _ReportEvidenceSection({
+    required this.imageUrls,
+    required this.videos,
+    required this.onOpenImage,
+    required this.onOpenVideo,
+  });
+
+  int get totalCount =>
+      imageUrls.length +
+          videos.length;
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    // ==========================================================
+    // NO EVIDENCE
+    // ==========================================================
+
+    if (totalCount == 0) {
+      return Container(
+        width:
+        double.infinity,
+
+        padding:
+        const EdgeInsets.all(
+          16,
+        ),
+
+        decoration:
+        BoxDecoration(
+          color:
+          AppColors.surface,
+
+          borderRadius:
+          BorderRadius.circular(
+            16,
+          ),
+
+          border:
+          Border.all(
+            color:
+            AppColors.border,
+          ),
+        ),
+
+        child:
+        const Row(
+          children: [
+            Icon(
+              Icons
+                  .collections_outlined,
+
+              color:
+              AppColors.textSecondary,
+            ),
+
+            SizedBox(
+              width:
+              10,
+            ),
+
+            Expanded(
+              child:
               Text(
-                '📍 ${current.address}',
+                'No evidence is available for this report.',
 
                 style:
-                const TextStyle(
+                TextStyle(
                   color:
                   AppColors
                       .textSecondary,
@@ -517,210 +1809,705 @@ class _ReportDetailScreenState
                   11,
                 ),
               ),
+            ),
+          ],
+        ),
+      );
+    }
 
-              if (current.latitude != null &&
-                  current.longitude != null) ...[
-                const SizedBox(
-                  height: 10,
+    // ==========================================================
+    // EVIDENCE
+    // ==========================================================
+
+    return Column(
+      crossAxisAlignment:
+      CrossAxisAlignment.start,
+
+      children: [
+        // ======================================================
+        // HEADER
+        // ======================================================
+
+        Row(
+          children: [
+            const Icon(
+              Icons
+                  .collections_outlined,
+
+              color:
+              AppColors.primary,
+
+              size:
+              19,
+            ),
+
+            const SizedBox(
+              width:
+              8,
+            ),
+
+            const Expanded(
+              child:
+              Text(
+                'Evidence',
+
+                style:
+                TextStyle(
+                  fontSize:
+                  16,
+
+                  fontWeight:
+                  FontWeight.bold,
+                ),
+              ),
+            ),
+
+            Container(
+              padding:
+              const EdgeInsets.symmetric(
+                horizontal:
+                9,
+
+                vertical:
+                5,
+              ),
+
+              decoration:
+              BoxDecoration(
+                color:
+                AppColors.primary
+                    .withOpacity(
+                  0.10,
                 ),
 
-                SizedBox(
+                borderRadius:
+                BorderRadius.circular(
+                  20,
+                ),
+              ),
+
+              child:
+              Text(
+                '$totalCount item'
+                    '${totalCount == 1 ? '' : 's'}',
+
+                style:
+                const TextStyle(
+                  color:
+                  AppColors.primary,
+
+                  fontSize:
+                  9,
+
+                  fontWeight:
+                  FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        const SizedBox(
+          height:
+          12,
+        ),
+
+        // ======================================================
+        // PHOTOS
+        // ======================================================
+
+        if (imageUrls.isNotEmpty) ...[
+          _EvidenceSubheader(
+            title:
+            'PHOTOS',
+
+            count:
+            imageUrls.length,
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          SizedBox(
+            height:
+            155,
+
+            child:
+            ListView.separated(
+              scrollDirection:
+              Axis.horizontal,
+
+              itemCount:
+              imageUrls.length,
+
+              separatorBuilder:
+                  (
+                  BuildContext context,
+                  int index,
+                  ) {
+                return const SizedBox(
                   width:
-                  double.infinity,
-                  child:
-                  OutlinedButton.icon(
-                    onPressed:
-                    viewReportOnMap,
-                    icon:
-                    const Icon(
-                      Icons.map_outlined,
+                  10,
+                );
+              },
+
+              itemBuilder:
+                  (
+                  BuildContext context,
+                  int index,
+                  ) {
+                return _EvidenceImageCard(
+                  url:
+                  imageUrls[index],
+
+                  index:
+                  index,
+
+                  onTap:
+                      () {
+                    onOpenImage(
+                      index,
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+
+        // ======================================================
+        // SPACE BETWEEN IMAGE + VIDEO
+        // ======================================================
+
+        if (imageUrls.isNotEmpty &&
+            videos.isNotEmpty)
+          const SizedBox(
+            height:
+            18,
+          ),
+
+        // ======================================================
+        // VIDEOS
+        // ======================================================
+
+        if (videos.isNotEmpty) ...[
+          _EvidenceSubheader(
+            title:
+            'VIDEOS',
+
+            count:
+            videos.length,
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          ...List.generate(
+            videos.length,
+                (
+                int index,
+                ) {
+              return Padding(
+                padding:
+                EdgeInsets.only(
+                  bottom:
+                  index ==
+                      videos.length -
+                          1
+                      ? 0
+                      : 9,
+                ),
+
+                child:
+                _EvidenceVideoCard(
+                  video:
+                  videos[index],
+
+                  index:
+                  index,
+
+                  onTap:
+                      () {
+                    onOpenVideo(
+                      videos[index],
+                      index,
+                    );
+                  },
+                ),
+              );
+            },
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+// ================================================================
+// EVIDENCE SUBHEADER
+// ================================================================
+
+class _EvidenceSubheader
+    extends StatelessWidget {
+  final String title;
+
+  final int count;
+
+  const _EvidenceSubheader({
+    required this.title,
+    required this.count,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Row(
+      children: [
+        Text(
+          title,
+
+          style:
+          const TextStyle(
+            color:
+            AppColors.textSecondary,
+
+            fontSize:
+            9,
+
+            fontWeight:
+            FontWeight.bold,
+
+            letterSpacing:
+            0.4,
+          ),
+        ),
+
+        const Spacer(),
+
+        Text(
+          '$count',
+
+          style:
+          const TextStyle(
+            color:
+            AppColors.textSecondary,
+
+            fontSize:
+            9,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ================================================================
+// IMAGE CARD
+// ================================================================
+
+class _EvidenceImageCard
+    extends StatelessWidget {
+  final String url;
+
+  final int index;
+
+  final VoidCallback onTap;
+
+  const _EvidenceImageCard({
+    required this.url,
+    required this.index,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return GestureDetector(
+      onTap:
+      onTap,
+
+      child:
+      SizedBox(
+        width:
+        190,
+
+        child:
+        ClipRRect(
+          borderRadius:
+          BorderRadius.circular(
+            14,
+          ),
+
+          child:
+          Stack(
+            fit:
+            StackFit.expand,
+
+            children: [
+              // ==================================================
+              // IMAGE
+              // ==================================================
+
+              Container(
+                color:
+                AppColors.surface,
+
+                child:
+                Image.network(
+                  url,
+
+                  fit:
+                  BoxFit.cover,
+
+                  loadingBuilder:
+                      (
+                      BuildContext context,
+                      Widget child,
+                      ImageChunkEvent?
+                      loadingProgress,
+                      ) {
+                    if (loadingProgress ==
+                        null) {
+                      return child;
+                    }
+
+                    return const Center(
+                      child:
+                      CircularProgressIndicator(
+                        strokeWidth:
+                        2,
+                      ),
+                    );
+                  },
+
+                  errorBuilder:
+                      (
+                      BuildContext context,
+                      Object error,
+                      StackTrace?
+                      stackTrace,
+                      ) {
+                    return const Center(
+                      child:
+                      Icon(
+                        Icons
+                            .broken_image_outlined,
+
+                        color:
+                        AppColors
+                            .textSecondary,
+
+                        size:
+                        35,
+                      ),
+                    );
+                  },
+                ),
+              ),
+
+              // ==================================================
+              // LABEL
+              // ==================================================
+
+              Positioned(
+                left:
+                8,
+
+                bottom:
+                8,
+
+                child:
+                Container(
+                  padding:
+                  const EdgeInsets.symmetric(
+                    horizontal:
+                    8,
+
+                    vertical:
+                    4,
+                  ),
+
+                  decoration:
+                  BoxDecoration(
+                    color:
+                    Colors.black54,
+
+                    borderRadius:
+                    BorderRadius.circular(
+                      8,
                     ),
-                    label:
-                    const Text(
-                      'View Report on Map',
+                  ),
+
+                  child:
+                  Text(
+                    'Photo ${index + 1}',
+
+                    style:
+                    const TextStyle(
+                      color:
+                      Colors.white,
+
+                      fontSize:
+                      9,
+
+                      fontWeight:
+                      FontWeight.bold,
                     ),
                   ),
                 ),
-              ],
-
-              const SizedBox(
-                height: 16,
               ),
 
-              // ==============================================
-              // INFO CARD
-              // ==============================================
+              // ==================================================
+              // ZOOM ICON
+              // ==================================================
+
+              const Positioned(
+                top:
+                8,
+
+                right:
+                8,
+
+                child:
+                CircleAvatar(
+                  radius:
+                  14,
+
+                  backgroundColor:
+                  Colors.black54,
+
+                  child:
+                  Icon(
+                    Icons
+                        .zoom_in_rounded,
+
+                    color:
+                    Colors.white,
+
+                    size:
+                    16,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ================================================================
+// VIDEO CARD
+// ================================================================
+
+class _EvidenceVideoCard
+    extends StatelessWidget {
+  final Map<String, dynamic>
+  video;
+
+  final int index;
+
+  final VoidCallback onTap;
+
+  const _EvidenceVideoCard({
+    required this.video,
+    required this.index,
+    required this.onTap,
+  });
+
+  // ============================================================
+  // FILE NAME
+  // ============================================================
+
+  String get fileName {
+    final String name =
+        video['original_file_name']
+            ?.toString()
+            .trim() ??
+            '';
+
+    return name.isEmpty
+        ? 'Evidence video'
+        : name;
+  }
+
+  // ============================================================
+  // DURATION
+  // ============================================================
+
+  String get durationText {
+    final dynamic raw =
+    video['duration_seconds'];
+
+    double? seconds;
+
+    if (raw is num) {
+      seconds =
+          raw.toDouble();
+    } else {
+      seconds =
+          double.tryParse(
+            raw?.toString() ??
+                '',
+          );
+    }
+
+    if (seconds == null ||
+        seconds <= 0) {
+      return 'Short evidence video';
+    }
+
+    final int total =
+    seconds.round();
+
+    final int minutes =
+        total ~/ 60;
+
+    final int remaining =
+        total % 60;
+
+    return '$minutes:'
+        '${remaining.toString().padLeft(2, '0')}';
+  }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    final String thumbnail =
+        video['thumbnail_signed_url']
+            ?.toString()
+            .trim() ??
+            '';
+
+    return Material(
+      color:
+      Colors.transparent,
+
+      child:
+      InkWell(
+        onTap:
+        onTap,
+
+        borderRadius:
+        BorderRadius.circular(
+          14,
+        ),
+
+        child:
+        Container(
+          padding:
+          const EdgeInsets.all(
+            10,
+          ),
+
+          decoration:
+          BoxDecoration(
+            color:
+            AppColors.surface,
+
+            borderRadius:
+            BorderRadius.circular(
+              14,
+            ),
+
+            border:
+            Border.all(
+              color:
+              AppColors.border,
+            ),
+          ),
+
+          child:
+          Row(
+            children: [
+              // ==================================================
+              // VIDEO THUMBNAIL
+              // ==================================================
 
               Container(
                 width:
-                double.infinity,
+                82,
 
-                padding:
-                const EdgeInsets.all(
-                  15,
-                ),
+                height:
+                64,
+
+                clipBehavior:
+                Clip.antiAlias,
 
                 decoration:
                 BoxDecoration(
                   color:
-                  AppColors
-                      .surface,
-
-                  borderRadius:
-                  BorderRadius
-                      .circular(
-                    16,
+                  const Color(
+                    0xFF10253E,
                   ),
 
-                  border:
-                  Border.all(
-                    color:
-                    AppColors
-                        .border,
+                  borderRadius:
+                  BorderRadius.circular(
+                    10,
                   ),
                 ),
 
                 child:
-                Column(
+                Stack(
+                  fit:
+                  StackFit.expand,
+
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child:
-                          _DetailItem(
-                            label:
-                            'CATEGORY',
+                    if (thumbnail.isNotEmpty)
+                      Image.network(
+                        thumbnail,
 
-                            value:
-                            current
-                                .category,
-                          ),
-                        ),
+                        fit:
+                        BoxFit.cover,
 
-                        Expanded(
-                          child:
-                          _DetailItem(
-                            label:
-                            'PRIORITY',
-
-                            value:
-                            current
-                                .priority,
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(
-                      height: 15,
-                    ),
-
-                    Row(
-                      children: [
-                        Expanded(
-                          child:
-                          _DetailItem(
-                            label:
-                            'SUBMITTED',
-
-                            value:
-                            formatDate(
-                              current
-                                  .createdAt,
-                            ),
-                          ),
-                        ),
-
-                        Expanded(
-                          child:
-                          _DetailItem(
-                            label:
-                            'DEPARTMENT',
-
-                            value:
-                            current
-                                .assignedDepartment ??
-                                'Not assigned',
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(
-                      height: 16,
-                    ),
-
-                    const Divider(
-                      color:
-                      AppColors
-                          .border,
-                    ),
-
-                    const SizedBox(
-                      height: 10,
-                    ),
-
-                    Row(
-                      children: [
-                        const Text(
-                          'PROGRESS',
-
-                          style:
-                          TextStyle(
-                            color:
-                            AppColors
-                                .textSecondary,
-
-                            fontSize:
-                            9,
-                          ),
-                        ),
-
-                        const Spacer(),
-
-                        Text(
-                          '${current.progressPercentage}%',
-
-                          style:
-                          const TextStyle(
-                            color:
-                            AppColors
-                                .primary,
-
-                            fontWeight:
-                            FontWeight
-                                .bold,
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(
-                      height: 7,
-                    ),
-
-                    ClipRRect(
-                      borderRadius:
-                      BorderRadius
-                          .circular(
-                        10,
+                        errorBuilder:
+                            (
+                            BuildContext context,
+                            Object error,
+                            StackTrace?
+                            stackTrace,
+                            ) {
+                          return const SizedBox();
+                        },
                       ),
 
-                      child:
-                      LinearProgressIndicator(
-                        value:
-                        current.progressPercentage /
-                            100,
+                    Container(
+                      color:
+                      Colors.black26,
+                    ),
 
-                        minHeight:
-                        5,
+                    const Center(
+                      child:
+                      CircleAvatar(
+                        radius:
+                        18,
 
                         backgroundColor:
-                        AppColors
-                            .border,
+                        Colors.black54,
 
-                        color:
-                        statusColor,
+                        child:
+                        Icon(
+                          Icons
+                              .play_arrow_rounded,
+
+                          color:
+                          Colors.white,
+
+                          size:
+                          24,
+                        ),
                       ),
                     ),
                   ],
@@ -728,54 +2515,50 @@ class _ReportDetailScreenState
               ),
 
               const SizedBox(
-                height: 15,
+                width:
+                12,
               ),
 
-              // ==============================================
-              // DESCRIPTION
-              // ==============================================
+              // ==================================================
+              // VIDEO INFO
+              // ==================================================
 
-              Container(
-                width:
-                double.infinity,
-
-                padding:
-                const EdgeInsets.all(
-                  15,
-                ),
-
-                decoration:
-                BoxDecoration(
-                  color:
-                  AppColors
-                      .surface,
-
-                  borderRadius:
-                  BorderRadius
-                      .circular(
-                    16,
-                  ),
-
-                  border:
-                  Border.all(
-                    color:
-                    AppColors
-                        .border,
-                  ),
-                ),
-
+              Expanded(
                 child:
                 Column(
                   crossAxisAlignment:
-                  CrossAxisAlignment
-                      .start,
+                  CrossAxisAlignment.start,
 
                   children: [
-                    const Text(
-                      'DESCRIPTION',
+                    Text(
+                      'Video ${index + 1}',
 
                       style:
-                      TextStyle(
+                      const TextStyle(
+                        fontSize:
+                        12,
+
+                        fontWeight:
+                        FontWeight.bold,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      4,
+                    ),
+
+                    Text(
+                      fileName,
+
+                      maxLines:
+                      1,
+
+                      overflow:
+                      TextOverflow.ellipsis,
+
+                      style:
+                      const TextStyle(
                         color:
                         AppColors
                             .textSecondary,
@@ -786,142 +2569,86 @@ class _ReportDetailScreenState
                     ),
 
                     const SizedBox(
-                      height: 9,
+                      height:
+                      6,
                     ),
 
-                    Text(
-                      current
-                          .description,
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons
+                              .schedule_rounded,
 
-                      style:
-                      const TextStyle(
-                        height:
-                        1.4,
-                      ),
+                          color:
+                          AppColors
+                              .textSecondary,
+
+                          size:
+                          13,
+                        ),
+
+                        const SizedBox(
+                          width:
+                          4,
+                        ),
+
+                        Flexible(
+                          child:
+                          Text(
+                            durationText,
+
+                            overflow:
+                            TextOverflow.ellipsis,
+
+                            style:
+                            const TextStyle(
+                              color:
+                              AppColors
+                                  .textSecondary,
+
+                              fontSize:
+                              9,
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(
+                          width:
+                          10,
+                        ),
+
+                        const Text(
+                          'Tap to play',
+
+                          style:
+                          TextStyle(
+                            color:
+                            AppColors.primary,
+
+                            fontSize:
+                            9,
+
+                            fontWeight:
+                            FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
 
               const SizedBox(
-                height: 20,
+                width:
+                6,
               ),
 
-              // ==============================================
-              // TIMELINE
-              // ==============================================
+              const Icon(
+                Icons
+                    .chevron_right_rounded,
 
-              const Text(
-                'Timeline',
-
-                style:
-                TextStyle(
-                  fontSize:
-                  17,
-
-                  fontWeight:
-                  FontWeight
-                      .bold,
-                ),
-              ),
-
-              const SizedBox(
-                height: 15,
-              ),
-
-              if (statusHistory.isEmpty) ...[
-                _TimelineItem(
-                  complete:
-                  true,
-
-                  title:
-                  'Report Submitted',
-
-                  subtitle:
-                  formatDate(
-                    current.createdAt,
-                  ),
-
-                  description:
-                  'Report submitted through SmartCity.',
-                ),
-
-                _TimelineItem(
-                  complete:
-                  current.status !=
-                      'pending',
-
-                  title:
-                  'Current Status',
-
-                  subtitle:
-                  getStatusText(
-                    current.status,
-                  ),
-
-                  description:
-                  'Current workflow status from the report record.',
-
-                  last:
-                  true,
-                ),
-              ] else ...[
-                ...List.generate(
-                  statusHistory.length,
-                      (index) {
-                    final item =
-                    statusHistory[index];
-
-                    final String status =
-                        item['status']
-                            ?.toString() ??
-                            'pending';
-
-                    final DateTime date =
-                        DateTime.tryParse(
-                          item['created_at']
-                              ?.toString() ??
-                              '',
-                        ) ??
-                            current.createdAt;
-
-                    final String description =
-                    item['note']
-                        ?.toString()
-                        .trim()
-                        .isNotEmpty ==
-                        true
-                        ? item['note'].toString()
-                        : 'Report status updated.';
-
-                    return _TimelineItem(
-                      complete:
-                      true,
-
-                      title:
-                      getStatusText(
-                        status,
-                      ),
-
-                      subtitle:
-                      formatDateTime(
-                        date,
-                      ),
-
-                      description:
-                      description,
-
-                      last:
-                      index ==
-                          statusHistory.length -
-                              1,
-                    );
-                  },
-                ),
-              ],
-
-              const SizedBox(
-                height: 30,
+                color:
+                AppColors.textSecondary,
               ),
             ],
           ),
@@ -931,13 +2658,375 @@ class _ReportDetailScreenState
   }
 }
 
+// ================================================================
+// VIDEO DIALOG
+// ================================================================
+
+class _ReportVideoDialog
+    extends StatefulWidget {
+  final VideoPlayerController
+  controller;
+
+  final String title;
+
+  const _ReportVideoDialog({
+    required this.controller,
+    required this.title,
+  });
+
+  @override
+  State<_ReportVideoDialog>
+  createState() =>
+      _ReportVideoDialogState();
+}
+
+class _ReportVideoDialogState
+    extends State<_ReportVideoDialog> {
+  VideoPlayerController get controller =>
+      widget.controller;
+
+  // ============================================================
+  // INITIALIZATION
+  // ============================================================
+
+  @override
+  void initState() {
+    super.initState();
+
+    controller.addListener(
+      _videoChanged,
+    );
+  }
+
+  // ============================================================
+  // CLEANUP
+  // ============================================================
+
+  @override
+  void dispose() {
+    controller.removeListener(
+      _videoChanged,
+    );
+
+    super.dispose();
+  }
+
+  // ============================================================
+  // VIDEO UPDATE
+  // ============================================================
+
+  void _videoChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  // ============================================================
+  // FORMAT TIME
+  // ============================================================
+
+  String _formatDuration(
+      Duration duration,
+      ) {
+    final int minutes =
+        duration.inMinutes;
+
+    final int seconds =
+        duration.inSeconds %
+            60;
+
+    return '$minutes:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  // ============================================================
+  // PLAY / PAUSE
+  // ============================================================
+
+  Future<void> _togglePlayback() async {
+    if (controller.value.isPlaying) {
+      await controller.pause();
+    } else {
+      if (controller.value.position >=
+          controller.value.duration) {
+        await controller.seekTo(
+          Duration.zero,
+        );
+      }
+
+      await controller.play();
+    }
+
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    final Duration position =
+        controller.value.position;
+
+    final Duration duration =
+        controller.value.duration;
+
+    final double aspectRatio =
+    controller.value.aspectRatio >
+        0
+        ? controller
+        .value
+        .aspectRatio
+        : 16 / 9;
+
+    return Dialog(
+      backgroundColor:
+      AppColors.surface,
+
+      insetPadding:
+      const EdgeInsets.all(
+        16,
+      ),
+
+      shape:
+      RoundedRectangleBorder(
+        borderRadius:
+        BorderRadius.circular(
+          18,
+        ),
+      ),
+
+      child:
+      Column(
+        mainAxisSize:
+        MainAxisSize.min,
+
+        children: [
+          // ======================================================
+          // HEADER
+          // ======================================================
+
+          Padding(
+            padding:
+            const EdgeInsets.fromLTRB(
+              16,
+              10,
+              6,
+              8,
+            ),
+
+            child:
+            Row(
+              children: [
+                Expanded(
+                  child:
+                  Text(
+                    widget.title,
+
+                    style:
+                    const TextStyle(
+                      fontSize:
+                      14,
+
+                      fontWeight:
+                      FontWeight.bold,
+                    ),
+                  ),
+                ),
+
+                IconButton(
+                  tooltip:
+                  'Close',
+
+                  onPressed:
+                      () async {
+                    await controller.pause();
+
+                    if (context.mounted) {
+                      Navigator.pop(
+                        context,
+                      );
+                    }
+                  },
+
+                  icon:
+                  const Icon(
+                    Icons.close_rounded,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const Divider(
+            height:
+            1,
+
+            color:
+            AppColors.border,
+          ),
+
+          // ======================================================
+          // VIDEO
+          // ======================================================
+
+          AspectRatio(
+            aspectRatio:
+            aspectRatio,
+
+            child:
+            ColoredBox(
+              color:
+              Colors.black,
+
+              child:
+              VideoPlayer(
+                controller,
+              ),
+            ),
+          ),
+
+          // ======================================================
+          // PROGRESS
+          // ======================================================
+
+          VideoProgressIndicator(
+            controller,
+
+            allowScrubbing:
+            true,
+
+            padding:
+            const EdgeInsets.symmetric(
+              vertical:
+              9,
+
+              horizontal:
+              14,
+            ),
+          ),
+
+          // ======================================================
+          // CONTROLS
+          // ======================================================
+
+          Padding(
+            padding:
+            const EdgeInsets.fromLTRB(
+              12,
+              0,
+              12,
+              12,
+            ),
+
+            child:
+            Row(
+              children: [
+                IconButton(
+                  tooltip:
+                  controller
+                      .value
+                      .isPlaying
+                      ? 'Pause'
+                      : 'Play',
+
+                  onPressed:
+                  _togglePlayback,
+
+                  icon:
+                  Icon(
+                    controller
+                        .value
+                        .isPlaying
+                        ? Icons
+                        .pause_circle_filled_rounded
+                        : Icons
+                        .play_circle_fill_rounded,
+
+                    color:
+                    AppColors.primary,
+
+                    size:
+                    38,
+                  ),
+                ),
+
+                const SizedBox(
+                  width:
+                  5,
+                ),
+
+                Expanded(
+                  child:
+                  Text(
+                    '${_formatDuration(position)} / '
+                        '${_formatDuration(duration)}',
+
+                    style:
+                    const TextStyle(
+                      color:
+                      AppColors
+                          .textSecondary,
+
+                      fontSize:
+                      10,
+                    ),
+                  ),
+                ),
+
+                IconButton(
+                  tooltip:
+                  'Replay',
+
+                  onPressed:
+                      () async {
+                    await controller.seekTo(
+                      Duration.zero,
+                    );
+
+                    await controller.play();
+
+                    if (mounted) {
+                      setState(() {});
+                    }
+                  },
+
+                  icon:
+                  const Icon(
+                    Icons.replay_rounded,
+
+                    color:
+                    AppColors.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ================================================================
+// REPORT MAP SCREEN
+// ================================================================
 
 class _ReportMapScreen
     extends StatelessWidget {
   final String title;
+
   final String referenceNumber;
+
   final String address;
+
   final double latitude;
+
   final double longitude;
 
   const _ReportMapScreen({
@@ -988,7 +3077,8 @@ class _ReportMapScreen
                 17,
               ),
 
-              markers: {
+              markers:
+              <Marker>{
                 Marker(
                   markerId:
                   MarkerId(
@@ -1089,10 +3179,14 @@ class _ReportMapScreen
                   style:
                   const TextStyle(
                     color:
-                    AppColors.textSecondary,
+                    AppColors
+                        .textSecondary,
 
                     fontSize:
                     10,
+
+                    height:
+                    1.4,
                   ),
                 ),
 
@@ -1108,7 +3202,8 @@ class _ReportMapScreen
                   style:
                   const TextStyle(
                     color:
-                    AppColors.textSecondary,
+                    AppColors
+                        .textSecondary,
 
                     fontSize:
                     9,
@@ -1123,9 +3218,14 @@ class _ReportMapScreen
   }
 }
 
+// ================================================================
+// DETAIL ITEM
+// ================================================================
+
 class _DetailItem
     extends StatelessWidget {
   final String label;
+
   final String value;
 
   const _DetailItem({
@@ -1139,8 +3239,7 @@ class _DetailItem
       ) {
     return Column(
       crossAxisAlignment:
-      CrossAxisAlignment
-          .start,
+      CrossAxisAlignment.start,
 
       children: [
         Text(
@@ -1149,8 +3248,7 @@ class _DetailItem
           style:
           const TextStyle(
             color:
-            AppColors
-                .textSecondary,
+            AppColors.textSecondary,
 
             fontSize:
             9,
@@ -1158,7 +3256,8 @@ class _DetailItem
         ),
 
         const SizedBox(
-          height: 5,
+          height:
+          5,
         ),
 
         Text(
@@ -1167,8 +3266,7 @@ class _DetailItem
           style:
           const TextStyle(
             fontWeight:
-            FontWeight
-                .bold,
+            FontWeight.bold,
 
             fontSize:
             12,
@@ -1178,6 +3276,10 @@ class _DetailItem
     );
   }
 }
+
+// ================================================================
+// TIMELINE ITEM
+// ================================================================
 
 class _TimelineItem
     extends StatelessWidget {
@@ -1204,10 +3306,10 @@ class _TimelineItem
       BuildContext context,
       ) {
     return IntrinsicHeight(
-      child: Row(
+      child:
+      Row(
         crossAxisAlignment:
-        CrossAxisAlignment
-            .stretch,
+        CrossAxisAlignment.stretch,
 
         children: [
           SizedBox(
@@ -1228,38 +3330,29 @@ class _TimelineItem
                   BoxDecoration(
                     color:
                     complete
-                        ? AppColors
-                        .primaryDark
-                        : AppColors
-                        .surface,
+                        ? AppColors.primaryDark
+                        : AppColors.surface,
 
                     shape:
-                    BoxShape
-                        .circle,
+                    BoxShape.circle,
 
                     border:
                     Border.all(
                       color:
                       complete
-                          ? AppColors
-                          .primary
-                          : AppColors
-                          .border,
+                          ? AppColors.primary
+                          : AppColors.border,
                     ),
                   ),
 
                   child:
                   complete
                       ? const Icon(
-                    Icons
-                        .check,
-
+                    Icons.check,
                     size:
                     13,
-
                     color:
-                    Colors
-                        .white,
+                    Colors.white,
                   )
                       : null,
                 ),
@@ -1273,10 +3366,8 @@ class _TimelineItem
 
                       color:
                       complete
-                          ? AppColors
-                          .primaryDark
-                          : AppColors
-                          .border,
+                          ? AppColors.primaryDark
+                          : AppColors.border,
                     ),
                   ),
               ],
@@ -1292,8 +3383,7 @@ class _TimelineItem
             child:
             Padding(
               padding:
-              const EdgeInsets
-                  .only(
+              const EdgeInsets.only(
                 bottom:
                 18,
               ),
@@ -1301,8 +3391,7 @@ class _TimelineItem
               child:
               Column(
                 crossAxisAlignment:
-                CrossAxisAlignment
-                    .start,
+                CrossAxisAlignment.start,
 
                 children: [
                   Text(
@@ -1312,14 +3401,12 @@ class _TimelineItem
                     TextStyle(
                       color:
                       complete
-                          ? Colors
-                          .white
+                          ? Colors.white
                           : AppColors
                           .textSecondary,
 
                       fontWeight:
-                      FontWeight
-                          .bold,
+                      FontWeight.bold,
 
                       fontSize:
                       13,
@@ -1355,28 +3442,24 @@ class _TimelineItem
                     double.infinity,
 
                     padding:
-                    const EdgeInsets
-                        .all(
+                    const EdgeInsets.all(
                       10,
                     ),
 
                     decoration:
                     BoxDecoration(
                       color:
-                      AppColors
-                          .surface,
+                      AppColors.surface,
 
                       borderRadius:
-                      BorderRadius
-                          .circular(
+                      BorderRadius.circular(
                         10,
                       ),
 
                       border:
                       Border.all(
                         color:
-                        AppColors
-                            .border,
+                        AppColors.border,
                       ),
                     ),
 
@@ -1392,6 +3475,9 @@ class _TimelineItem
 
                         fontSize:
                         10,
+
+                        height:
+                        1.4,
                       ),
                     ),
                   ),

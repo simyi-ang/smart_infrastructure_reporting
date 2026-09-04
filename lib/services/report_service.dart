@@ -104,6 +104,248 @@ class ReportService {
   User? get currentUser =>
       _supabase.auth.currentUser;
 
+// ============================================================
+// GET REPORT VIDEO EVIDENCE
+//
+// PURPOSE:
+// - Load every video belonging to one report.
+// - Keep existing photo architecture completely unchanged.
+// - Videos remain in report_evidence.
+// - Photos remain in report_images.
+// - Generate temporary signed URLs for private storage.
+// - Skip one broken video instead of breaking the full screen.
+//
+// DOES NOT CHANGE:
+// - report submission
+// - image AI
+// - video AI
+// - edit report
+// - delete report
+// - current UI/design
+// ============================================================
+
+  Future<List<Map<String, dynamic>>>
+  getReportVideoEvidence(
+      String reportId,
+      ) async {
+    // ==========================================================
+    // AUTHENTICATION
+    // ==========================================================
+
+    final User? user =
+        currentUser;
+
+    if (user == null) {
+      throw Exception(
+        'You must be logged in.',
+      );
+    }
+
+    // ==========================================================
+    // REPORT ID
+    // ==========================================================
+
+    final String cleanReportId =
+    reportId.trim();
+
+    if (cleanReportId.isEmpty) {
+      throw Exception(
+        'Report ID is required.',
+      );
+    }
+
+    try {
+      // ========================================================
+      // VERIFY REPORT ACCESS
+      //
+      // Citizen can only load evidence belonging to a report
+      // returned by the existing getReportById() access rule.
+      // ========================================================
+
+      final InfrastructureReport? report =
+      await getReportById(
+        cleanReportId,
+      );
+
+      if (report == null) {
+        throw Exception(
+          'Report not found or you do not have access to it.',
+        );
+      }
+
+      // ========================================================
+      // LOAD VIDEO ROWS
+      //
+      // IMPORTANT:
+      // Only request columns already used by your current
+      // submission architecture.
+      //
+      // Do not require optional columns such as:
+      // - accuracy_meters
+      // - captured_at
+      //
+      // This makes this method safer with your current database.
+      // ========================================================
+
+      final List<dynamic> response =
+      await _supabase
+          .from(
+        reportEvidenceTable,
+      )
+          .select(
+        '''
+      id,
+      report_id,
+      evidence_type,
+      storage_path,
+      original_file_name,
+      mime_type,
+      file_size_bytes,
+      duration_seconds,
+      thumbnail_storage_path,
+      evidence_role,
+      latitude,
+      longitude,
+      created_at
+      ''',
+      )
+          .eq(
+        'report_id',
+        cleanReportId,
+      )
+          .eq(
+        'evidence_type',
+        'video',
+      )
+          .order(
+        'created_at',
+        ascending:
+        true,
+      );
+
+      // ========================================================
+      // PREPARE FINAL VIDEO LIST
+      // ========================================================
+
+      final List<Map<String, dynamic>>
+      videos =
+      <Map<String, dynamic>>[];
+
+      for (final dynamic raw
+      in response) {
+        // ======================================================
+        // VALID ROW
+        // ======================================================
+
+        if (raw is! Map) {
+          continue;
+        }
+
+        final Map<String, dynamic> row =
+        Map<String, dynamic>.from(
+          raw,
+        );
+
+        // ======================================================
+        // STORAGE PATH
+        // ======================================================
+
+        final String storagePath =
+            row['storage_path']
+                ?.toString()
+                .trim() ??
+                '';
+
+        if (storagePath.isEmpty) {
+          continue;
+        }
+
+        // ======================================================
+        // CREATE VIDEO SIGNED URL
+        // ======================================================
+
+        try {
+          final String signedUrl =
+          await _supabase.storage
+              .from(
+            evidenceBucket,
+          )
+              .createSignedUrl(
+            storagePath,
+            3600,
+          );
+
+          // ====================================================
+          // OPTIONAL THUMBNAIL
+          //
+          // Your current submission stores this as null,
+          // but this supports future thumbnails without changing
+          // the Report Details UI later.
+          // ====================================================
+
+          String? thumbnailSignedUrl;
+
+          final String thumbnailPath =
+              row[
+              'thumbnail_storage_path']
+                  ?.toString()
+                  .trim() ??
+                  '';
+
+          if (thumbnailPath.isNotEmpty) {
+            try {
+              thumbnailSignedUrl =
+              await _supabase.storage
+                  .from(
+                evidenceBucket,
+              )
+                  .createSignedUrl(
+                thumbnailPath,
+                3600,
+              );
+            } catch (_) {
+              // Thumbnail failure must not make the
+              // actual video unavailable.
+              thumbnailSignedUrl =
+              null;
+            }
+          }
+
+          // ====================================================
+          // ADD FINAL VIDEO
+          // ====================================================
+
+          videos.add(
+            <String, dynamic>{
+              ...row,
+
+              'signed_url':
+              signedUrl,
+
+              'thumbnail_signed_url':
+              thumbnailSignedUrl,
+            },
+          );
+        } catch (_) {
+          // ====================================================
+          // BROKEN STORAGE ITEM
+          //
+          // Skip only this video.
+          // Other photos/videos remain available.
+          // ====================================================
+          continue;
+        }
+      }
+
+      return videos;
+    } catch (e) {
+      throw Exception(
+        'Unable to load report videos: '
+            '${_cleanError(e)}',
+      );
+    }
+  }
+
   // ============================================================
   // SUBMIT REPORT
   //
