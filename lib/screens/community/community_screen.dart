@@ -171,6 +171,42 @@ class _CommunityScreenState extends State<CommunityScreen> {
                     children: [
                       Row(
                         children: [
+                          // =================================================
+                          // BACK TO CITIZEN DASHBOARD
+                          //
+                          // CommunityScreen is opened from the dashboard with
+                          // Navigator.push(...), so Navigator.pop(...) returns
+                          // directly to the existing dashboard without
+                          // rebuilding or replacing its navigation structure.
+                          // =================================================
+
+                          Container(
+                            width: 42,
+                            height: 42,
+                            decoration: BoxDecoration(
+                              color: AppColors.surface,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: AppColors.border,
+                              ),
+                            ),
+                            child: IconButton(
+                              tooltip: 'Back to Dashboard',
+                              padding: EdgeInsets.zero,
+                              onPressed: () {
+                                Navigator.pop(
+                                  context,
+                                );
+                              },
+                              icon: const Icon(
+                                Icons.arrow_back_rounded,
+                                size: 20,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(width: 10),
+
                           Container(
                             width: 42,
                             height: 42,
@@ -183,7 +219,9 @@ class _CommunityScreenState extends State<CommunityScreen> {
                               color: AppColors.primary,
                             ),
                           ),
+
                           const SizedBox(width: 12),
+
                           const Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,9 +244,13 @@ class _CommunityScreenState extends State<CommunityScreen> {
                               ],
                             ),
                           ),
+
                           IconButton(
+                            tooltip: 'Refresh Community',
                             onPressed: loading ? null : _loadReports,
-                            icon: const Icon(Icons.refresh_rounded),
+                            icon: const Icon(
+                              Icons.refresh_rounded,
+                            ),
                           ),
                         ],
                       ),
@@ -329,31 +371,31 @@ class _CommunityScreenState extends State<CommunityScreen> {
                   ),
                 )
               else if (visible.isEmpty)
-                const SliverFillRemaining(
-                  hasScrollBody: false,
-                  child: Center(
-                    child: Text(
-                      'No matching community reports',
-                      style: TextStyle(color: AppColors.textSecondary),
+                  const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(
+                      child: Text(
+                        'No matching community reports',
+                        style: TextStyle(color: AppColors.textSecondary),
+                      ),
+                    ),
+                  )
+                else
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+                    sliver: SliverList.separated(
+                      itemCount: visible.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 12),
+                      itemBuilder: (context, index) {
+                        final report = visible[index];
+
+                        return _CommunityCard(
+                          report: report,
+                          onTap: () => _openReport(report),
+                        );
+                      },
                     ),
                   ),
-                )
-              else
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-                  sliver: SliverList.separated(
-                    itemCount: visible.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 12),
-                    itemBuilder: (context, index) {
-                      final report = visible[index];
-
-                      return _CommunityCard(
-                        report: report,
-                        onTap: () => _openReport(report),
-                      );
-                    },
-                  ),
-                ),
             ],
           ),
         ),
@@ -419,10 +461,10 @@ class _LocationBar extends StatelessWidget {
             onPressed: detecting ? null : onDetect,
             icon: detecting
                 ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
                 : const Icon(Icons.gps_fixed),
           ),
         ],
@@ -451,7 +493,7 @@ class _Drop extends StatelessWidget {
         filled: true,
         fillColor: AppColors.surface,
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: AppColors.border),
@@ -460,10 +502,10 @@ class _Drop extends StatelessWidget {
       items: items
           .map(
             (item) => DropdownMenuItem(
-              value: item,
-              child: Text(item, overflow: TextOverflow.ellipsis),
-            ),
-          )
+          value: item,
+          child: Text(item, overflow: TextOverflow.ellipsis),
+        ),
+      )
           .toList(),
       onChanged: onChanged,
     );
@@ -582,3 +624,4 @@ class _Metric extends StatelessWidget {
     );
   }
 }
+
