@@ -3,19 +3,65 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../models/infrastructure_report.dart';
+import '../../models/report_final_ai_analysis.dart';
 import '../../models/report_image_ai_analysis.dart';
+import '../../models/report_video_ai_analysis.dart';
 
 import '../../services/ai_evidence_service.dart';
 import '../../services/location_service.dart';
 import '../../services/report_edit_evidence_service.dart';
 import '../../services/report_service.dart';
+import '../../services/video_evidence_ai_service.dart';
 
 import '../../theme/app_colors.dart';
-import '../../utils/multilingual_text_validator.dart';
 
 import 'map_picker_screen.dart';
+
+// ================================================================
+// EDIT REPORT SCREEN
+//
+// FULL EDIT SMART ASSIST FLOW
+//
+// Citizen edits report
+//      ↓
+// Meaningful text validation
+//      ↓
+// GPS / Map / Typed-address geocoding
+//      ↓
+// Multiple photos
+//      └── Individual Photo AI
+//
+// Multiple short videos
+//      └── Sampled-frame Video AI
+//
+// All successful evidence AI results
+//      ↓
+// FINAL COMBINED IMAGE + VIDEO ANALYSIS
+//      ↓
+// Citizen review
+//      ↓
+// Keep Mine / Apply Final AI
+//      ↓
+// Save current edited report
+//
+// IMPORTANT:
+//
+// 1. Individual evidence AI never overwrites citizen data.
+// 2. Only FINAL COMBINED AI can suggest report-level changes.
+// 3. AI suggestions require explicit citizen approval.
+// 4. Video AI reviews sampled frames, not every frame continuously.
+// 5. AI does not visually verify GPS/location.
+// ================================================================
+
+enum AiTextReviewChoice {
+  unresolved,
+  original,
+  reedit,
+  ai,
+}
 
 class EditReportScreen extends StatefulWidget {
   final InfrastructureReport report;
@@ -39,12 +85,14 @@ class _EditReportScreenState
   final ReportService reportService =
   ReportService();
 
-  final ReportEditEvidenceService
-  evidenceService =
+  final ReportEditEvidenceService evidenceService =
   ReportEditEvidenceService();
 
   final AiEvidenceService aiService =
   AiEvidenceService();
+
+  final VideoEvidenceAiService videoAiService =
+      VideoEvidenceAiService.instance;
 
   final LocationService locationService =
   LocationService();
@@ -52,55 +100,69 @@ class _EditReportScreenState
   final Geocoding geocoding =
   Geocoding();
 
-  final ImagePicker _picker =
+  final ImagePicker picker =
   ImagePicker();
+
+  final SupabaseClient supabase =
+      Supabase.instance.client;
 
   // ============================================================
   // FORM
   // ============================================================
 
-  final GlobalKey<FormState> _formKey =
+  final GlobalKey<FormState> formKey =
   GlobalKey<FormState>();
 
-  late TextEditingController
-  titleController;
+  late TextEditingController titleController;
 
-  late TextEditingController
-  descriptionController;
+  late TextEditingController descriptionController;
 
-  late TextEditingController
-  addressController;
+  late TextEditingController addressController;
 
-  late TextEditingController
-  landmarkController;
+  late TextEditingController landmarkController;
 
   late String selectedCategory;
 
   late String selectedPriority;
 
   // ============================================================
-  // STATE
+  // GENERAL STATE
   // ============================================================
 
-  bool saving = false;
+  bool saving =
+  false;
 
-  bool loadingEvidence = true;
+  bool loadingEvidence =
+  true;
 
-  bool editingEvidence = false;
+  bool editingEvidence =
+  false;
 
-  bool analyzingAi = false;
+  bool analyzingAi =
+  false;
 
-  bool aiSuggestionsApplied = false;
+  bool combiningAnalyses =
+  false;
+
+  bool gettingLocation =
+  false;
+
+  bool validatingAddress =
+  false;
+
+  bool aiSuggestionsApplied =
+  false;
 
   String? evidenceError;
 
-  ReportImageAiAnalysis? aiResult;
+  String? finalAnalysisError;
 
-  List<EditableReportEvidence> evidence =
-  [];
+  String? addressValidationError;
+
+  String? analyzingEvidenceKey;
 
   // ============================================================
-  // EDITABLE LOCATION
+  // LOCATION
   // ============================================================
 
   double? latitude;
@@ -109,25 +171,61 @@ class _EditReportScreenState
 
   double? gpsAccuracy;
 
-  bool gettingLocation = false;
-
-  bool validatingAddress = false;
-
-  String? addressValidationError;
-
   String? verifiedAddress;
 
   String locationVerificationStatus =
       'saved';
 
-  bool _updatingAddressProgrammatically =
+  bool updatingAddressProgrammatically =
   false;
+
+  // ============================================================
+  // EVIDENCE
+  // ============================================================
+
+  List<EditableReportEvidence> evidence =
+  <EditableReportEvidence>[];
+
+  // ============================================================
+  // INDIVIDUAL PHOTO ANALYSES
+  //
+  // KEY:
+  // sourceTable:id
+  // ============================================================
+
+  final Map<String, ReportImageAiAnalysis>
+  imageAnalyses =
+  <String, ReportImageAiAnalysis>{};
+
+  final Map<String, String>
+  imageAnalysisErrors =
+  <String, String>{};
+
+  // ============================================================
+  // INDIVIDUAL VIDEO ANALYSES
+  // ============================================================
+
+  final Map<String, ReportVideoAiAnalysis>
+  videoAnalyses =
+  <String, ReportVideoAiAnalysis>{};
+
+  final Map<String, String>
+  videoAnalysisErrors =
+  <String, String>{};
+
+  // ============================================================
+  // FINAL COMBINED ANALYSIS
+  // ============================================================
+
+  ReportFinalAiAnalysis?
+  finalAiAnalysis;
 
   // ============================================================
   // OPTIONS
   // ============================================================
 
-  final List<String> categories = [
+  final List<String> categories =
+  <String>[
     'Road Damage',
     'Street Light',
     'Drainage',
@@ -135,12 +233,64 @@ class _EditReportScreenState
     'Other',
   ];
 
-  final List<String> priorities = [
+  final List<String> priorities =
+  <String>[
     'Low',
     'Medium',
     'High',
     'Critical',
   ];
+
+  // ============================================================
+  // LIMITS
+  // ============================================================
+
+  static const int maxEvidenceItems =
+  5;
+
+  static const int maxAiImages =
+  5;
+
+  static const int maxAiVideos =
+  3;
+
+  static const Duration maxVideoDuration =
+  Duration(
+    seconds: 30,
+  );
+
+  // ============================================================
+  // GETTERS
+  // ============================================================
+
+  bool get isBusy =>
+      saving ||
+          loadingEvidence ||
+          editingEvidence ||
+          analyzingAi ||
+          combiningAnalyses ||
+          gettingLocation ||
+          validatingAddress;
+
+  int get photoCount =>
+      evidence
+          .where(
+            (item) =>
+        item.isImage,
+      )
+          .length;
+
+  int get videoCount =>
+      evidence
+          .where(
+            (item) =>
+        item.isVideo,
+      )
+          .length;
+
+  int get successfulAiCount =>
+      imageAnalyses.length +
+          videoAnalyses.length;
 
   // ============================================================
   // INIT
@@ -181,7 +331,20 @@ class _EditReportScreenState
               '',
         );
 
-    _loadEvidence();
+    latitude =
+        widget.report.latitude;
+
+    longitude =
+        widget.report.longitude;
+
+    verifiedAddress =
+        widget.report.address.trim();
+
+    addressController.addListener(
+      handleAddressChanged,
+    );
+
+    loadEvidence();
   }
 
   // ============================================================
@@ -190,6 +353,10 @@ class _EditReportScreenState
 
   @override
   void dispose() {
+    addressController.removeListener(
+      handleAddressChanged,
+    );
+
     titleController.dispose();
 
     descriptionController.dispose();
@@ -202,22 +369,49 @@ class _EditReportScreenState
   }
 
   // ============================================================
+  // EVIDENCE KEY
+  // ============================================================
+
+  String evidenceKey(
+      EditableReportEvidence item,
+      ) {
+    return '${item.sourceTable}:${item.id}';
+  }
+
+  // ============================================================
+  // CLEAN ERROR
+  // ============================================================
+
+  String cleanError(
+      Object error,
+      ) {
+    return error
+        .toString()
+        .replaceFirst(
+      'Exception: ',
+      '',
+    )
+        .trim();
+  }
+
+  // ============================================================
   // LOAD EVIDENCE
   // ============================================================
 
-  Future<void> _loadEvidence() async {
+  Future<void> loadEvidence() async {
     if (mounted) {
       setState(() {
-        loadingEvidence = true;
-        evidenceError = null;
+        loadingEvidence =
+        true;
+
+        evidenceError =
+        null;
       });
     }
 
     try {
-      final List<EditableReportEvidence>
-      result =
-      await evidenceService
-          .loadEvidence(
+      final List<EditableReportEvidence> result =
+      await evidenceService.loadEvidence(
         reportId:
         widget.report.id,
       );
@@ -227,8 +421,28 @@ class _EditReportScreenState
       }
 
       setState(() {
-        evidence = result;
-        loadingEvidence = false;
+        evidence =
+            result;
+
+        loadingEvidence =
+        false;
+
+        imageAnalyses.clear();
+
+        imageAnalysisErrors.clear();
+
+        videoAnalyses.clear();
+
+        videoAnalysisErrors.clear();
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
       });
     } catch (e) {
       if (!mounted) {
@@ -236,24 +450,46 @@ class _EditReportScreenState
       }
 
       setState(() {
-        loadingEvidence = false;
+        loadingEvidence =
+        false;
 
         evidenceError =
-            e
-                .toString()
-                .replaceFirst(
-              'Exception: ',
-              '',
+            cleanError(
+              e,
             );
       });
     }
   }
 
   // ============================================================
-  // MEANINGFUL TEXT VALIDATION
+  // MEANINGFUL MULTILINGUAL-FRIENDLY VALIDATION
   //
-  // SAME QUALITY RULES AS CREATE REPORT
+  // Supports:
+  // - English
+  // - Malay
+  // - accented Latin
+  // - Chinese
+  // - Japanese
+  // - Korean
+  // - mixed text
   // ============================================================
+
+  bool containsMeaningfulCharacter(
+      String text,
+      ) {
+    return RegExp(
+      r'[A-Za-zÀ-ÖØ-öø-ÿĀ-ž'
+      r'\u0100-\u024F'
+      r'\u3040-\u30FF'
+      r'\u3400-\u4DBF'
+      r'\u4E00-\u9FFF'
+      r'\uAC00-\uD7AF]',
+      unicode:
+      true,
+    ).hasMatch(
+      text,
+    );
+  }
 
   String? validateMeaningfulText(
       String value, {
@@ -265,92 +501,54 @@ class _EditReportScreenState
     final String text =
     value.trim();
 
-    // ----------------------------------------------------------
-    // OPTIONAL EMPTY
-    // ----------------------------------------------------------
-
     if (optional &&
         text.isEmpty) {
       return null;
     }
 
-    // ----------------------------------------------------------
-    // EMPTY
-    // ----------------------------------------------------------
-
     if (text.isEmpty) {
       return 'Please enter a $fieldName.';
     }
-
-    // ----------------------------------------------------------
-    // MINIMUM LENGTH
-    // ----------------------------------------------------------
 
     if (text.length <
         minimumLength) {
       return 'The $fieldName is too short to be useful.';
     }
 
-    // ----------------------------------------------------------
-    // LETTERS REQUIRED
-    // ----------------------------------------------------------
-
-    final RegExp letterRegex =
-    RegExp(
-      r'[A-Za-zÀ-ÖØ-öø-ÿ]',
-    );
-
-    final int letterCount =
-        letterRegex
-            .allMatches(
-          text,
-        )
-            .length;
-
-    if (letterCount == 0) {
-      return 'The $fieldName must contain meaningful words.';
+    if (!containsMeaningfulCharacter(
+      text,
+    )) {
+      return 'The $fieldName must contain meaningful text.';
     }
 
-    // ----------------------------------------------------------
-    // NUMBERS ONLY
-    // ----------------------------------------------------------
-
     if (RegExp(
-      r'^[0-9\s]+$',
+      r'^[0-9\s.,/#\-]+$',
+      unicode:
+      true,
     ).hasMatch(
       text,
     )) {
-      return 'The $fieldName cannot contain only numbers.';
+      return 'The $fieldName cannot contain only numbers or symbols.';
     }
-
-    // ----------------------------------------------------------
-    // SYMBOLS ONLY
-    // ----------------------------------------------------------
-
-    if (RegExp(
-      r'^[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+$',
-    ).hasMatch(
-      text,
-    )) {
-      return 'The $fieldName cannot contain only symbols.';
-    }
-
-    // ----------------------------------------------------------
-    // SAME CHARACTER REPEATED
-    // ----------------------------------------------------------
 
     final String compact =
     text.replaceAll(
       RegExp(
         r'\s+',
+        unicode:
+        true,
       ),
       '',
     );
 
-    if (compact.length >= 4 &&
+    if (compact.length >=
+        4 &&
         RegExp(
           r'^(.)\1+$',
-          caseSensitive: false,
+          caseSensitive:
+          false,
+          unicode:
+          true,
         ).hasMatch(
           compact,
         )) {
@@ -358,163 +556,94 @@ class _EditReportScreenState
           'and does not appear meaningful.';
     }
 
-    // ----------------------------------------------------------
-    // LONG REPEATED CHARACTER RUN
-    // ----------------------------------------------------------
-
     if (RegExp(
-      r'(.)\1{3,}',
-      caseSensitive: false,
+      r'(.)\1{4,}',
+      caseSensitive:
+      false,
+      unicode:
+      true,
     ).hasMatch(
       text,
     )) {
       return 'The $fieldName contains too many repeated characters.';
     }
 
-    // ----------------------------------------------------------
-    // SYMBOL RATIO
-    // ----------------------------------------------------------
-
-    final int symbolCount =
-        RegExp(
-          r'[^A-Za-zÀ-ÖØ-öø-ÿ0-9\s]',
-        ).allMatches(
-          text,
-        ).length;
-
-    final double symbolRatio =
-        symbolCount /
-            text.length;
-
-    if (symbolRatio >
-        0.30) {
-      return 'The $fieldName contains too many symbols.';
-    }
-
-    // ----------------------------------------------------------
-    // LETTER RATIO
-    // ----------------------------------------------------------
-
-    final double letterRatio =
-        letterCount /
-            text.length;
-
-    if (letterRatio <
-        0.45) {
-      return 'The $fieldName does not contain enough meaningful text.';
-    }
-
-    // ----------------------------------------------------------
-    // WORD EXTRACTION
-    // ----------------------------------------------------------
-
-    final List<String> words =
-    text
-        .split(
-      RegExp(
-        r'\s+',
-      ),
-    )
-        .map(
-          (word) =>
-          word.replaceAll(
-            RegExp(
-              r'[^A-Za-zÀ-ÖØ-öø-ÿ]',
-            ),
-            '',
-          ),
-    )
-        .where(
-          (word) =>
-      word.length >=
-          2,
-    )
-        .toList();
-
-    // ----------------------------------------------------------
-    // MINIMUM WORD COUNT
-    // ----------------------------------------------------------
-
-    if (words.length <
-        minimumWords) {
-      return 'Please provide a meaningful $fieldName '
-          'using at least $minimumWords useful words.';
-    }
-
-    // ----------------------------------------------------------
-    // VERY LONG RANDOM TOKEN
-    // ----------------------------------------------------------
-
-    final String lettersOnly =
-    text.replaceAll(
-      RegExp(
-        r'[^A-Za-zÀ-ÖØ-öø-ÿ]',
-      ),
-      '',
+    final bool containsCjk =
+    RegExp(
+      r'[\u3040-\u30FF'
+      r'\u3400-\u4DBF'
+      r'\u4E00-\u9FFF'
+      r'\uAC00-\uD7AF]',
+      unicode:
+      true,
+    ).hasMatch(
+      text,
     );
 
-    if (lettersOnly.length >=
-        20 &&
-        !text.contains(
-          RegExp(
-            r'\s',
-          ),
-        )) {
-      return 'The $fieldName does not appear to contain '
-          'a clear phrase or sentence.';
-    }
+    if (!containsCjk) {
+      final List<String> words =
+      text
+          .split(
+        RegExp(
+          r'\s+',
+          unicode:
+          true,
+        ),
+      )
+          .where(
+            (word) =>
+        word
+            .trim()
+            .isNotEmpty,
+      )
+          .toList();
 
-    // ----------------------------------------------------------
-    // RANDOM LOOKING WORDS
-    // ----------------------------------------------------------
-
-    int suspiciousWords =
-    0;
-
-    for (final String word
-    in words) {
-      final String lower =
-      word.toLowerCase();
-
-      if (RegExp(
-        r'[bcdfghjklmnpqrstvwxyz]{7,}',
-        caseSensitive: false,
-      ).hasMatch(
-        lower,
-      )) {
-        suspiciousWords++;
-        continue;
+      if (words.length <
+          minimumWords) {
+        return 'Please provide a meaningful $fieldName '
+            'using at least $minimumWords useful words.';
       }
-
-      if (lower.length >=
-          7 &&
-          !RegExp(
-            r'[aeiou]',
-          ).hasMatch(
-            lower,
-          )) {
-        suspiciousWords++;
-      }
-    }
-
-    if (words.isNotEmpty &&
-        suspiciousWords >=
-            words.length) {
-      return 'The $fieldName does not appear to contain meaningful words.';
     }
 
     return null;
   }
 
-  // ============================================================
-  // ADDRESS VALIDATION
-  // ============================================================
-
-  String? _validateAddress(
+  String? validateTitle(
       String? value,
       ) {
     return validateMeaningfulText(
-      value ?? '',
+      value ??
+          '',
+      fieldName:
+      'report title',
+      minimumLength:
+      5,
+      minimumWords:
+      2,
+    );
+  }
+
+  String? validateDescription(
+      String? value,
+      ) {
+    return validateMeaningfulText(
+      value ??
+          '',
+      fieldName:
+      'description',
+      minimumLength:
+      10,
+      minimumWords:
+      3,
+    );
+  }
+
+  String? validateAddress(
+      String? value,
+      ) {
+    return validateMeaningfulText(
+      value ??
+          '',
       fieldName:
       'address',
       minimumLength:
@@ -524,15 +653,12 @@ class _EditReportScreenState
     );
   }
 
-  // ============================================================
-  // LANDMARK VALIDATION
-  // ============================================================
-
-  String? _validateLandmark(
+  String? validateLandmark(
       String? value,
       ) {
     return validateMeaningfulText(
-      value ?? '',
+      value ??
+          '',
       fieldName:
       'landmark',
       minimumLength:
@@ -545,20 +671,578 @@ class _EditReportScreenState
   }
 
   // ============================================================
+  // INVALIDATE FINAL AI
+  //
+  // Evidence-level visual observations can remain available.
+  // Final report-level result becomes stale if citizen changes
+  // report information or location.
+  // ============================================================
+
+  void invalidateFinalAi() {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      finalAiAnalysis =
+      null;
+
+      finalAnalysisError =
+      null;
+
+      aiSuggestionsApplied =
+      false;
+    });
+  }
+
+  // ============================================================
+  // ADDRESS CHANGE
+  //
+  // IMPORTANT:
+  // If citizen manually changes an address, old coordinates
+  // must not remain attached to the new address.
+  // ============================================================
+
+  void handleAddressChanged() {
+    if (updatingAddressProgrammatically) {
+      return;
+    }
+
+    final String currentAddress =
+    addressController.text
+        .trim();
+
+    final String previousAddress =
+    (verifiedAddress ??
+        '')
+        .trim();
+
+    if (previousAddress.isNotEmpty &&
+        currentAddress !=
+            previousAddress &&
+        latitude !=
+            null &&
+        longitude !=
+            null) {
+      setState(() {
+        latitude =
+        null;
+
+        longitude =
+        null;
+
+        gpsAccuracy =
+        null;
+
+        locationVerificationStatus =
+        'manual_unverified';
+
+        addressValidationError =
+        null;
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+
+      return;
+    }
+
+    if (finalAiAnalysis !=
+        null) {
+      invalidateFinalAi();
+    }
+  }
+
+  // ============================================================
+  // PROGRAMMATIC ADDRESS
+  // ============================================================
+
+  void setAddressProgrammatically(
+      String value,
+      ) {
+    updatingAddressProgrammatically =
+    true;
+
+    addressController.text =
+        value;
+
+    updatingAddressProgrammatically =
+    false;
+  }
+
+  // ============================================================
+  // FORMAT PLACEMARK
+  // ============================================================
+
+  String formatPlacemarkAddress(
+      Placemark placemark,
+      String fallback,
+      ) {
+    final List<String> values =
+    <String>[
+      placemark.name ??
+          '',
+      placemark.street ??
+          '',
+      placemark.subLocality ??
+          '',
+      placemark.locality ??
+          '',
+      placemark.subAdministrativeArea ??
+          '',
+      placemark.administrativeArea ??
+          '',
+      placemark.postalCode ??
+          '',
+      placemark.country ??
+          '',
+    ];
+
+    final Set<String> seen =
+    <String>{};
+
+    final List<String> parts =
+    <String>[];
+
+    for (final String value
+    in values) {
+      final String clean =
+      value.trim();
+
+      if (clean.isEmpty) {
+        continue;
+      }
+
+      if (seen.add(
+        clean.toLowerCase(),
+      )) {
+        parts.add(
+          clean,
+        );
+      }
+    }
+
+    if (parts.isEmpty) {
+      return fallback;
+    }
+
+    return parts.join(
+      ', ',
+    );
+  }
+
+  // ============================================================
+  // VERIFY TYPED ADDRESS
+  // ============================================================
+
+  Future<bool> verifyTypedAddress() async {
+    if (validatingAddress ||
+        saving ||
+        editingEvidence ||
+        analyzingAi ||
+        combiningAnalyses) {
+      return false;
+    }
+
+    final String inputAddress =
+    addressController.text
+        .trim();
+
+    if (inputAddress.isEmpty) {
+      setState(() {
+        addressValidationError =
+        'Please enter an address.';
+      });
+
+      return false;
+    }
+
+    setState(() {
+      validatingAddress =
+      true;
+
+      addressValidationError =
+      null;
+    });
+
+    try {
+      // ========================================================
+      // FORWARD GEOCODING
+      // ========================================================
+
+      final List<Location> locations =
+      await geocoding
+          .locationFromAddress(
+        inputAddress,
+      );
+
+      if (locations.isEmpty) {
+        throw Exception(
+          'Address not found.',
+        );
+      }
+
+      final Location resolved =
+          locations.first;
+
+      final double newLatitude =
+          resolved.latitude;
+
+      final double newLongitude =
+          resolved.longitude;
+
+      if (newLatitude <
+          -90 ||
+          newLatitude >
+              90 ||
+          newLongitude <
+              -180 ||
+          newLongitude >
+              180) {
+        throw Exception(
+          'Invalid coordinates.',
+        );
+      }
+
+      String formattedAddress =
+          inputAddress;
+
+      // ========================================================
+      // REVERSE GEOCODING
+      // ========================================================
+
+      try {
+        final List<Placemark> placemarks =
+        await geocoding
+            .placemarkFromCoordinates(
+          newLatitude,
+          newLongitude,
+        );
+
+        if (placemarks.isNotEmpty) {
+          formattedAddress =
+              formatPlacemarkAddress(
+                placemarks.first,
+                inputAddress,
+              );
+        }
+      } catch (_) {
+        // Forward geocoding already resolved the input.
+      }
+
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        latitude =
+            newLatitude;
+
+        longitude =
+            newLongitude;
+
+        gpsAccuracy =
+        null;
+
+        verifiedAddress =
+            formattedAddress;
+
+        locationVerificationStatus =
+        'geocoded';
+
+        addressValidationError =
+        null;
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+
+      setAddressProgrammatically(
+        formattedAddress,
+      );
+
+      showMessage(
+        'Address matched to map coordinates successfully.',
+      );
+
+      return true;
+    } catch (_) {
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        latitude =
+        null;
+
+        longitude =
+        null;
+
+        gpsAccuracy =
+        null;
+
+        locationVerificationStatus =
+        'manual_unverified';
+
+        addressValidationError =
+        'This address could not be matched to map coordinates. '
+            'Please enter a clearer address, use Current GPS, '
+            'or choose the point on the map.';
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() {
+          validatingAddress =
+          false;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // CURRENT GPS
+  // ============================================================
+
+  Future<void> detectCurrentLocation() async {
+    if (isBusy) {
+      return;
+    }
+
+    setState(() {
+      gettingLocation =
+      true;
+
+      addressValidationError =
+      null;
+    });
+
+    try {
+      final result =
+      await locationService
+          .getCurrentLocationWithAddress();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        latitude =
+            result.latitude;
+
+        longitude =
+            result.longitude;
+
+        gpsAccuracy =
+            result.accuracy;
+
+        verifiedAddress =
+            result.address;
+
+        locationVerificationStatus =
+        'gps';
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+
+      setAddressProgrammatically(
+        result.address,
+      );
+
+      if (result.accuracy >
+          50) {
+        showMessage(
+          'Location detected, but GPS accuracy is low '
+              '(±${result.accuracy.toStringAsFixed(0)} m). '
+              'You can adjust the exact point on the map.',
+        );
+      } else {
+        showMessage(
+          'Current location detected successfully.',
+        );
+      }
+    } catch (e) {
+      showMessage(
+        cleanError(
+          e,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          gettingLocation =
+          false;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // OPEN MAP PICKER
+  // ============================================================
+
+  Future<void> openMapPicker() async {
+    if (isBusy) {
+      return;
+    }
+
+    double initialLatitude =
+        latitude ??
+            3.1390;
+
+    double initialLongitude =
+        longitude ??
+            101.6869;
+
+    if (latitude ==
+        null ||
+        longitude ==
+            null) {
+      try {
+        final result =
+        await locationService
+            .getCurrentLocationWithAddress();
+
+        initialLatitude =
+            result.latitude;
+
+        initialLongitude =
+            result.longitude;
+      } catch (_) {
+        // KL coordinate is only map start fallback.
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    final MapPickerResult? result =
+    await Navigator.push<
+        MapPickerResult>(
+      context,
+      MaterialPageRoute(
+        builder:
+            (_) =>
+            MapPickerScreen(
+              initialLatitude:
+              initialLatitude,
+              initialLongitude:
+              initialLongitude,
+            ),
+      ),
+    );
+
+    if (result ==
+        null ||
+        !mounted) {
+      return;
+    }
+
+    setState(() {
+      latitude =
+          result.latitude;
+
+      longitude =
+          result.longitude;
+
+      gpsAccuracy =
+      null;
+
+      verifiedAddress =
+          result.address;
+
+      locationVerificationStatus =
+      'map';
+
+      addressValidationError =
+      null;
+
+      finalAiAnalysis =
+      null;
+
+      finalAnalysisError =
+      null;
+
+      aiSuggestionsApplied =
+      false;
+    });
+
+    setAddressProgrammatically(
+      result.address,
+    );
+  }
+
+  // ============================================================
+  // ENSURE VALID LOCATION
+  // ============================================================
+
+  Future<bool> ensureValidLocation() async {
+    if (latitude !=
+        null &&
+        longitude !=
+            null &&
+        addressController.text
+            .trim()
+            .isNotEmpty) {
+      return true;
+    }
+
+    return verifyTypedAddress();
+  }
+
+  // ============================================================
   // PICK IMAGE
   // ============================================================
 
-  Future<void> _pickImage(
+  Future<void> pickImage(
       ImageSource source,
       ) async {
-    if (editingEvidence ||
-        saving) {
+    if (isBusy) {
+      return;
+    }
+
+    if (evidence.length >=
+        maxEvidenceItems) {
+      showMessage(
+        'A maximum of $maxEvidenceItems evidence items is allowed.',
+      );
+
       return;
     }
 
     try {
       final XFile? picked =
-      await _picker.pickImage(
+      await picker.pickImage(
         source:
         source,
         imageQuality:
@@ -567,7 +1251,8 @@ class _EditReportScreenState
         2048,
       );
 
-      if (picked == null) {
+      if (picked ==
+          null) {
         return;
       }
 
@@ -580,10 +1265,8 @@ class _EditReportScreenState
         true;
       });
 
-      final EditableReportEvidence
-      added =
-      await evidenceService
-          .addImage(
+      final EditableReportEvidence added =
+      await evidenceService.addImage(
         reportId:
         widget.report.id,
         file:
@@ -604,34 +1287,40 @@ class _EditReportScreenState
         editingEvidence =
         false;
 
-        // Evidence changed.
-        // Previous AI result should not be treated as current.
-        aiResult =
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
         null;
 
         aiSuggestionsApplied =
         false;
       });
 
-      _showMessage(
-        'Evidence image added successfully.',
+      showMessage(
+        'Evidence photo added. Smart Assist is analysing it.',
+      );
+
+      await analyzeSingleImage(
+        added,
+        rebuildFinal:
+        true,
       );
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          editingEvidence =
-          false;
-        });
-
-        _showMessage(
-          e
-              .toString()
-              .replaceFirst(
-            'Exception: ',
-            '',
-          ),
-        );
+      if (!mounted) {
+        return;
       }
+
+      setState(() {
+        editingEvidence =
+        false;
+      });
+
+      showMessage(
+        cleanError(
+          e,
+        ),
+      );
     }
   }
 
@@ -639,28 +1328,56 @@ class _EditReportScreenState
   // PICK VIDEO
   // ============================================================
 
-  Future<void> _pickVideo(
+  Future<void> pickVideo(
       ImageSource source,
       ) async {
-    if (editingEvidence ||
-        saving) {
+    if (isBusy) {
+      return;
+    }
+
+    if (evidence.length >=
+        maxEvidenceItems) {
+      showMessage(
+        'A maximum of $maxEvidenceItems evidence items is allowed.',
+      );
+
+      return;
+    }
+
+    if (videoCount >=
+        maxAiVideos) {
+      showMessage(
+        'A maximum of $maxAiVideos short videos is supported.',
+      );
+
       return;
     }
 
     try {
       final XFile? picked =
-      await _picker.pickVideo(
+      await picker.pickVideo(
         source:
         source,
         maxDuration:
-        const Duration(
-          seconds:
-          60,
-        ),
+        maxVideoDuration,
       );
 
-      if (picked == null) {
+      if (picked ==
+          null) {
         return;
+      }
+
+      final File localVideo =
+      File(
+        picked.path,
+      );
+
+      if (!await localVideo.exists() ||
+          await localVideo.length() <=
+              0) {
+        throw Exception(
+          'The selected video is unavailable or empty.',
+        );
       }
 
       if (!mounted) {
@@ -672,23 +1389,20 @@ class _EditReportScreenState
         true;
       });
 
-      final EditableReportEvidence
-      added =
-      await evidenceService
-          .addVideo(
+      final EditableReportEvidence added =
+      await evidenceService.addVideo(
         reportId:
         widget.report.id,
-
         file:
-        File(
-          picked.path,
-        ),
+        localVideo,
 
+        // IMPORTANT:
+        // use EDITED current coordinates.
         latitude:
-        widget.report.latitude,
+        latitude,
 
         longitude:
-        widget.report.longitude,
+        longitude,
       );
 
       if (!mounted) {
@@ -703,32 +1417,42 @@ class _EditReportScreenState
         editingEvidence =
         false;
 
-        aiResult =
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
         null;
 
         aiSuggestionsApplied =
         false;
       });
 
-      _showMessage(
-        'Evidence video added successfully.',
+      showMessage(
+        'Evidence video added. Smart Assist is reviewing representative frames.',
+      );
+
+      await analyzeSingleVideo(
+        added,
+        localFile:
+        localVideo,
+        rebuildFinal:
+        true,
       );
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          editingEvidence =
-          false;
-        });
-
-        _showMessage(
-          e
-              .toString()
-              .replaceFirst(
-            'Exception: ',
-            '',
-          ),
-        );
+      if (!mounted) {
+        return;
       }
+
+      setState(() {
+        editingEvidence =
+        false;
+      });
+
+      showMessage(
+        cleanError(
+          e,
+        ),
+      );
     }
   }
 
@@ -736,9 +1460,17 @@ class _EditReportScreenState
   // ADD EVIDENCE MENU
   // ============================================================
 
-  Future<void> _showAddEvidenceMenu() async {
-    if (saving ||
-        editingEvidence) {
+  Future<void> showAddEvidenceMenu() async {
+    if (isBusy) {
+      return;
+    }
+
+    if (evidence.length >=
+        maxEvidenceItems) {
+      showMessage(
+        'A maximum of $maxEvidenceItems evidence items is allowed.',
+      );
+
       return;
     }
 
@@ -746,15 +1478,14 @@ class _EditReportScreenState
     await showModalBottomSheet<String>(
       context:
       context,
-
       backgroundColor:
       AppColors.surface,
-
       showDragHandle:
       true,
-
       builder:
-          (bottomContext) {
+          (
+          bottomContext,
+          ) {
         return SafeArea(
           child:
           Padding(
@@ -765,12 +1496,10 @@ class _EditReportScreenState
               16,
               18,
             ),
-
             child:
             Column(
               mainAxisSize:
               MainAxisSize.min,
-
               children: [
                 const Text(
                   'Add Evidence',
@@ -878,25 +1607,25 @@ class _EditReportScreenState
 
     switch (option) {
       case 'camera_image':
-        await _pickImage(
+        await pickImage(
           ImageSource.camera,
         );
         break;
 
       case 'gallery_image':
-        await _pickImage(
+        await pickImage(
           ImageSource.gallery,
         );
         break;
 
       case 'camera_video':
-        await _pickVideo(
+        await pickVideo(
           ImageSource.camera,
         );
         break;
 
       case 'gallery_video':
-        await _pickVideo(
+        await pickVideo(
           ImageSource.gallery,
         );
         break;
@@ -907,21 +1636,16 @@ class _EditReportScreenState
   // REMOVE EVIDENCE
   // ============================================================
 
-  Future<void> _removeEvidence(
+  Future<void> removeEvidence(
       EditableReportEvidence item,
       ) async {
-    if (saving ||
-        editingEvidence) {
+    if (isBusy) {
       return;
     }
 
-    // ==========================================================
-    // REPORT MUST RETAIN EVIDENCE
-    // ==========================================================
-
     if (evidence.length <=
         1) {
-      _showMessage(
+      showMessage(
         'A report must keep at least one evidence photo or video.',
       );
 
@@ -932,28 +1656,30 @@ class _EditReportScreenState
     await showDialog<bool>(
       context:
       context,
-
       builder:
-          (dialogContext) {
+          (
+          dialogContext,
+          ) {
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
-
           title:
           const Text(
             'Remove Evidence?',
           ),
-
           content:
           const Text(
-            'This evidence will be permanently removed from the report.',
+            'This evidence will be permanently removed. '
+                'Its Smart Assist result will also stop being used '
+                'in the final combined assessment.',
             style:
             TextStyle(
               color:
               AppColors.textSecondary,
+              height:
+              1.4,
             ),
           ),
-
           actions: [
             TextButton(
               onPressed:
@@ -967,7 +1693,6 @@ class _EditReportScreenState
                 'Keep',
               ),
             ),
-
             TextButton(
               onPressed:
                   () =>
@@ -1001,8 +1726,7 @@ class _EditReportScreenState
     });
 
     try {
-      await evidenceService
-          .removeEvidence(
+      await evidenceService.removeEvidence(
         evidence:
         item,
       );
@@ -1011,26 +1735,57 @@ class _EditReportScreenState
         return;
       }
 
+      final String key =
+      evidenceKey(
+        item,
+      );
+
       setState(() {
         evidence.removeWhere(
-              (element) =>
-          element.id ==
+              (
+              current,
+              ) =>
+          current.id ==
               item.id &&
-              element.sourceTable ==
+              current.sourceTable ==
                   item.sourceTable,
         );
 
-        editingEvidence =
-        false;
+        imageAnalyses.remove(
+          key,
+        );
 
-        aiResult =
+        imageAnalysisErrors.remove(
+          key,
+        );
+
+        videoAnalyses.remove(
+          key,
+        );
+
+        videoAnalysisErrors.remove(
+          key,
+        );
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
         null;
 
         aiSuggestionsApplied =
         false;
+
+        editingEvidence =
+        false;
       });
 
-      _showMessage(
+      if (successfulAiCount >
+          0) {
+        await combineAllAnalyses();
+      }
+
+      showMessage(
         'Evidence removed.',
       );
     } catch (e) {
@@ -1043,110 +1798,698 @@ class _EditReportScreenState
         false;
       });
 
-      _showMessage(
-        e
-            .toString()
-            .replaceFirst(
-          'Exception: ',
-          '',
+      showMessage(
+        cleanError(
+          e,
         ),
       );
     }
   }
 
   // ============================================================
-  // AI SMART ASSIST
+  // DOWNLOAD STORED VIDEO TO TEMP FILE
+  //
+  // Existing videos are in private Supabase Storage.
+  //
+  // VideoEvidenceAiService expects a File.
+  //
+  // signed URL
+  //      ↓
+  // temporary local video
+  //      ↓
+  // video AI
+  //      ↓
+  // delete temporary file
   // ============================================================
 
-  Future<void> _runAiAssist() async {
-    if (analyzingAi ||
-        saving ||
-        editingEvidence) {
-      return;
-    }
+  Future<File> downloadVideoToTemp(
+      EditableReportEvidence item,
+      ) async {
+    final String signedUrl =
+        item.signedUrl
+            ?.trim() ??
+            '';
 
-    // ----------------------------------------------------------
-    // LOCAL QUALITY VALIDATION FIRST
-    // ----------------------------------------------------------
-
-    if (!_formKey.currentState!
-        .validate()) {
-      _showMessage(
-        'Please correct the highlighted report information before using Smart Assist.',
+    if (signedUrl.isEmpty) {
+      throw Exception(
+        'Unable to access this stored video for AI analysis.',
       );
-
-      return;
     }
 
-    final List<EditableReportEvidence>
-    images =
-    evidence
-        .where(
-          (item) =>
-      item.isImage &&
-          item.sourceTable ==
-              ReportEditEvidenceService
-                  .reportImagesTable,
-    )
-        .toList();
-
-    if (images.isEmpty) {
-      _showMessage(
-        'Smart Assist needs at least one evidence image.',
-      );
-
-      return;
-    }
-
-    setState(() {
-      analyzingAi =
-      true;
-
-      aiResult =
-      null;
-
-      aiSuggestionsApplied =
-      false;
-    });
+    final HttpClient client =
+    HttpClient();
 
     try {
-      ReportImageAiAnalysis?
-      selectedAnalysis;
+      final HttpClientRequest request =
+      await client.getUrl(
+        Uri.parse(
+          signedUrl,
+        ),
+      );
 
-      // ========================================================
-      // ANALYSE EACH STORED IMAGE
-      //
-      // We keep the strongest useful result for the citizen
-      // review panel.
-      // ========================================================
+      final HttpClientResponse response =
+      await request.close();
 
-      for (final EditableReportEvidence
-      image in images) {
-        final ReportImageAiAnalysis
-        result =
-        await aiService
-            .analyzeImage(
-          reportImageId:
-          image.id,
+      if (response.statusCode <
+          200 ||
+          response.statusCode >=
+              300) {
+        throw Exception(
+          'Unable to download stored video '
+              '(HTTP ${response.statusCode}).',
+        );
+      }
+
+      final String lowerPath =
+      item.storagePath
+          .toLowerCase();
+
+      String extension =
+          '.mp4';
+
+      if (lowerPath.endsWith(
+        '.mov',
+      )) {
+        extension =
+        '.mov';
+      } else if (lowerPath.endsWith(
+        '.m4v',
+      )) {
+        extension =
+        '.m4v';
+      }
+
+      final File temporaryVideo =
+      File(
+        '${Directory.systemTemp.path}'
+            '${Platform.pathSeparator}'
+            'smartcity_edit_video_'
+            '${item.id}_'
+            '${DateTime.now().millisecondsSinceEpoch}'
+            '$extension',
+      );
+
+      final IOSink sink =
+      temporaryVideo.openWrite();
+
+      await response.pipe(
+        sink,
+      );
+
+      if (!await temporaryVideo.exists() ||
+          await temporaryVideo.length() <=
+              0) {
+        throw Exception(
+          'Downloaded video is empty.',
+        );
+      }
+
+      return temporaryVideo;
+    } finally {
+      client.close(
+        force:
+        true,
+      );
+    }
+  }
+
+  // ============================================================
+  // ANALYSE ONE IMAGE
+  // ============================================================
+
+  Future<bool> analyzeSingleImage(
+      EditableReportEvidence item, {
+        bool rebuildFinal = false,
+      }) async {
+    if (!item.isImage) {
+      return false;
+    }
+
+    final String key =
+    evidenceKey(
+      item,
+    );
+
+    // Saved-image AI uses report_images.id.
+    if (item.sourceTable !=
+        ReportEditEvidenceService
+            .reportImagesTable) {
+      if (mounted) {
+        setState(() {
+          imageAnalysisErrors[key] =
+          'This image is not stored in report_images and '
+              'cannot use the current saved-image AI pipeline.';
+        });
+      }
+
+      return false;
+    }
+
+    if (mounted) {
+      setState(() {
+        analyzingEvidenceKey =
+            key;
+
+        imageAnalysisErrors.remove(
+          key,
         );
 
-        selectedAnalysis =
-            _preferAiResult(
-              selectedAnalysis,
-              result,
-            );
+        imageAnalyses.remove(
+          key,
+        );
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+    }
+
+    try {
+      final ReportImageAiAnalysis result =
+      await aiService.analyzeImage(
+        reportImageId:
+        item.id,
+      );
+
+      if (!mounted) {
+        return false;
       }
+
+      setState(() {
+        imageAnalyses[key] =
+            result;
+      });
+
+      if (rebuildFinal) {
+        await combineAllAnalyses();
+      }
+
+      return true;
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          imageAnalysisErrors[key] =
+              cleanError(
+                e,
+              );
+        });
+      }
+
+      return false;
+    } finally {
+      if (mounted &&
+          analyzingEvidenceKey ==
+              key) {
+        setState(() {
+          analyzingEvidenceKey =
+          null;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // ANALYSE ONE VIDEO
+  // ============================================================
+
+  Future<bool> analyzeSingleVideo(
+      EditableReportEvidence item, {
+        File? localFile,
+        bool rebuildFinal = false,
+      }) async {
+    if (!item.isVideo) {
+      return false;
+    }
+
+    final String key =
+    evidenceKey(
+      item,
+    );
+
+    if (mounted) {
+      setState(() {
+        analyzingEvidenceKey =
+            key;
+
+        videoAnalysisErrors.remove(
+          key,
+        );
+
+        videoAnalyses.remove(
+          key,
+        );
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+    }
+
+    File? temporaryFile;
+
+    try {
+      final File videoFile;
+
+      if (localFile !=
+          null &&
+          await localFile.exists()) {
+        videoFile =
+            localFile;
+      } else {
+        temporaryFile =
+        await downloadVideoToTemp(
+          item,
+        );
+
+        videoFile =
+            temporaryFile;
+      }
+
+      final ReportVideoAiAnalysis result =
+      await videoAiService.analyzeLocalVideo(
+        videoFile:
+        videoFile,
+        userCategory:
+        selectedCategory,
+        userPriority:
+        selectedPriority,
+        userTitle:
+        titleController.text
+            .trim(),
+        userDescription:
+        descriptionController.text
+            .trim(),
+      );
+
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        videoAnalyses[key] =
+            result;
+      });
+
+      if (rebuildFinal) {
+        await combineAllAnalyses();
+      }
+
+      return true;
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          videoAnalysisErrors[key] =
+              cleanError(
+                e,
+              );
+        });
+      }
+
+      return false;
+    } finally {
+      if (temporaryFile !=
+          null) {
+        try {
+          if (await temporaryFile.exists()) {
+            await temporaryFile.delete();
+          }
+        } catch (_) {
+          // Temp-file cleanup should never block report flow.
+        }
+      }
+
+      if (mounted &&
+          analyzingEvidenceKey ==
+              key) {
+        setState(() {
+          analyzingEvidenceKey =
+          null;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // IMAGE ANALYSIS PAYLOAD
+  // ============================================================
+
+  Map<String, dynamic> imageAnalysisPayload(
+      EditableReportEvidence item,
+      ReportImageAiAnalysis analysis,
+      ) {
+    return <String, dynamic>{
+      ...analysis.toJson(),
+
+      'source_evidence_id':
+      item.id,
+
+      'evidence_type':
+      'image',
+    };
+  }
+
+  // ============================================================
+  // VIDEO ANALYSIS PAYLOAD
+  // ============================================================
+
+  Map<String, dynamic> videoAnalysisPayload(
+      EditableReportEvidence item,
+      ReportVideoAiAnalysis analysis,
+      ) {
+    return <String, dynamic>{
+      'source_evidence_id':
+      item.id,
+
+      'evidence_type':
+      'video',
+
+      'ai_status':
+      analysis.aiStatus,
+
+      'issue_detected':
+      analysis.issueDetected,
+
+      'category':
+      analysis.category,
+
+      'subcategory':
+      analysis.subcategory,
+
+      'severity':
+      analysis.severity,
+
+      'confidence':
+      analysis.confidence,
+
+      'description':
+      analysis.description,
+
+      'evidence_quality':
+      analysis.evidenceQuality,
+
+      'temporal_consistency':
+      analysis.temporalConsistency,
+
+      'useful_frame_count':
+      analysis.usefulFrameCount,
+
+      'analyzed_frame_count':
+      analysis.analyzedFrameCount,
+
+      'category_matches_user':
+      analysis.categoryMatchesUser,
+
+      'priority_change_recommended':
+      analysis.priorityChangeRecommended,
+
+      'recommended_priority':
+      analysis.recommendedPriority,
+
+      'suggested_title':
+      analysis.suggestedTitle,
+
+      'suggested_description':
+      analysis.suggestedDescription,
+
+      'report_quality':
+      analysis.reportQuality,
+
+      'report_sufficient':
+      analysis.reportSufficient,
+
+      'safety_concern':
+      analysis.safetyConcern,
+
+      'missing_information':
+      analysis.missingInformation,
+
+      'summary':
+      analysis.summary,
+
+      'limitation_notice':
+      analysis.limitationNotice,
+
+      'analyzed_at':
+      analysis.analyzedAt
+          ?.toUtc()
+          .toIso8601String(),
+    };
+  }
+
+  // ============================================================
+  // FINAL COMBINED IMAGE + VIDEO ANALYSIS
+  // ============================================================
+
+  Future<void> combineAllAnalyses() async {
+    if (combiningAnalyses) {
+      return;
+    }
+
+    final List<Map<String, dynamic>>
+    imagePayloads =
+    <Map<String, dynamic>>[];
+
+    final List<Map<String, dynamic>>
+    videoPayloads =
+    <Map<String, dynamic>>[];
+
+    final List<String>
+    sourceEvidenceIds =
+    <String>[];
+
+    // ==========================================================
+    // ONLY CURRENT EVIDENCE
+    //
+    // Deleted evidence must never remain in final AI input.
+    // ==========================================================
+
+    for (final EditableReportEvidence item
+    in evidence) {
+      final String key =
+      evidenceKey(
+        item,
+      );
+
+      if (item.isImage) {
+        final ReportImageAiAnalysis? analysis =
+        imageAnalyses[key];
+
+        if (analysis !=
+            null) {
+          imagePayloads.add(
+            imageAnalysisPayload(
+              item,
+              analysis,
+            ),
+          );
+
+          sourceEvidenceIds.add(
+            item.id,
+          );
+        }
+      }
+
+      if (item.isVideo) {
+        final ReportVideoAiAnalysis? analysis =
+        videoAnalyses[key];
+
+        if (analysis !=
+            null) {
+          videoPayloads.add(
+            videoAnalysisPayload(
+              item,
+              analysis,
+            ),
+          );
+
+          sourceEvidenceIds.add(
+            item.id,
+          );
+        }
+      }
+    }
+
+    if (imagePayloads.isEmpty &&
+        videoPayloads.isEmpty) {
+      if (mounted) {
+        setState(() {
+          finalAiAnalysis =
+          null;
+
+          finalAnalysisError =
+          'No successful evidence AI result is available to combine.';
+        });
+      }
+
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        combiningAnalyses =
+        true;
+
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+        null;
+
+        aiSuggestionsApplied =
+        false;
+      });
+    }
+
+    try {
+      // ========================================================
+      // EDGE FUNCTION
+      //
+      // Latest function supports:
+      //
+      // image-only
+      // video-only
+      // mixed evidence
+      // ========================================================
+
+      final FunctionResponse response =
+      await supabase.functions.invoke(
+        'combine-report-ai-analysis',
+
+        body:
+        <String, dynamic>{
+          'analysis_mode':
+          'combine_analysis',
+
+          // ====================================================
+          // CURRENT EDITED REPORT
+          // ====================================================
+
+          'report_context':
+          <String, dynamic>{
+            'category':
+            selectedCategory,
+
+            'priority':
+            selectedPriority,
+
+            'title':
+            titleController.text
+                .trim(),
+
+            'description':
+            descriptionController.text
+                .trim(),
+
+            'address':
+            addressController.text
+                .trim(),
+
+            'landmark':
+            landmarkController.text
+                .trim(),
+
+            'latitude':
+            latitude,
+
+            'longitude':
+            longitude,
+          },
+
+          // ====================================================
+          // MULTI-PHOTO AI
+          // ====================================================
+
+          'image_analyses':
+          imagePayloads,
+
+          // ====================================================
+          // MULTI-VIDEO AI
+          // ====================================================
+
+          'video_analyses':
+          videoPayloads,
+        },
+      );
+
+      final dynamic rawData =
+          response.data;
+
+      if (rawData is! Map) {
+        throw Exception(
+          'Final Smart Assist returned an invalid response.',
+        );
+      }
+
+      final Map<String, dynamic> data =
+      Map<String, dynamic>.from(
+        rawData,
+      );
+
+      final String error =
+          data['error']
+              ?.toString()
+              .trim() ??
+              '';
+
+      if (error.isNotEmpty) {
+        throw Exception(
+          error,
+        );
+      }
+
+      final ReportFinalAiAnalysis result =
+      ReportFinalAiAnalysis.fromAiResult(
+        data,
+
+        // Current model stores image count.
+        analyzedImageCount:
+        imagePayloads.length,
+
+        // Includes both image + video evidence IDs.
+        sourceEvidenceIds:
+        sourceEvidenceIds
+            .toSet()
+            .toList(),
+      ).copyWith(
+        suggestionsApplied:
+        false,
+
+        reviewedByUser:
+        false,
+
+        originalUserCategory:
+        widget.report.category,
+
+        originalUserPriority:
+        widget.report.priority,
+
+        originalUserTitle:
+        widget.report.title,
+
+        originalUserDescription:
+        widget.report.description,
+      );
 
       if (!mounted) {
         return;
       }
 
       setState(() {
-        aiResult =
-            selectedAnalysis;
+        finalAiAnalysis =
+            result;
 
-        analyzingAi =
-        false;
+        finalAnalysisError =
+        null;
       });
     } catch (e) {
       if (!mounted) {
@@ -1154,104 +2497,281 @@ class _EditReportScreenState
       }
 
       setState(() {
-        analyzingAi =
-        false;
+        finalAiAnalysis =
+        null;
+
+        finalAnalysisError =
+            cleanError(
+              e,
+            );
       });
-
-      _showMessage(
-        e
-            .toString()
-            .replaceFirst(
-          'Exception: ',
-          '',
-        ),
-      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          combiningAnalyses =
+          false;
+        });
+      }
     }
   }
 
   // ============================================================
-  // PICK BEST AI RESULT
-  // ============================================================
-
-  ReportImageAiAnalysis _preferAiResult(
-      ReportImageAiAnalysis? current,
-      ReportImageAiAnalysis incoming,
-      ) {
-    if (current ==
-        null) {
-      return incoming;
-    }
-
-    int score(
-        ReportImageAiAnalysis item,
-        ) {
-      int value =
-      0;
-
-      if (item.issueDetected ==
-          true) {
-        value +=
-        4;
-      }
-
-      if ((item.suggestedTitle ??
-          '')
-          .trim()
-          .isNotEmpty) {
-        value +=
-        3;
-      }
-
-      if ((item.suggestedDescription ??
-          '')
-          .trim()
-          .isNotEmpty) {
-        value +=
-        3;
-      }
-
-      if (item.priorityChangeRecommended ==
-          true) {
-        value +=
-        2;
-      }
-
-      if (item.categoryMatchesUser ==
-          false) {
-        value +=
-        2;
-      }
-
-      if (item.reportSufficient ==
-          false) {
-        value +=
-        2;
-      }
-
-      return value;
-    }
-
-    return score(
-      incoming,
-    ) >
-        score(
-          current,
-        )
-        ? incoming
-        : current;
-  }
-
-  // ============================================================
-  // APPLY AI SUGGESTIONS
+  // ANALYSE ALL EVIDENCE
   //
-  // IMPORTANT:
-  // AI NEVER SILENTLY OVERWRITES USER DATA.
+  // IMAGE 1 → AI
+  // IMAGE 2 → AI
+  // IMAGE 3 → AI
+  //
+  // VIDEO 1 → VIDEO AI
+  // VIDEO 2 → VIDEO AI
+  //
+  // Successful results
+  //      ↓
+  // Final Combined Analysis
+  //
+  // Failure of one evidence item does not stop others.
   // ============================================================
 
-  Future<void> _applyAiSuggestions() async {
-    final ReportImageAiAnalysis?
-    result =
-        aiResult;
+  Future<void> runAiAssist() async {
+    if (isBusy) {
+      return;
+    }
+
+    FocusScope.of(
+      context,
+    ).unfocus();
+
+    // ==========================================================
+    // REPORT TEXT VALIDATION
+    // ==========================================================
+
+    if (!formKey.currentState!
+        .validate()) {
+      showMessage(
+        'Please correct the highlighted report information '
+            'before using Smart Assist.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // CATEGORY
+    // ==========================================================
+
+    if (!categories.contains(
+      selectedCategory,
+    )) {
+      showMessage(
+        'Please select a valid issue category.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // PRIORITY
+    // ==========================================================
+
+    if (!priorities.contains(
+      selectedPriority,
+    )) {
+      showMessage(
+        'Please select a valid priority level.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // LOCATION
+    // ==========================================================
+
+    final bool locationReady =
+    await ensureValidLocation();
+
+    if (!locationReady ||
+        !mounted) {
+      showMessage(
+        'Please confirm a valid map location before using Smart Assist.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // EVIDENCE
+    // ==========================================================
+
+    if (evidence.isEmpty) {
+      showMessage(
+        'Smart Assist needs at least one evidence photo or video.',
+      );
+
+      return;
+    }
+
+    final List<EditableReportEvidence> images =
+    evidence
+        .where(
+          (item) =>
+      item.isImage,
+    )
+        .take(
+      maxAiImages,
+    )
+        .toList();
+
+    final List<EditableReportEvidence> videos =
+    evidence
+        .where(
+          (item) =>
+      item.isVideo,
+    )
+        .take(
+      maxAiVideos,
+    )
+        .toList();
+
+    setState(() {
+      analyzingAi =
+      true;
+
+      imageAnalyses.clear();
+
+      imageAnalysisErrors.clear();
+
+      videoAnalyses.clear();
+
+      videoAnalysisErrors.clear();
+
+      finalAiAnalysis =
+      null;
+
+      finalAnalysisError =
+      null;
+
+      aiSuggestionsApplied =
+      false;
+    });
+
+    int successCount =
+    0;
+
+    try {
+      // ========================================================
+      // MULTIPLE PHOTO ANALYSIS
+      // ========================================================
+
+      for (final EditableReportEvidence image
+      in images) {
+        if (!mounted) {
+          return;
+        }
+
+        final bool successful =
+        await analyzeSingleImage(
+          image,
+          rebuildFinal:
+          false,
+        );
+
+        if (successful) {
+          successCount++;
+        }
+
+        // Reduce burst requests.
+        await Future<void>.delayed(
+          const Duration(
+            milliseconds:
+            300,
+          ),
+        );
+      }
+
+      // ========================================================
+      // MULTIPLE VIDEO ANALYSIS
+      // ========================================================
+
+      for (final EditableReportEvidence video
+      in videos) {
+        if (!mounted) {
+          return;
+        }
+
+        final bool successful =
+        await analyzeSingleVideo(
+          video,
+          rebuildFinal:
+          false,
+        );
+
+        if (successful) {
+          successCount++;
+        }
+
+        await Future<void>.delayed(
+          const Duration(
+            milliseconds:
+            300,
+          ),
+        );
+      }
+
+      // ========================================================
+      // FINAL COMBINE
+      // ========================================================
+
+      if (successCount >
+          0) {
+        await combineAllAnalyses();
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      if (successCount ==
+          0) {
+        showMessage(
+          'Smart Assist could not analyse the current evidence. '
+              'Your report and evidence remain safe and editable.',
+        );
+      } else if (finalAiAnalysis ==
+          null) {
+        showMessage(
+          '$successCount evidence item(s) were analysed, '
+              'but the final combined assessment is unavailable. '
+              'You can retry the combine step.',
+        );
+      } else {
+        showMessage(
+          '$successCount evidence item(s) analysed. '
+              'Review the final combined Smart Assist result.',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          analyzingAi =
+          false;
+
+          analyzingEvidenceKey =
+          null;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // APPLY FINAL AI
+  //
+  // Only FINAL COMBINED result can modify citizen fields.
+  // ============================================================
+
+  Future<void> applyFinalAiSuggestions() async {
+    final ReportFinalAiAnalysis? result =
+        finalAiAnalysis;
 
     if (result ==
         null) {
@@ -1262,9 +2782,10 @@ class _EditReportScreenState
     await showDialog<bool>(
       context:
       context,
-
       builder:
-          (dialogContext) {
+          (
+          dialogContext,
+          ) {
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
@@ -1286,7 +2807,7 @@ class _EditReportScreenState
               Expanded(
                 child:
                 Text(
-                  'Apply AI Suggestions?',
+                  'Apply Final AI Suggestions?',
                 ),
               ),
             ],
@@ -1294,9 +2815,9 @@ class _EditReportScreenState
 
           content:
           const Text(
-            'Smart Assist will update only the fields for which '
-                'it has a usable recommendation. You can continue editing '
-                'everything before saving.',
+            'Only the final combined image/video assessment will be used. '
+                'Smart Assist will update only fields with a usable recommendation. '
+                'Nothing is changed until you approve, and you can continue editing afterward.',
             style:
             TextStyle(
               color:
@@ -1316,7 +2837,7 @@ class _EditReportScreenState
                   ),
               child:
               const Text(
-                'Cancel',
+                'Keep Mine',
               ),
             ),
 
@@ -1329,7 +2850,7 @@ class _EditReportScreenState
                   ),
               child:
               const Text(
-                'Apply',
+                'Apply Final AI',
               ),
             ),
           ],
@@ -1337,9 +2858,32 @@ class _EditReportScreenState
       },
     );
 
+    // ==========================================================
+    // KEEP CITIZEN DATA
+    // ==========================================================
+
     if (approved !=
-        true ||
-        !mounted) {
+        true) {
+      if (mounted &&
+          finalAiAnalysis !=
+              null) {
+        setState(() {
+          finalAiAnalysis =
+              finalAiAnalysis!
+                  .copyWith(
+                reviewedByUser:
+                true,
+
+                suggestionsApplied:
+                false,
+              );
+        });
+      }
+
+      return;
+    }
+
+    if (!mounted) {
       return;
     }
 
@@ -1364,15 +2908,27 @@ class _EditReportScreenState
             '';
 
     setState(() {
+      // ========================================================
+      // TITLE
+      // ========================================================
+
       if (suggestedTitle.isNotEmpty) {
         titleController.text =
             suggestedTitle;
       }
 
+      // ========================================================
+      // DESCRIPTION
+      // ========================================================
+
       if (suggestedDescription.isNotEmpty) {
         descriptionController.text =
             suggestedDescription;
       }
+
+      // ========================================================
+      // CATEGORY
+      // ========================================================
 
       if (result.categoryMatchesUser ==
           false &&
@@ -1382,6 +2938,10 @@ class _EditReportScreenState
         selectedCategory =
             suggestedCategory;
       }
+
+      // ========================================================
+      // PRIORITY
+      // ========================================================
 
       if (result.priorityChangeRecommended ==
           true &&
@@ -1394,28 +2954,122 @@ class _EditReportScreenState
 
       aiSuggestionsApplied =
       true;
+
+      finalAiAnalysis =
+          result.copyWith(
+            reviewedByUser:
+            true,
+
+            suggestionsApplied:
+            true,
+          );
     });
 
     // ==========================================================
-    // IMPORTANT
-    //
-    // Validate AI output using EXACTLY the same local rules.
-    // AI output is not automatically trusted.
+    // AI OUTPUT IS VALIDATED AGAIN
     // ==========================================================
 
     final bool valid =
-    _formKey.currentState!
+    formKey.currentState!
         .validate();
 
     if (!valid) {
-      _showMessage(
+      showMessage(
         'Some AI suggestions still need manual editing before they can be saved.',
       );
     } else {
-      _showMessage(
-        'AI suggestions applied. Review or edit them before saving.',
+      showMessage(
+        'Final AI suggestions applied. Review or edit them before saving.',
       );
     }
+  }
+
+  // ============================================================
+  // KEEP CURRENT CITIZEN INFORMATION
+  // ============================================================
+
+  void keepCitizenValues() {
+    if (finalAiAnalysis ==
+        null) {
+      return;
+    }
+
+    setState(() {
+      aiSuggestionsApplied =
+      false;
+
+      finalAiAnalysis =
+          finalAiAnalysis!
+              .copyWith(
+            reviewedByUser:
+            true,
+
+            suggestionsApplied:
+            false,
+          );
+    });
+
+    showMessage(
+      'Your current report information remains selected.',
+    );
+  }
+
+  // ============================================================
+  // SAVE FINAL COMBINED AI
+  //
+  // Uses same report_final_ai_analysis structure as Create Report.
+  // ============================================================
+
+  Future<void> saveFinalAiAnalysis() async {
+    final ReportFinalAiAnalysis? result =
+        finalAiAnalysis;
+
+    if (result ==
+        null) {
+      return;
+    }
+
+    final Map<String, dynamic> data =
+    result.toDatabaseJson(
+      reportId:
+      widget.report.id,
+    );
+
+    data['report_id'] =
+        widget.report.id;
+
+    data['ai_status'] =
+    result.aiStatus ==
+        'failed'
+        ? 'failed'
+        : 'completed';
+
+    data['analyzed_image_count'] =
+        imageAnalyses.length;
+
+    // Contains image AND video evidence IDs.
+    data['source_evidence_ids'] =
+        result.sourceEvidenceIds;
+
+    data['analyzed_at'] ??=
+        DateTime.now()
+            .toUtc()
+            .toIso8601String();
+
+    data['updated_at'] =
+        DateTime.now()
+            .toUtc()
+            .toIso8601String();
+
+    await supabase
+        .from(
+      'report_final_ai_analysis',
+    )
+        .upsert(
+      data,
+      onConflict:
+      'report_id',
+    );
   }
 
   // ============================================================
@@ -1423,9 +3077,7 @@ class _EditReportScreenState
   // ============================================================
 
   Future<void> saveReport() async {
-    if (saving ||
-        editingEvidence ||
-        analyzingAi) {
+    if (isBusy) {
       return;
     }
 
@@ -1434,12 +3086,12 @@ class _EditReportScreenState
     ).unfocus();
 
     // ==========================================================
-    // SAME LOCAL VALIDATION AS CREATE REPORT
+    // MEANINGFUL TEXT
     // ==========================================================
 
-    if (!_formKey.currentState!
+    if (!formKey.currentState!
         .validate()) {
-      _showMessage(
+      showMessage(
         'Please correct the highlighted information before saving.',
       );
 
@@ -1447,11 +3099,11 @@ class _EditReportScreenState
     }
 
     // ==========================================================
-    // EVIDENCE VALIDATION
+    // EVIDENCE
     // ==========================================================
 
     if (evidence.isEmpty) {
-      _showMessage(
+      showMessage(
         'Please keep at least one evidence photo or video.',
       );
 
@@ -1459,24 +3111,44 @@ class _EditReportScreenState
     }
 
     // ==========================================================
-    // CATEGORY / PRIORITY VALIDATION
+    // CATEGORY
     // ==========================================================
 
     if (!categories.contains(
       selectedCategory,
     )) {
-      _showMessage(
+      showMessage(
         'Please select a valid issue category.',
       );
 
       return;
     }
 
+    // ==========================================================
+    // PRIORITY
+    // ==========================================================
+
     if (!priorities.contains(
       selectedPriority,
     )) {
-      _showMessage(
+      showMessage(
         'Please select a valid priority level.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // LOCATION
+    // ==========================================================
+
+    final bool locationReady =
+    await ensureValidLocation();
+
+    if (!locationReady ||
+        !mounted) {
+      showMessage(
+        'Please confirm a valid map location before saving.',
       );
 
       return;
@@ -1488,6 +3160,10 @@ class _EditReportScreenState
     });
 
     try {
+      // ========================================================
+      // SAVE CURRENT EDITED REPORT
+      // ========================================================
+
       await reportService.updateReport(
         reportId:
         widget.report.id,
@@ -1514,12 +3190,27 @@ class _EditReportScreenState
         landmarkController.text
             .trim(),
 
+        // ======================================================
+        // IMPORTANT:
+        //
+        // Use CURRENT edited coordinates, not widget.report.
+        // ======================================================
+
         latitude:
-        widget.report.latitude,
+        latitude,
 
         longitude:
-        widget.report.longitude,
+        longitude,
       );
+
+      // ========================================================
+      // SAVE FINAL AI ASSESSMENT
+      // ========================================================
+
+      if (finalAiAnalysis !=
+          null) {
+        await saveFinalAiAnalysis();
+      }
 
       if (!mounted) {
         return;
@@ -1547,7 +3238,9 @@ class _EditReportScreenState
                 child:
                 Text(
                   aiSuggestionsApplied
-                      ? 'Report updated successfully with reviewed AI assistance.'
+                      ? 'Report updated successfully with reviewed combined AI assistance.'
+                      : finalAiAnalysis != null
+                      ? 'Report updated successfully with reviewed AI assessment.'
                       : 'Report updated successfully.',
                 ),
               ),
@@ -1561,12 +3254,9 @@ class _EditReportScreenState
         true,
       );
     } catch (e) {
-      _showMessage(
-        e
-            .toString()
-            .replaceFirst(
-          'Exception: ',
-          '',
+      showMessage(
+        cleanError(
+          e,
         ),
       );
     } finally {
@@ -1583,7 +3273,7 @@ class _EditReportScreenState
   // MESSAGE
   // ============================================================
 
-  void _showMessage(
+  void showMessage(
       String message,
       ) {
     if (!mounted) {
@@ -1615,9 +3305,7 @@ class _EditReportScreenState
       BuildContext context,
       ) {
     final bool busy =
-        saving ||
-            editingEvidence ||
-            analyzingAi;
+        isBusy;
 
     return Scaffold(
       backgroundColor:
@@ -1639,7 +3327,7 @@ class _EditReportScreenState
                 child:
                 Form(
                   key:
-                  _formKey,
+                  formKey,
 
                   autovalidateMode:
                   AutovalidateMode
@@ -1711,19 +3399,20 @@ class _EditReportScreenState
                                   TextStyle(
                                     fontSize:
                                     22,
+
                                     fontWeight:
                                     FontWeight.bold,
                                   ),
                                 ),
 
                                 Text(
-                                  widget.report
-                                      .referenceNumber,
+                                  widget.report.referenceNumber,
 
                                   style:
                                   const TextStyle(
                                     color:
                                     AppColors.textSecondary,
+
                                     fontSize:
                                     11,
                                   ),
@@ -1737,6 +3426,7 @@ class _EditReportScreenState
                             const EdgeInsets.symmetric(
                               horizontal:
                               10,
+
                               vertical:
                               6,
                             ),
@@ -1746,8 +3436,7 @@ class _EditReportScreenState
                               color:
                               const Color(
                                 0xFFFFC62E,
-                              )
-                                  .withOpacity(
+                              ).withOpacity(
                                 0.10,
                               ),
 
@@ -1760,14 +3449,17 @@ class _EditReportScreenState
                             child:
                             const Text(
                               'PENDING',
+
                               style:
                               TextStyle(
                                 color:
                                 Color(
                                   0xFFFFC62E,
                                 ),
+
                                 fontSize:
                                 9,
+
                                 fontWeight:
                                 FontWeight.w700,
                               ),
@@ -1781,16 +3473,14 @@ class _EditReportScreenState
                         20,
                       ),
 
-                      // =================================================
-                      // EDIT INFORMATION
-                      // =================================================
-
                       _InfoCard(
                         icon:
                         Icons.edit_note_outlined,
+
                         text:
                         'You can update this report while it is pending review. '
-                            'All edited text must remain meaningful and usable.',
+                            'Text must remain meaningful, location must resolve to map coordinates, '
+                            'and Smart Assist can review multiple photos and videos.',
                       ),
 
                       const SizedBox(
@@ -1799,15 +3489,27 @@ class _EditReportScreenState
                       ),
 
                       // =================================================
-                      // AI SMART ASSIST
+                      // FINAL COMBINED SMART ASSIST
                       // =================================================
 
-                      _AiEditCard(
+                      _CombinedAiCard(
                         analyzing:
                         analyzingAi,
 
+                        combining:
+                        combiningAnalyses,
+
+                        imageCount:
+                        imageAnalyses.length,
+
+                        videoCount:
+                        videoAnalyses.length,
+
                         result:
-                        aiResult,
+                        finalAiAnalysis,
+
+                        error:
+                        finalAnalysisError,
 
                         suggestionsApplied:
                         aiSuggestionsApplied,
@@ -1815,20 +3517,38 @@ class _EditReportScreenState
                         onAnalyze:
                         busy
                             ? null
-                            : _runAiAssist,
+                            : runAiAssist,
+
+                        onCombine:
+                        busy ||
+                            successfulAiCount ==
+                                0
+                            ? null
+                            : combineAllAnalyses,
 
                         onApply:
                         busy ||
-                            aiResult ==
+                            finalAiAnalysis ==
                                 null
                             ? null
-                            : _applyAiSuggestions,
+                            : applyFinalAiSuggestions,
+
+                        onKeepMine:
+                        busy ||
+                            finalAiAnalysis ==
+                                null
+                            ? null
+                            : keepCitizenValues,
                       ),
 
                       const SizedBox(
                         height:
                         24,
                       ),
+
+                      // =================================================
+                      // CATEGORY
+                      // =================================================
 
                       const _Label(
                         'ISSUE CATEGORY',
@@ -1855,9 +3575,10 @@ class _EditReportScreenState
                               (
                               category,
                               ) {
-                            return DropdownMenuItem(
+                            return DropdownMenuItem<String>(
                               value:
                               category,
+
                               child:
                               Text(
                                 category,
@@ -1873,16 +3594,24 @@ class _EditReportScreenState
                             : (
                             value,
                             ) {
-                          if (value !=
+                          if (value ==
                               null) {
-                            setState(() {
-                              selectedCategory =
-                                  value;
-
-                              aiSuggestionsApplied =
-                              false;
-                            });
+                            return;
                           }
+
+                          setState(() {
+                            selectedCategory =
+                                value;
+
+                            finalAiAnalysis =
+                            null;
+
+                            finalAnalysisError =
+                            null;
+
+                            aiSuggestionsApplied =
+                            false;
+                          });
                         },
                       ),
 
@@ -1890,6 +3619,10 @@ class _EditReportScreenState
                         height:
                         20,
                       ),
+
+                      // =================================================
+                      // PRIORITY
+                      // =================================================
 
                       const _Label(
                         'PRIORITY',
@@ -1916,9 +3649,10 @@ class _EditReportScreenState
                               (
                               priority,
                               ) {
-                            return DropdownMenuItem(
+                            return DropdownMenuItem<String>(
                               value:
                               priority,
+
                               child:
                               Text(
                                 priority,
@@ -1934,16 +3668,24 @@ class _EditReportScreenState
                             : (
                             value,
                             ) {
-                          if (value !=
+                          if (value ==
                               null) {
-                            setState(() {
-                              selectedPriority =
-                                  value;
-
-                              aiSuggestionsApplied =
-                              false;
-                            });
+                            return;
                           }
+
+                          setState(() {
+                            selectedPriority =
+                                value;
+
+                            finalAiAnalysis =
+                            null;
+
+                            finalAnalysisError =
+                            null;
+
+                            aiSuggestionsApplied =
+                            false;
+                          });
                         },
                       ),
 
@@ -1985,19 +3727,15 @@ class _EditReportScreenState
                         ),
 
                         validator:
-                            (
-                            value,
-                            ) {
-                          return validateMeaningfulText(
-                            value ??
-                                '',
-                            fieldName:
-                            'report title',
-                            minimumLength:
-                            5,
-                            minimumWords:
-                            2,
-                          );
+                        validateTitle,
+
+                        onChanged:
+                            (_) {
+                          if (finalAiAnalysis !=
+                              null ||
+                              aiSuggestionsApplied) {
+                            invalidateFinalAi();
+                          }
                         },
                       ),
 
@@ -2041,24 +3779,20 @@ class _EditReportScreenState
                         decoration:
                         _decoration(
                           hint:
-                          'Describe the infrastructure issue clearly, including '
-                              'severity and any safety concern.',
+                          'Describe the infrastructure issue clearly, '
+                              'including severity and any safety concern.',
                         ),
 
                         validator:
-                            (
-                            value,
-                            ) {
-                          return validateMeaningfulText(
-                            value ??
-                                '',
-                            fieldName:
-                            'description',
-                            minimumLength:
-                            10,
-                            minimumWords:
-                            3,
-                          );
+                        validateDescription,
+
+                        onChanged:
+                            (_) {
+                          if (finalAiAnalysis !=
+                              null ||
+                              aiSuggestionsApplied) {
+                            invalidateFinalAi();
+                          }
                         },
                       ),
 
@@ -2072,7 +3806,7 @@ class _EditReportScreenState
                       // =================================================
 
                       const _Label(
-                        'ADDRESS',
+                        'ADDRESS & LOCATION',
                       ),
 
                       const SizedBox(
@@ -2090,15 +3824,167 @@ class _EditReportScreenState
                         maxLength:
                         250,
 
+                        textInputAction:
+                        TextInputAction.search,
+
+                        onFieldSubmitted:
+                            (_) async {
+                          await verifyTypedAddress();
+                        },
+
                         decoration:
                         _decoration(
                           hint:
                           'Issue location',
+                        ).copyWith(
+                          errorText:
+                          addressValidationError,
+
+                          errorMaxLines:
+                          3,
                         ),
 
                         validator:
-                        _validateAddress,
+                        validateAddress,
                       ),
+
+                      const SizedBox(
+                        height:
+                        10,
+                      ),
+
+                      Row(
+                        children: [
+                          Expanded(
+                            child:
+                            OutlinedButton.icon(
+                              onPressed:
+                              busy
+                                  ? null
+                                  : detectCurrentLocation,
+
+                              icon:
+                              gettingLocation
+                                  ? const SizedBox(
+                                width:
+                                16,
+
+                                height:
+                                16,
+
+                                child:
+                                CircularProgressIndicator(
+                                  strokeWidth:
+                                  2,
+                                ),
+                              )
+                                  : const Icon(
+                                Icons.gps_fixed,
+                              ),
+
+                              label:
+                              Text(
+                                gettingLocation
+                                    ? 'Detecting...'
+                                    : 'Current GPS',
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width:
+                            10,
+                          ),
+
+                          Expanded(
+                            child:
+                            OutlinedButton.icon(
+                              onPressed:
+                              busy
+                                  ? null
+                                  : openMapPicker,
+
+                              icon:
+                              const Icon(
+                                Icons.map_outlined,
+                              ),
+
+                              label:
+                              const Text(
+                                'Choose Map',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height:
+                        10,
+                      ),
+
+                      SizedBox(
+                        width:
+                        double.infinity,
+
+                        child:
+                        OutlinedButton.icon(
+                          onPressed:
+                          busy
+                              ? null
+                              : verifyTypedAddress,
+
+                          icon:
+                          validatingAddress
+                              ? const SizedBox(
+                            width:
+                            16,
+
+                            height:
+                            16,
+
+                            child:
+                            CircularProgressIndicator(
+                              strokeWidth:
+                              2,
+                            ),
+                          )
+                              : const Icon(
+                            Icons.search_rounded,
+                          ),
+
+                          label:
+                          Text(
+                            validatingAddress
+                                ? 'Checking Address...'
+                                : 'Find Typed Address on Map',
+                          ),
+                        ),
+                      ),
+
+                      if (latitude !=
+                          null &&
+                          longitude !=
+                              null) ...[
+                        const SizedBox(
+                          height:
+                          10,
+                        ),
+
+                        _LocationStatusCard(
+                          latitude:
+                          latitude!,
+
+                          longitude:
+                          longitude!,
+
+                          accuracy:
+                          gpsAccuracy,
+
+                          source:
+                          locationVerificationStatus,
+                        ),
+                      ],
 
                       const SizedBox(
                         height:
@@ -2135,7 +4021,16 @@ class _EditReportScreenState
                         ),
 
                         validator:
-                        _validateLandmark,
+                        validateLandmark,
+
+                        onChanged:
+                            (_) {
+                          if (finalAiAnalysis !=
+                              null ||
+                              aiSuggestionsApplied) {
+                            invalidateFinalAi();
+                          }
+                        },
                       ),
 
                       const SizedBox(
@@ -2144,7 +4039,7 @@ class _EditReportScreenState
                       ),
 
                       // =================================================
-                      // EVIDENCE EDITOR
+                      // EVIDENCE
                       // =================================================
 
                       _EvidenceEditor(
@@ -2160,14 +4055,57 @@ class _EditReportScreenState
                         error:
                         evidenceError,
 
+                        maxEvidenceItems:
+                        maxEvidenceItems,
+
                         onRetry:
-                        _loadEvidence,
+                        loadEvidence,
 
                         onAdd:
-                        _showAddEvidenceMenu,
+                        showAddEvidenceMenu,
 
                         onRemove:
-                        _removeEvidence,
+                        removeEvidence,
+
+                        imageAnalyses:
+                        imageAnalyses,
+
+                        imageErrors:
+                        imageAnalysisErrors,
+
+                        videoAnalyses:
+                        videoAnalyses,
+
+                        videoErrors:
+                        videoAnalysisErrors,
+
+                        analyzingEvidenceKey:
+                        analyzingEvidenceKey,
+
+                        evidenceKey:
+                        evidenceKey,
+
+                        onAnalyzeImage:
+                            (
+                            item,
+                            ) {
+                          return analyzeSingleImage(
+                            item,
+                            rebuildFinal:
+                            true,
+                          );
+                        },
+
+                        onAnalyzeVideo:
+                            (
+                            item,
+                            ) {
+                          return analyzeSingleVideo(
+                            item,
+                            rebuildFinal:
+                            true,
+                          );
+                        },
                       ),
 
                       const SizedBox(
@@ -2175,19 +4113,15 @@ class _EditReportScreenState
                         18,
                       ),
 
-                      // =================================================
-                      // QUALITY INFORMATION
-                      // =================================================
-
                       _InfoCard(
                         icon:
                         Icons.verified_user_outlined,
 
                         text:
-                        'Edited title, description, address and optional landmark '
-                            'are checked for meaningful text. AI suggestions are also '
-                            'validated before saving and never overwrite your report '
-                            'without approval.',
+                        'Each photo is analysed independently. '
+                            'Each short video is assessed using representative sampled frames. '
+                            'All successful results are then combined with the current report details. '
+                            'AI recommendations never overwrite citizen information without approval.',
                       ),
                     ],
                   ),
@@ -2239,8 +4173,7 @@ class _EditReportScreenState
                     Colors.white,
 
                     disabledBackgroundColor:
-                    AppColors.primaryDark
-                        .withOpacity(
+                    AppColors.primaryDark.withOpacity(
                       0.40,
                     ),
 
@@ -2263,12 +4196,15 @@ class _EditReportScreenState
                       ? const SizedBox(
                     width:
                     19,
+
                     height:
                     19,
+
                     child:
                     CircularProgressIndicator(
                       strokeWidth:
                       2,
+
                       color:
                       Colors.white,
                     ),
@@ -2300,6 +4236,839 @@ class _EditReportScreenState
 }
 
 // =================================================================
+// LOCATION STATUS
+// =================================================================
+
+class _LocationStatusCard
+    extends StatelessWidget {
+  final double latitude;
+
+  final double longitude;
+
+  final double? accuracy;
+
+  final String source;
+
+  const _LocationStatusCard({
+    required this.latitude,
+    required this.longitude,
+    required this.accuracy,
+    required this.source,
+  });
+
+  String get sourceLabel {
+    switch (source) {
+      case 'gps':
+        return 'Location verified from Current GPS';
+
+      case 'map':
+        return 'Location selected from map';
+
+      case 'geocoded':
+        return 'Typed address matched to map coordinates';
+
+      default:
+        return 'Saved report coordinates';
+    }
+  }
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        11,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        Colors.greenAccent.withOpacity(
+          0.05,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          11,
+        ),
+
+        border:
+        Border.all(
+          color:
+          Colors.greenAccent.withOpacity(
+            0.28,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.verified_outlined,
+
+                size:
+                17,
+
+                color:
+                Colors.greenAccent,
+              ),
+
+              const SizedBox(
+                width:
+                8,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  sourceLabel,
+
+                  style:
+                  const TextStyle(
+                    color:
+                    Colors.greenAccent,
+
+                    fontSize:
+                    10,
+
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            6,
+          ),
+
+          Text(
+            '${latitude.toStringAsFixed(6)}, '
+                '${longitude.toStringAsFixed(6)}',
+
+            style:
+            const TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              9,
+            ),
+          ),
+
+          if (accuracy !=
+              null) ...[
+            const SizedBox(
+              height:
+              4,
+            ),
+
+            Text(
+              'GPS accuracy: '
+                  '±${accuracy!.toStringAsFixed(0)} m',
+
+              style:
+              const TextStyle(
+                color:
+                AppColors.textSecondary,
+
+                fontSize:
+                9,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// =================================================================
+// FINAL COMBINED AI CARD
+// =================================================================
+
+class _CombinedAiCard
+    extends StatelessWidget {
+  final bool analyzing;
+
+  final bool combining;
+
+  final int imageCount;
+
+  final int videoCount;
+
+  final ReportFinalAiAnalysis?
+  result;
+
+  final String? error;
+
+  final bool suggestionsApplied;
+
+  final Future<void> Function()?
+  onAnalyze;
+
+  final Future<void> Function()?
+  onCombine;
+
+  final Future<void> Function()?
+  onApply;
+
+  final VoidCallback?
+  onKeepMine;
+
+  const _CombinedAiCard({
+    required this.analyzing,
+    required this.combining,
+    required this.imageCount,
+    required this.videoCount,
+    required this.result,
+    required this.error,
+    required this.suggestionsApplied,
+    required this.onAnalyze,
+    required this.onCombine,
+    required this.onApply,
+    required this.onKeepMine,
+  });
+
+  String safeValue(
+      String? value,
+      ) {
+    final String clean =
+        value?.trim() ??
+            '';
+
+    if (clean.isEmpty) {
+      return 'Not available';
+    }
+
+    return clean;
+  }
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        15,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.primary.withOpacity(
+          0.055,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          15,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.primary.withOpacity(
+            0.28,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.auto_awesome,
+
+                color:
+                AppColors.primary,
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              const Expanded(
+                child:
+                Column(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
+                  children: [
+                    Text(
+                      'AI Smart Assist',
+
+                      style:
+                      TextStyle(
+                        color:
+                        Colors.white,
+
+                        fontWeight:
+                        FontWeight.w700,
+                      ),
+                    ),
+
+                    Text(
+                      'Multi-photo + video + final combined analysis',
+
+                      style:
+                      TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        9,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              OutlinedButton(
+                onPressed:
+                analyzing ||
+                    combining
+                    ? null
+                    : onAnalyze,
+
+                child:
+                analyzing
+                    ? const SizedBox(
+                  width:
+                  16,
+
+                  height:
+                  16,
+
+                  child:
+                  CircularProgressIndicator(
+                    strokeWidth:
+                    2,
+                  ),
+                )
+                    : const Text(
+                  'Analyse All',
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            12,
+          ),
+
+          Wrap(
+            spacing:
+            8,
+
+            runSpacing:
+            8,
+
+            children: [
+              _AiCountChip(
+                icon:
+                Icons.image_outlined,
+
+                text:
+                '$imageCount photo AI',
+              ),
+
+              _AiCountChip(
+                icon:
+                Icons.movie_outlined,
+
+                text:
+                '$videoCount video AI',
+              ),
+            ],
+          ),
+
+          if (combining) ...[
+            const SizedBox(
+              height:
+              12,
+            ),
+
+            const LinearProgressIndicator(),
+
+            const SizedBox(
+              height:
+              7,
+            ),
+
+            const Text(
+              'Combining image and video evidence analyses...',
+
+              style:
+              TextStyle(
+                color:
+                AppColors.textSecondary,
+
+                fontSize:
+                9,
+              ),
+            ),
+          ],
+
+          if (error !=
+              null &&
+              error!
+                  .trim()
+                  .isNotEmpty) ...[
+            const SizedBox(
+              height:
+              12,
+            ),
+
+            Container(
+              width:
+              double.infinity,
+
+              padding:
+              const EdgeInsets.all(
+                10,
+              ),
+
+              decoration:
+              BoxDecoration(
+                color:
+                Colors.orangeAccent.withOpacity(
+                  0.06,
+                ),
+
+                borderRadius:
+                BorderRadius.circular(
+                  10,
+                ),
+
+                border:
+                Border.all(
+                  color:
+                  Colors.orangeAccent.withOpacity(
+                    0.25,
+                  ),
+                ),
+              ),
+
+              child:
+              Text(
+                error!,
+
+                style:
+                const TextStyle(
+                  color:
+                  Colors.orangeAccent,
+
+                  fontSize:
+                  9,
+
+                  height:
+                  1.4,
+                ),
+              ),
+            ),
+
+            const SizedBox(
+              height:
+              9,
+            ),
+
+            SizedBox(
+              width:
+              double.infinity,
+
+              child:
+              OutlinedButton.icon(
+                onPressed:
+                onCombine,
+
+                icon:
+                const Icon(
+                  Icons.refresh_rounded,
+
+                  size:
+                  17,
+                ),
+
+                label:
+                const Text(
+                  'Retry Final Combine',
+                ),
+              ),
+            ),
+          ],
+
+          if (result !=
+              null) ...[
+            const SizedBox(
+              height:
+              14,
+            ),
+
+            const Divider(
+              color:
+              AppColors.border,
+            ),
+
+            const SizedBox(
+              height:
+              8,
+            ),
+
+            const Row(
+              children: [
+                Icon(
+                  Icons.hub_outlined,
+
+                  size:
+                  18,
+
+                  color:
+                  AppColors.primary,
+                ),
+
+                SizedBox(
+                  width:
+                  8,
+                ),
+
+                Text(
+                  'Final Combined Analysis',
+
+                  style:
+                  TextStyle(
+                    color:
+                    Colors.white,
+
+                    fontSize:
+                    12,
+
+                    fontWeight:
+                    FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height:
+              11,
+            ),
+
+            _AiResultLine(
+              label:
+              'Issue detected',
+
+              value:
+              result!.issueDetected ==
+                  true
+                  ? 'Yes'
+                  : 'Not confirmed',
+            ),
+
+            _AiResultLine(
+              label:
+              'Final category',
+
+              value:
+              safeValue(
+                result!.category,
+              ),
+            ),
+
+            _AiResultLine(
+              label:
+              'Severity',
+
+              value:
+              safeValue(
+                result!.severity,
+              ),
+            ),
+
+            _AiResultLine(
+              label:
+              'Confidence',
+
+              value:
+              safeValue(
+                result!.confidence,
+              ),
+            ),
+
+            _AiResultLine(
+              label:
+              'Evidence quality',
+
+              value:
+              safeValue(
+                result!.evidenceQuality,
+              ),
+            ),
+
+            _AiResultLine(
+              label:
+              'Consistency',
+
+              value:
+              safeValue(
+                result!.evidenceConsistency,
+              ),
+            ),
+
+            _AiResultLine(
+              label:
+              'Report quality',
+
+              value:
+              safeValue(
+                result!.reportQuality,
+              ),
+            ),
+
+            _AiResultLine(
+              label:
+              'Report sufficient',
+
+              value:
+              result!.reportSufficient ==
+                  false
+                  ? 'Needs improvement'
+                  : 'Yes',
+            ),
+
+            if ((result!.safetyConcern ??
+                '')
+                .trim()
+                .isNotEmpty)
+              _AiResultLine(
+                label:
+                'Safety concern',
+
+                value:
+                result!.safetyConcern!,
+              ),
+
+            if (result!
+                .missingInformation
+                .isNotEmpty)
+              _AiResultLine(
+                label:
+                'Missing information',
+
+                value:
+                result!
+                    .missingInformation
+                    .join(
+                  ', ',
+                ),
+              ),
+
+            if (result!
+                .conflictingEvidence)
+              _AiResultLine(
+                label:
+                'Evidence conflict',
+
+                value:
+                safeValue(
+                  result!.conflictingEvidenceReason,
+                ),
+              ),
+
+            const SizedBox(
+              height:
+              12,
+            ),
+
+            Row(
+              children: [
+                Expanded(
+                  child:
+                  OutlinedButton(
+                    onPressed:
+                    onKeepMine,
+
+                    child:
+                    const Text(
+                      'Keep Mine',
+                    ),
+                  ),
+                ),
+
+                const SizedBox(
+                  width:
+                  9,
+                ),
+
+                Expanded(
+                  child:
+                  ElevatedButton.icon(
+                    onPressed:
+                    onApply,
+
+                    icon:
+                    Icon(
+                      suggestionsApplied
+                          ? Icons.check_circle_outline
+                          : Icons.auto_fix_high,
+
+                      size:
+                      18,
+                    ),
+
+                    label:
+                    Text(
+                      suggestionsApplied
+                          ? 'Applied'
+                          : 'Review & Apply',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          const SizedBox(
+            height:
+            9,
+          ),
+
+          const Text(
+            'AI recommendations are assistance only. '
+                'Individual image/video results never overwrite the report. '
+                'Only the final combined result can be applied after approval.',
+
+            style:
+            TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              9,
+
+              height:
+              1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =================================================================
+// AI COUNT CHIP
+// =================================================================
+
+class _AiCountChip
+    extends StatelessWidget {
+  final IconData icon;
+
+  final String text;
+
+  const _AiCountChip({
+    required this.icon,
+    required this.text,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      padding:
+      const EdgeInsets.symmetric(
+        horizontal:
+        9,
+
+        vertical:
+        6,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.background.withOpacity(
+          0.45,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          20,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.border,
+        ),
+      ),
+
+      child:
+      Row(
+        mainAxisSize:
+        MainAxisSize.min,
+
+        children: [
+          Icon(
+            icon,
+
+            size:
+            14,
+
+            color:
+            AppColors.primary,
+          ),
+
+          const SizedBox(
+            width:
+            5,
+          ),
+
+          Text(
+            text,
+
+            style:
+            const TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              9,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =================================================================
 // EVIDENCE EDITOR
 // =================================================================
 
@@ -2314,6 +5083,8 @@ class _EvidenceEditor
 
   final String? error;
 
+  final int maxEvidenceItems;
+
   final Future<void> Function()
   onRetry;
 
@@ -2324,14 +5095,50 @@ class _EvidenceEditor
       EditableReportEvidence item,
       ) onRemove;
 
+  final Map<String, ReportImageAiAnalysis>
+  imageAnalyses;
+
+  final Map<String, String>
+  imageErrors;
+
+  final Map<String, ReportVideoAiAnalysis>
+  videoAnalyses;
+
+  final Map<String, String>
+  videoErrors;
+
+  final String?
+  analyzingEvidenceKey;
+
+  final String Function(
+      EditableReportEvidence item,
+      ) evidenceKey;
+
+  final Future<bool> Function(
+      EditableReportEvidence item,
+      ) onAnalyzeImage;
+
+  final Future<bool> Function(
+      EditableReportEvidence item,
+      ) onAnalyzeVideo;
+
   const _EvidenceEditor({
     required this.evidence,
     required this.loading,
     required this.busy,
     required this.error,
+    required this.maxEvidenceItems,
     required this.onRetry,
     required this.onAdd,
     required this.onRemove,
+    required this.imageAnalyses,
+    required this.imageErrors,
+    required this.videoAnalyses,
+    required this.videoErrors,
+    required this.analyzingEvidenceKey,
+    required this.evidenceKey,
+    required this.onAnalyzeImage,
+    required this.onAnalyzeVideo,
   });
 
   @override
@@ -2374,6 +5181,7 @@ class _EvidenceEditor
             children: [
               const Icon(
                 Icons.photo_library_outlined,
+
                 color:
                 AppColors.primary,
               ),
@@ -2383,32 +5191,38 @@ class _EvidenceEditor
                 9,
               ),
 
-              const Expanded(
+              Expanded(
                 child:
                 Column(
                   crossAxisAlignment:
                   CrossAxisAlignment.start,
 
                   children: [
-                    Text(
+                    const Text(
                       'Evidence',
+
                       style:
                       TextStyle(
                         color:
                         Colors.white,
+
                         fontSize:
                         14,
+
                         fontWeight:
                         FontWeight.w700,
                       ),
                     ),
 
                     Text(
-                      'Add or remove evidence before review begins.',
+                      '${evidence.length} / $maxEvidenceItems items · '
+                          'photos and short videos',
+
                       style:
-                      TextStyle(
+                      const TextStyle(
                         color:
                         AppColors.textSecondary,
+
                         fontSize:
                         9,
                       ),
@@ -2419,13 +5233,16 @@ class _EvidenceEditor
 
               TextButton.icon(
                 onPressed:
-                busy
+                busy ||
+                    evidence.length >=
+                        maxEvidenceItems
                     ? null
                     : onAdd,
 
                 icon:
                 const Icon(
                   Icons.add,
+
                   size:
                   17,
                 ),
@@ -2451,6 +5268,7 @@ class _EvidenceEditor
                 EdgeInsets.all(
                   18,
                 ),
+
                 child:
                 CircularProgressIndicator(),
               ),
@@ -2461,6 +5279,7 @@ class _EvidenceEditor
               children: [
                 Text(
                   error!,
+
                   style:
                   const TextStyle(
                     color:
@@ -2471,6 +5290,7 @@ class _EvidenceEditor
                 TextButton(
                   onPressed:
                   onRetry,
+
                   child:
                   const Text(
                     'Retry',
@@ -2485,11 +5305,13 @@ class _EvidenceEditor
                   vertical:
                   18,
                 ),
+
                 child:
                 Center(
                   child:
                   Text(
                     'No evidence available.',
+
                     style:
                     TextStyle(
                       color:
@@ -2499,7 +5321,7 @@ class _EvidenceEditor
                 ),
               )
             else
-              GridView.builder(
+              ListView.separated(
                 shrinkWrap:
                 true,
 
@@ -2509,30 +5331,40 @@ class _EvidenceEditor
                 itemCount:
                 evidence.length,
 
-                gridDelegate:
-                const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount:
-                  2,
-                  crossAxisSpacing:
-                  10,
-                  mainAxisSpacing:
-                  10,
-                  childAspectRatio:
-                  1.12,
-                ),
+                separatorBuilder:
+                    (
+                    context,
+                    index,
+                    ) {
+                  return const SizedBox(
+                    height:
+                    12,
+                  );
+                },
 
                 itemBuilder:
                     (
                     context,
                     index,
                     ) {
-                  final EditableReportEvidence
-                  item =
+                  final EditableReportEvidence item =
                   evidence[index];
 
-                  return _EvidenceCard(
+                  final String key =
+                  evidenceKey(
+                    item,
+                  );
+
+                  return _EvidenceAnalysisCard(
                     item:
                     item,
+
+                    index:
+                    index,
+
+                    analyzing:
+                    analyzingEvidenceKey ==
+                        key,
 
                     onRemove:
                     busy
@@ -2541,6 +5373,33 @@ class _EvidenceEditor
                       onRemove(
                         item,
                       );
+                    },
+
+                    imageAnalysis:
+                    imageAnalyses[key],
+
+                    imageError:
+                    imageErrors[key],
+
+                    videoAnalysis:
+                    videoAnalyses[key],
+
+                    videoError:
+                    videoErrors[key],
+
+                    onAnalyze:
+                    busy
+                        ? null
+                        : () async {
+                      if (item.isImage) {
+                        await onAnalyzeImage(
+                          item,
+                        );
+                      } else {
+                        await onAnalyzeVideo(
+                          item,
+                        );
+                      }
                     },
                   );
                 },
@@ -2553,22 +5412,6 @@ class _EvidenceEditor
             ),
 
             const LinearProgressIndicator(),
-
-            const SizedBox(
-              height:
-              7,
-            ),
-
-            const Text(
-              'Updating evidence...',
-              style:
-              TextStyle(
-                color:
-                AppColors.textSecondary,
-                fontSize:
-                9,
-              ),
-            ),
           ],
         ],
       ),
@@ -2577,221 +5420,80 @@ class _EvidenceEditor
 }
 
 // =================================================================
-// EVIDENCE CARD
+// EVIDENCE ANALYSIS CARD
 // =================================================================
 
-class _EvidenceCard
+class _EvidenceAnalysisCard
     extends StatelessWidget {
   final EditableReportEvidence item;
 
-  final VoidCallback? onRemove;
+  final int index;
 
-  const _EvidenceCard({
-    required this.item,
-    required this.onRemove,
-  });
-
-  @override
-  Widget build(
-      BuildContext context,
-      ) {
-    return Stack(
-      children: [
-        Positioned.fill(
-          child:
-          ClipRRect(
-            borderRadius:
-            BorderRadius.circular(
-              12,
-            ),
-
-            child:
-            Container(
-              color:
-              AppColors.background,
-
-              child:
-              item.isImage &&
-                  item.signedUrl !=
-                      null
-                  ? Image.network(
-                item.signedUrl!,
-                fit:
-                BoxFit.cover,
-                errorBuilder:
-                    (
-                    context,
-                    error,
-                    stack,
-                    ) {
-                  return const Center(
-                    child:
-                    Icon(
-                      Icons.broken_image_outlined,
-                      color:
-                      AppColors.textSecondary,
-                    ),
-                  );
-                },
-              )
-                  : const Center(
-                child:
-                Icon(
-                  Icons.videocam_outlined,
-                  color:
-                  AppColors.primary,
-                  size:
-                  40,
-                ),
-              ),
-            ),
-          ),
-        ),
-
-        Positioned(
-          left:
-          7,
-          bottom:
-          7,
-          child:
-          Container(
-            padding:
-            const EdgeInsets.symmetric(
-              horizontal:
-              7,
-              vertical:
-              4,
-            ),
-
-            decoration:
-            BoxDecoration(
-              color:
-              Colors.black.withOpacity(
-                0.70,
-              ),
-
-              borderRadius:
-              BorderRadius.circular(
-                20,
-              ),
-            ),
-
-            child:
-            Text(
-              item.isImage
-                  ? 'PHOTO'
-                  : 'VIDEO',
-
-              style:
-              const TextStyle(
-                color:
-                Colors.white,
-                fontSize:
-                8,
-                fontWeight:
-                FontWeight.w700,
-              ),
-            ),
-          ),
-        ),
-
-        Positioned(
-          right:
-          5,
-          top:
-          5,
-
-          child:
-          Material(
-            color:
-            Colors.black.withOpacity(
-              0.65,
-            ),
-
-            shape:
-            const CircleBorder(),
-
-            child:
-            IconButton(
-              visualDensity:
-              VisualDensity.compact,
-
-              onPressed:
-              onRemove,
-
-              icon:
-              const Icon(
-                Icons.close,
-                size:
-                17,
-                color:
-                Colors.white,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// =================================================================
-// AI EDIT CARD
-// =================================================================
-
-class _AiEditCard
-    extends StatelessWidget {
   final bool analyzing;
 
-  final bool suggestionsApplied;
+  final VoidCallback?
+  onRemove;
 
-  final ReportImageAiAnalysis? result;
+  final ReportImageAiAnalysis?
+  imageAnalysis;
 
-  final Future<void> Function()? onAnalyze;
+  final String?
+  imageError;
 
-  final Future<void> Function()? onApply;
+  final ReportVideoAiAnalysis?
+  videoAnalysis;
 
-  const _AiEditCard({
+  final String?
+  videoError;
+
+  final Future<void> Function()?
+  onAnalyze;
+
+  const _EvidenceAnalysisCard({
+    required this.item,
+    required this.index,
     required this.analyzing,
-    required this.suggestionsApplied,
-    required this.result,
+    required this.onRemove,
+    required this.imageAnalysis,
+    required this.imageError,
+    required this.videoAnalysis,
+    required this.videoError,
     required this.onAnalyze,
-    required this.onApply,
   });
+
+  String safeValue(
+      String? value,
+      ) {
+    final String clean =
+        value?.trim() ??
+            '';
+
+    return clean.isEmpty
+        ? 'Not available'
+        : clean;
+  }
 
   @override
   Widget build(
       BuildContext context,
       ) {
     return Container(
-      width:
-      double.infinity,
-
-      padding:
-      const EdgeInsets.all(
-        15,
-      ),
-
       decoration:
       BoxDecoration(
         color:
-        AppColors.primary
-            .withOpacity(
-          0.055,
+        AppColors.background.withOpacity(
+          0.55,
         ),
 
         borderRadius:
         BorderRadius.circular(
-          15,
+          13,
         ),
 
         border:
         Border.all(
           color:
-          AppColors.primary
-              .withOpacity(
-            0.28,
-          ),
+          AppColors.border,
         ),
       ),
 
@@ -2801,197 +5503,489 @@ class _AiEditCard
         CrossAxisAlignment.start,
 
         children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.auto_awesome,
-                color:
-                AppColors.primary,
-              ),
+          SizedBox(
+            height:
+            150,
 
-              const SizedBox(
-                width:
-                9,
-              ),
+            child:
+            Stack(
+              children: [
+                Positioned.fill(
+                  child:
+                  ClipRRect(
+                    borderRadius:
+                    const BorderRadius.vertical(
+                      top:
+                      Radius.circular(
+                        12,
+                      ),
+                    ),
 
-              const Expanded(
-                child:
-                Column(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
+                    child:
+                    Container(
+                      color:
+                      AppColors.background,
 
-                  children: [
+                      child:
+                      item.isImage &&
+                          item.signedUrl !=
+                              null
+                          ? Image.network(
+                        item.signedUrl!,
+
+                        fit:
+                        BoxFit.cover,
+
+                        errorBuilder:
+                            (
+                            context,
+                            error,
+                            stack,
+                            ) {
+                          return const Center(
+                            child:
+                            Icon(
+                              Icons.broken_image_outlined,
+
+                              color:
+                              AppColors.textSecondary,
+                            ),
+                          );
+                        },
+                      )
+                          : const Center(
+                        child:
+                        Icon(
+                          Icons.videocam_outlined,
+
+                          color:
+                          AppColors.primary,
+
+                          size:
+                          44,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                Positioned(
+                  left:
+                  8,
+
+                  bottom:
+                  8,
+
+                  child:
+                  Container(
+                    padding:
+                    const EdgeInsets.symmetric(
+                      horizontal:
+                      8,
+
+                      vertical:
+                      4,
+                    ),
+
+                    decoration:
+                    BoxDecoration(
+                      color:
+                      Colors.black.withOpacity(
+                        0.72,
+                      ),
+
+                      borderRadius:
+                      BorderRadius.circular(
+                        20,
+                      ),
+                    ),
+
+                    child:
                     Text(
-                      'AI Smart Assist',
+                      '${item.isImage ? 'PHOTO' : 'VIDEO'} '
+                          '${index + 1}',
+
                       style:
-                      TextStyle(
+                      const TextStyle(
                         color:
                         Colors.white,
+
+                        fontSize:
+                        8,
+
                         fontWeight:
                         FontWeight.w700,
                       ),
                     ),
+                  ),
+                ),
 
-                    Text(
-                      'Review evidence and suggest improvements',
-                      style:
-                      TextStyle(
+                Positioned(
+                  right:
+                  5,
+
+                  top:
+                  5,
+
+                  child:
+                  Material(
+                    color:
+                    Colors.black.withOpacity(
+                      0.65,
+                    ),
+
+                    shape:
+                    const CircleBorder(),
+
+                    child:
+                    IconButton(
+                      visualDensity:
+                      VisualDensity.compact,
+
+                      onPressed:
+                      onRemove,
+
+                      icon:
+                      const Icon(
+                        Icons.close,
+
+                        size:
+                        17,
+
                         color:
-                        AppColors.textSecondary,
-                        fontSize:
-                        9,
+                        Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          Padding(
+            padding:
+            const EdgeInsets.all(
+              12,
+            ),
+
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child:
+                      Text(
+                        item.isImage
+                            ? 'Photo Evidence Intelligence'
+                            : 'Video Evidence Intelligence',
+
+                        style:
+                        const TextStyle(
+                          color:
+                          Colors.white,
+
+                          fontSize:
+                          11,
+
+                          fontWeight:
+                          FontWeight.w700,
+                        ),
+                      ),
+                    ),
+
+                    OutlinedButton.icon(
+                      onPressed:
+                      analyzing
+                          ? null
+                          : onAnalyze,
+
+                      icon:
+                      analyzing
+                          ? const SizedBox(
+                        width:
+                        14,
+
+                        height:
+                        14,
+
+                        child:
+                        CircularProgressIndicator(
+                          strokeWidth:
+                          2,
+                        ),
+                      )
+                          : const Icon(
+                        Icons.auto_awesome,
+
+                        size:
+                        15,
+                      ),
+
+                      label:
+                      Text(
+                        analyzing
+                            ? 'Analysing'
+                            : 'Analyse',
                       ),
                     ),
                   ],
                 ),
-              ),
 
-              OutlinedButton(
-                onPressed:
-                analyzing
-                    ? null
-                    : onAnalyze,
+                // ===================================================
+                // IMAGE AI RESULT
+                // ===================================================
 
-                child:
-                analyzing
-                    ? const SizedBox(
-                  width:
-                  16,
-                  height:
-                  16,
-                  child:
-                  CircularProgressIndicator(
-                    strokeWidth:
-                    2,
+                if (imageAnalysis !=
+                    null) ...[
+                  const SizedBox(
+                    height:
+                    9,
                   ),
-                )
-                    : const Text(
-                  'Analyse',
-                ),
-              ),
-            ],
-          ),
 
-          if (result !=
-              null) ...[
-            const SizedBox(
-              height:
-              14,
-            ),
+                  _AiResultLine(
+                    label:
+                    'Issue',
 
-            _AiResultLine(
-              label:
-              'Issue detected',
-              value:
-              result!.issueDetected ==
-                  true
-                  ? 'Yes'
-                  : 'Not confirmed',
-            ),
+                    value:
+                    imageAnalysis!.issueDetected ==
+                        true
+                        ? 'Detected'
+                        : 'Not confirmed',
+                  ),
 
-            _AiResultLine(
-              label:
-              'AI category',
-              value:
-              result!.category ??
-                  'Not available',
-            ),
+                  _AiResultLine(
+                    label:
+                    'Category',
 
-            _AiResultLine(
-              label:
-              'Severity',
-              value:
-              result!.severity ??
-                  'Not available',
-            ),
+                    value:
+                    safeValue(
+                      imageAnalysis!.category,
+                    ),
+                  ),
 
-            _AiResultLine(
-              label:
-              'Evidence quality',
-              value:
-              result!.evidenceQuality ??
-                  'Not available',
-            ),
+                  _AiResultLine(
+                    label:
+                    'Severity',
 
-            _AiResultLine(
-              label:
-              'Report quality',
-              value:
-              result!.reportQuality ??
-                  'Not available',
-            ),
+                    value:
+                    safeValue(
+                      imageAnalysis!.severity,
+                    ),
+                  ),
 
-            if ((result!.safetyConcern ??
-                '')
-                .trim()
-                .isNotEmpty)
-              _AiResultLine(
-                label:
-                'Safety concern',
-                value:
-                result!.safetyConcern!,
-              ),
+                  _AiResultLine(
+                    label:
+                    'Confidence',
 
-            if (result!
-                .missingInformation
-                .isNotEmpty)
-              _AiResultLine(
-                label:
-                'Missing information',
-                value:
-                result!.missingInformation
-                    .join(
-                  ', ',
-                ),
-              ),
+                    value:
+                    safeValue(
+                      imageAnalysis!.confidence,
+                    ),
+                  ),
 
-            const SizedBox(
-              height:
-              12,
-            ),
+                  _AiResultLine(
+                    label:
+                    'Quality',
 
-            SizedBox(
-              width:
-              double.infinity,
+                    value:
+                    safeValue(
+                      imageAnalysis!.evidenceQuality,
+                    ),
+                  ),
 
-              child:
-              ElevatedButton.icon(
-                onPressed:
-                onApply,
+                  if ((imageAnalysis!.safetyConcern ??
+                      '')
+                      .trim()
+                      .isNotEmpty)
+                    _AiResultLine(
+                      label:
+                      'Safety',
 
-                icon:
-                Icon(
-                  suggestionsApplied
-                      ? Icons.check_circle_outline
-                      : Icons.auto_fix_high,
-                ),
+                      value:
+                      imageAnalysis!.safetyConcern!,
+                    ),
+                ],
 
-                label:
-                Text(
-                  suggestionsApplied
-                      ? 'Suggestions Applied — You Can Still Edit'
-                      : 'Review & Apply AI Suggestions',
-                ),
-              ),
-            ),
-          ],
+                // ===================================================
+                // VIDEO AI RESULT
+                // ===================================================
 
-          const SizedBox(
-            height:
-            9,
-          ),
+                if (videoAnalysis !=
+                    null) ...[
+                  const SizedBox(
+                    height:
+                    9,
+                  ),
 
-          const Text(
-            'AI recommendations are assistance only. '
-                'Nothing is applied until you approve it.',
-            style:
-            TextStyle(
-              color:
-              AppColors.textSecondary,
-              fontSize:
-              9,
-              height:
-              1.4,
+                  _AiResultLine(
+                    label:
+                    'Issue',
+
+                    value:
+                    videoAnalysis!.issueDetected
+                        ? 'Detected'
+                        : 'Not confirmed',
+                  ),
+
+                  _AiResultLine(
+                    label:
+                    'Category',
+
+                    value:
+                    safeValue(
+                      videoAnalysis!.category,
+                    ),
+                  ),
+
+                  _AiResultLine(
+                    label:
+                    'Severity',
+
+                    value:
+                    safeValue(
+                      videoAnalysis!.severity,
+                    ),
+                  ),
+
+                  _AiResultLine(
+                    label:
+                    'Confidence',
+
+                    value:
+                    safeValue(
+                      videoAnalysis!.confidence,
+                    ),
+                  ),
+
+                  _AiResultLine(
+                    label:
+                    'Quality',
+
+                    value:
+                    safeValue(
+                      videoAnalysis!.evidenceQuality,
+                    ),
+                  ),
+
+                  _AiResultLine(
+                    label:
+                    'Across frames',
+
+                    value:
+                    safeValue(
+                      videoAnalysis!.temporalConsistency,
+                    ),
+                  ),
+
+                  _AiResultLine(
+                    label:
+                    'Useful frames',
+
+                    value:
+                    '${videoAnalysis!.usefulFrameCount} / '
+                        '${videoAnalysis!.analyzedFrameCount}',
+                  ),
+
+                  if ((videoAnalysis!.safetyConcern ??
+                      '')
+                      .trim()
+                      .isNotEmpty)
+                    _AiResultLine(
+                      label:
+                      'Safety',
+
+                      value:
+                      videoAnalysis!.safetyConcern!,
+                    ),
+
+                  const SizedBox(
+                    height:
+                    4,
+                  ),
+
+                  const Text(
+                    'Video AI reviews representative sampled frames, '
+                        'not every frame continuously.',
+
+                    style:
+                    TextStyle(
+                      color:
+                      AppColors.textSecondary,
+
+                      fontSize:
+                      8,
+
+                      height:
+                      1.35,
+                    ),
+                  ),
+                ],
+
+                // ===================================================
+                // PER-EVIDENCE ERROR
+                // ===================================================
+
+                if ((imageError ??
+                    videoError) !=
+                    null &&
+                    (imageError ??
+                        videoError)!
+                        .trim()
+                        .isNotEmpty) ...[
+                  const SizedBox(
+                    height:
+                    8,
+                  ),
+
+                  Text(
+                    imageError ??
+                        videoError!,
+
+                    style:
+                    const TextStyle(
+                      color:
+                      Colors.orangeAccent,
+
+                      fontSize:
+                      9,
+
+                      height:
+                      1.35,
+                    ),
+                  ),
+                ],
+
+                if (!analyzing &&
+                    imageAnalysis ==
+                        null &&
+                    videoAnalysis ==
+                        null &&
+                    (imageError ??
+                        videoError) ==
+                        null) ...[
+                  const SizedBox(
+                    height:
+                    7,
+                  ),
+
+                  const Text(
+                    'Not analysed yet.',
+
+                    style:
+                    TextStyle(
+                      color:
+                      AppColors.textSecondary,
+
+                      fontSize:
+                      9,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ],
@@ -2999,6 +5993,10 @@ class _AiEditCard
     );
   }
 }
+
+// =================================================================
+// AI RESULT LINE
+// =================================================================
 
 class _AiResultLine
     extends StatelessWidget {
@@ -3030,15 +6028,17 @@ class _AiResultLine
         children: [
           SizedBox(
             width:
-            120,
+            118,
 
             child:
             Text(
               label,
+
               style:
               const TextStyle(
                 color:
                 AppColors.textSecondary,
+
                 fontSize:
                 9,
               ),
@@ -3049,12 +6049,15 @@ class _AiResultLine
             child:
             Text(
               value,
+
               style:
               const TextStyle(
                 color:
                 Colors.white,
+
                 fontSize:
                 10,
+
                 height:
                 1.35,
               ),
@@ -3097,8 +6100,7 @@ class _InfoCard
       decoration:
       BoxDecoration(
         color:
-        AppColors.primary
-            .withOpacity(
+        AppColors.primary.withOpacity(
           0.07,
         ),
 
@@ -3110,8 +6112,7 @@ class _InfoCard
         border:
         Border.all(
           color:
-          AppColors.primary
-              .withOpacity(
+          AppColors.primary.withOpacity(
             0.25,
           ),
         ),
@@ -3125,8 +6126,10 @@ class _InfoCard
         children: [
           Icon(
             icon,
+
             color:
             AppColors.primary,
+
             size:
             18,
           ),
@@ -3140,12 +6143,15 @@ class _InfoCard
             child:
             Text(
               text,
+
               style:
               const TextStyle(
                 color:
                 AppColors.textSecondary,
+
                 fontSize:
                 10,
+
                 height:
                 1.45,
               ),
@@ -3197,7 +6203,7 @@ class _Label
 }
 
 // =================================================================
-// DECORATION
+// INPUT DECORATION
 // =================================================================
 
 InputDecoration _decoration({
@@ -3250,6 +6256,7 @@ InputDecoration _decoration({
       const BorderSide(
         color:
         AppColors.primary,
+
         width:
         1.4,
       ),
@@ -3280,6 +6287,7 @@ InputDecoration _decoration({
       const BorderSide(
         color:
         AppColors.danger,
+
         width:
         1.4,
       ),
