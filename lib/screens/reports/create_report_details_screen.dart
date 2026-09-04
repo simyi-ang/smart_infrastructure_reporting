@@ -1,40 +1,60 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../../models/report_draft.dart';
+import '../../services/report_draft_service.dart';
 import '../../theme/app_colors.dart';
 import 'create_report_evidence_screen.dart';
 
 // ================================================================
 // CREATE REPORT DETAILS SCREEN
+// ================================================================
 //
-// Existing design preserved.
+// HIGH-COMPLEXITY FEATURES:
 //
-// Added local report-quality validation for BOTH:
+// 1. Smart Draft Recovery
+// 2. Per-user local draft isolation
+// 3. Debounced text autosave
+// 4. Immediate category/priority persistence
+// 5. Serialized draft writes to reduce save race conditions
+// 6. App lifecycle persistence
+// 7. Android system-back protection
+// 8. Safe navigation persistence
+// 9. Explicit discard-only deletion
+// 10. Restore after app restart/navigation
+// 11. Current workflow-step tracking
+// 12. Draft save state feedback
+// 13. Local anti-gibberish report validation
+// 14. Duplicate-navigation protection
 //
-// 1. Report title
-// 2. Report description
+// Draft is NOT deleted when:
+// - pressing Back
+// - changing page
+// - app goes to background
+// - app is restarted
+// - report validation fails
 //
-// This screen performs fast deterministic validation BEFORE:
-// - evidence upload
-// - image compression
-// - Gemini API analysis
+// Draft is deleted only when:
+// - citizen explicitly chooses Discard Report
+// - successful report submission later calls clearDraft()
 //
-// Smart Assist later performs the deeper semantic check.
 // ================================================================
 
-class CreateReportDetailsScreen
-    extends StatefulWidget {
+class CreateReportDetailsScreen extends StatefulWidget {
   const CreateReportDetailsScreen({
     super.key,
   });
 
   @override
-  State<CreateReportDetailsScreen>
-  createState() =>
+  State<CreateReportDetailsScreen> createState() =>
       _CreateReportDetailsScreenState();
 }
 
 class _CreateReportDetailsScreenState
-    extends State<CreateReportDetailsScreen> {
+    extends State<CreateReportDetailsScreen>
+    with WidgetsBindingObserver {
   // ============================================================
   // CONTROLLERS
   // ============================================================
@@ -46,11 +66,53 @@ class _CreateReportDetailsScreenState
   TextEditingController();
 
   // ============================================================
+  // SMART DRAFT RECOVERY STATE
+  // ============================================================
+
+  Timer? _draftDebounce;
+
+  static const Duration _draftSaveDelay =
+  Duration(
+    milliseconds: 650,
+  );
+
+  bool _isRestoringDraft = true;
+  bool _isSavingDraft = false;
+  bool _draftSaveFailed = false;
+  bool _draftWasRestored = false;
+
+  bool _isNavigating = false;
+
+  /// Required because PopScope(canPop: false) would also block
+  /// our own intentional Navigator.pop().
+  bool _allowPop = false;
+
+  DateTime? _lastDraftSavedAt;
+
+  bool _restoreNoticeShown = false;
+
+  /// Used to serialize local writes.
+  ///
+  /// Without serialization, multiple async saves could finish
+  /// in a different order and an older snapshot might overwrite
+  /// a newer one.
+  Future<void> _saveQueue =
+  Future<void>.value();
+
+  String? get _currentUserId {
+    return Supabase
+        .instance
+        .client
+        .auth
+        .currentUser
+        ?.id;
+  }
+
+  // ============================================================
   // SELECTED VALUES
   // ============================================================
 
   String? selectedCategory;
-
   String? selectedPriority;
 
   // ============================================================
@@ -58,7 +120,6 @@ class _CreateReportDetailsScreenState
   // ============================================================
 
   String? titleError;
-
   String? descriptionError;
 
   // ============================================================
@@ -100,11 +161,34 @@ class _CreateReportDetailsScreenState
   ];
 
   // ============================================================
+  // INIT
+  // ============================================================
+
+  @override
+  void initState() {
+    super.initState();
+
+    WidgetsBinding.instance.addObserver(
+      this,
+    );
+
+    _restoreDraft(
+      showRestoreNotice: true,
+    );
+  }
+
+  // ============================================================
   // DISPOSE
   // ============================================================
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(
+      this,
+    );
+
+    _draftDebounce?.cancel();
+
     titleController.dispose();
     descriptionController.dispose();
 
@@ -112,19 +196,640 @@ class _CreateReportDetailsScreenState
   }
 
   // ============================================================
-  // CONTINUE TO EVIDENCE
-  //
-  // BOTH title and description must pass meaningful-content
-  // validation before navigation.
+  // APP LIFECYCLE PROTECTION
   // ============================================================
 
-  void continueToEvidence() {
+  @override
+  void didChangeAppLifecycleState(
+      AppLifecycleState state,
+      ) {
+    super.didChangeAppLifecycleState(
+      state,
+    );
+
+    if (_isRestoringDraft) {
+      return;
+    }
+
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        unawaited(
+          _saveDraftImmediately(
+            showFailureMessage: false,
+          ),
+        );
+        break;
+
+      case AppLifecycleState.resumed:
+        break;
+    }
+  }
+
+  // ============================================================
+  // RESTORE ACTIVE DRAFT
+  // ============================================================
+
+  Future<void> _restoreDraft({
+    required bool showRestoreNotice,
+  }) async {
+    final String? userId =
+        _currentUserId;
+
+    if (userId == null) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isRestoringDraft = false;
+      });
+
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isRestoringDraft = true;
+      });
+    }
+
+    try {
+      final ReportDraft? draft =
+      await ReportDraftService.loadDraft(
+        userId: userId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (draft == null) {
+        setState(() {
+          _isRestoringDraft = false;
+          _draftWasRestored = false;
+          _lastDraftSavedAt = null;
+        });
+
+        return;
+      }
+
+      // ----------------------------------------------------------
+      // STORED VALUE VALIDATION
+      // ----------------------------------------------------------
+
+      final bool categoryValid =
+      categories.any(
+            (item) =>
+        item['name'] ==
+            draft.category,
+      );
+
+      final bool priorityValid =
+      priorities.contains(
+        draft.priority,
+      );
+
+      titleController.text =
+          draft.title;
+
+      descriptionController.text =
+          draft.description;
+
+      setState(() {
+        selectedCategory =
+        categoryValid &&
+            draft.category.isNotEmpty
+            ? draft.category
+            : null;
+
+        selectedPriority =
+        priorityValid &&
+            draft.priority.isNotEmpty
+            ? draft.priority
+            : null;
+
+        _lastDraftSavedAt =
+            draft.updatedAt;
+
+        _draftWasRestored =
+            draft.hasData;
+
+        _draftSaveFailed = false;
+
+        _isRestoringDraft = false;
+      });
+
+      if (showRestoreNotice &&
+          _draftWasRestored &&
+          !_restoreNoticeShown) {
+        _restoreNoticeShown = true;
+
+        WidgetsBinding.instance
+            .addPostFrameCallback(
+              (_) {
+            if (!mounted) {
+              return;
+            }
+
+            ScaffoldMessenger
+                .of(context)
+                .hideCurrentSnackBar();
+
+            ScaffoldMessenger
+                .of(context)
+                .showSnackBar(
+              const SnackBar(
+                content: Row(
+                  children: [
+                    Icon(
+                      Icons.restore,
+                      color: Colors.white,
+                      size: 19,
+                    ),
+                    SizedBox(
+                      width: 10,
+                    ),
+                    Expanded(
+                      child: Text(
+                        'Your unfinished report has been restored.',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      }
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isRestoringDraft = false;
+        _draftSaveFailed = true;
+      });
+    }
+  }
+
+  // ============================================================
+  // BUILD CURRENT DRAFT SNAPSHOT
+  // ============================================================
+
+  ReportDraft _buildCurrentDraft({
+    ReportDraft? existing,
+  }) {
+    final DateTime now =
+    DateTime.now();
+
+    return ReportDraft(
+      id: existing?.id,
+
+      category:
+      selectedCategory ?? '',
+
+      priority:
+      selectedPriority ?? '',
+
+      title:
+      titleController.text.trim(),
+
+      description:
+      descriptionController.text.trim(),
+
+      // --------------------------------------------------------
+      // PRESERVE LATER-PHASE DATA
+      // --------------------------------------------------------
+
+      landmark:
+      existing?.landmark,
+
+      manualAddress:
+      existing?.manualAddress,
+
+      latitude:
+      existing?.latitude,
+
+      longitude:
+      existing?.longitude,
+
+      locationAccuracy:
+      existing?.locationAccuracy,
+
+      detectedAddress:
+      existing?.detectedAddress,
+
+      locationVerificationStatus:
+      existing?.locationVerificationStatus,
+
+      addressDistanceMeters:
+      existing?.addressDistanceMeters,
+
+      voiceTranscript:
+      existing?.voiceTranscript,
+
+      voiceLocationContext:
+      existing?.voiceLocationContext,
+
+      voiceSafetyConcern:
+      existing?.voiceSafetyConcern,
+
+      /*
+       * User is currently on Details.
+       *
+       * Later screens change this to:
+       * Evidence = 2
+       * Location = 3
+       * Preview = 4
+       */
+      currentStep: 1,
+
+      hasCloseUpEvidence:
+      existing?.hasCloseUpEvidence ??
+          false,
+
+      hasContextEvidence:
+      existing?.hasContextEvidence ??
+          false,
+
+      evidenceImagePaths:
+      existing?.evidenceImagePaths ??
+          const [],
+
+      createdAt:
+      existing?.createdAt ??
+          now,
+
+      updatedAt:
+      now,
+    );
+  }
+
+  // ============================================================
+  // DEBOUNCED AUTOSAVE
+  // ============================================================
+
+  void _scheduleDraftSave() {
+    if (_isRestoringDraft) {
+      return;
+    }
+
+    _draftDebounce?.cancel();
+
+    if (mounted) {
+      setState(() {
+        _isSavingDraft = true;
+        _draftSaveFailed = false;
+      });
+    }
+
+    _draftDebounce =
+        Timer(
+          _draftSaveDelay,
+              () {
+            unawaited(
+              _saveDraftImmediately(
+                showFailureMessage: false,
+              ),
+            );
+          },
+        );
+  }
+
+  // ============================================================
+  // SERIALIZED IMMEDIATE SAVE
+  // ============================================================
+
+  Future<bool> _saveDraftImmediately({
+    required bool showFailureMessage,
+  }) {
+    final Completer<bool> completer =
+    Completer<bool>();
+
+    _saveQueue =
+        _saveQueue.then(
+              (_) async {
+            final bool result =
+            await _performDraftSave(
+              showFailureMessage:
+              showFailureMessage,
+            );
+
+            if (!completer.isCompleted) {
+              completer.complete(
+                result,
+              );
+            }
+          },
+        ).catchError(
+              (_) {
+            if (!completer.isCompleted) {
+              completer.complete(
+                false,
+              );
+            }
+          },
+        );
+
+    return completer.future;
+  }
+
+  // ============================================================
+  // ACTUAL SAVE OPERATION
+  // ============================================================
+
+  Future<bool> _performDraftSave({
+    required bool showFailureMessage,
+  }) async {
+    if (_isRestoringDraft) {
+      return false;
+    }
+
+    final String? userId =
+        _currentUserId;
+
+    if (userId == null) {
+      return false;
+    }
+
+    _draftDebounce?.cancel();
+
+    if (mounted) {
+      setState(() {
+        _isSavingDraft = true;
+        _draftSaveFailed = false;
+      });
+    }
+
+    try {
+      final ReportDraft? existing =
+      await ReportDraftService.loadDraft(
+        userId: userId,
+      );
+
+      final ReportDraft updatedDraft =
+      _buildCurrentDraft(
+        existing: existing,
+      );
+
+      /*
+       * Avoid storing a completely empty report.
+       *
+       * Existing later-stage data is still preserved because
+       * updatedDraft.hasData will remain true.
+       */
+      if (!updatedDraft.hasData) {
+        if (mounted) {
+          setState(() {
+            _isSavingDraft = false;
+            _draftSaveFailed = false;
+          });
+        }
+
+        return true;
+      }
+
+      await ReportDraftService.saveDraft(
+        userId: userId,
+        draft: updatedDraft,
+      );
+
+      if (!mounted) {
+        return true;
+      }
+
+      setState(() {
+        _isSavingDraft = false;
+        _draftSaveFailed = false;
+        _draftWasRestored = true;
+        _lastDraftSavedAt =
+            DateTime.now();
+      });
+
+      return true;
+    } catch (_) {
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        _isSavingDraft = false;
+        _draftSaveFailed = true;
+      });
+
+      if (showFailureMessage) {
+        showMessage(
+          'Your report could not be saved locally. '
+              'Please try again before leaving.',
+        );
+      }
+
+      return false;
+    }
+  }
+
+  // ============================================================
+  // SAFE LEAVE
+  // ============================================================
+
+  Future<void> _leaveScreenSafely() async {
+    if (_isNavigating) {
+      return;
+    }
+
+    _isNavigating = true;
+
     FocusScope.of(context)
         .unfocus();
 
-    // ==========================================================
+    await _saveDraftImmediately(
+      showFailureMessage: false,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _allowPop = true;
+    });
+
+    Navigator.of(context).pop();
+  }
+
+  // ============================================================
+  // DISCARD REPORT
+  // ============================================================
+
+  Future<void> _confirmDiscardDraft() async {
+    FocusScope.of(context)
+        .unfocus();
+
+    final bool? confirmed =
+    await showDialog<bool>(
+      context: context,
+
+      builder: (
+          dialogContext,
+          ) {
+        return AlertDialog(
+          backgroundColor:
+          AppColors.surface,
+
+          shape:
+          RoundedRectangleBorder(
+            borderRadius:
+            BorderRadius.circular(
+              18,
+            ),
+          ),
+
+          title:
+          const Row(
+            children: [
+              Icon(
+                Icons.delete_outline,
+                color:
+                Colors.orangeAccent,
+              ),
+
+              SizedBox(
+                width: 10,
+              ),
+
+              Expanded(
+                child: Text(
+                  'Discard Report?',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          content:
+          const Text(
+            'Your unfinished report will be permanently removed '
+                'from this device. Choose Keep Draft if you may want '
+                'to continue it later.',
+            style: TextStyle(
+              color:
+              AppColors.textSecondary,
+              height: 1.45,
+            ),
+          ),
+
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  false,
+                );
+              },
+              child:
+              const Text(
+                'Keep Draft',
+              ),
+            ),
+
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  true,
+                );
+              },
+              child:
+              const Text(
+                'Discard Report',
+                style: TextStyle(
+                  color:
+                  Colors.orangeAccent,
+                  fontWeight:
+                  FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    final String? userId =
+        _currentUserId;
+
+    if (userId == null) {
+      showMessage(
+        'Unable to identify the current account.',
+      );
+
+      return;
+    }
+
+    try {
+      _draftDebounce?.cancel();
+
+      await ReportDraftService.clearDraft(
+        userId: userId,
+      );
+
+      titleController.clear();
+      descriptionController.clear();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        selectedCategory = null;
+        selectedPriority = null;
+
+        titleError = null;
+        descriptionError = null;
+
+        _draftWasRestored = false;
+        _draftSaveFailed = false;
+        _lastDraftSavedAt = null;
+
+        _allowPop = true;
+      });
+
+      Navigator.of(context).pop();
+    } catch (_) {
+      showMessage(
+        'Unable to discard the report draft. Please try again.',
+      );
+    }
+  }
+
+  // ============================================================
+  // CONTINUE TO EVIDENCE
+  // ============================================================
+
+  Future<void> continueToEvidence() async {
+    if (_isNavigating ||
+        _isRestoringDraft) {
+      return;
+    }
+
+    FocusScope.of(context)
+        .unfocus();
+
+    // ----------------------------------------------------------
     // CATEGORY
-    // ==========================================================
+    // ----------------------------------------------------------
 
     if (selectedCategory == null) {
       showMessage(
@@ -134,9 +839,9 @@ class _CreateReportDetailsScreenState
       return;
     }
 
-    // ==========================================================
+    // ----------------------------------------------------------
     // PRIORITY
-    // ==========================================================
+    // ----------------------------------------------------------
 
     if (selectedPriority == null) {
       showMessage(
@@ -146,60 +851,49 @@ class _CreateReportDetailsScreenState
       return;
     }
 
-    // ==========================================================
-    // PREPARE USER TEXT
-    // ==========================================================
+    // ----------------------------------------------------------
+    // PREPARE TEXT
+    // ----------------------------------------------------------
 
     final String title =
-    titleController.text
-        .trim();
+    titleController.text.trim();
 
     final String description =
-    descriptionController.text
-        .trim();
+    descriptionController.text.trim();
 
-    // ==========================================================
-    // TITLE QUALITY CHECK
-    //
-    // Title must contain meaningful information.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // TITLE QUALITY
+    // ----------------------------------------------------------
 
     final String? currentTitleError =
     validateMeaningfulText(
       title,
       fieldName:
       'report title',
-
       minimumLength:
       5,
-
       minimumWords:
       2,
     );
 
-    // ==========================================================
-    // DESCRIPTION QUALITY CHECK
-    //
-    // Description has a slightly higher requirement because
-    // responders need enough information to understand the issue.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // DESCRIPTION QUALITY
+    // ----------------------------------------------------------
 
     final String? currentDescriptionError =
     validateMeaningfulText(
       description,
       fieldName:
       'description',
-
       minimumLength:
       10,
-
       minimumWords:
       3,
     );
 
-    // ==========================================================
-    // UPDATE FIELD ERRORS
-    // ==========================================================
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       titleError =
@@ -209,10 +903,6 @@ class _CreateReportDetailsScreenState
           currentDescriptionError;
     });
 
-    // ==========================================================
-    // STOP TITLE
-    // ==========================================================
-
     if (currentTitleError != null) {
       showMessage(
         currentTitleError,
@@ -220,10 +910,6 @@ class _CreateReportDetailsScreenState
 
       return;
     }
-
-    // ==========================================================
-    // STOP DESCRIPTION
-    // ==========================================================
 
     if (currentDescriptionError != null) {
       showMessage(
@@ -233,48 +919,113 @@ class _CreateReportDetailsScreenState
       return;
     }
 
-    // ==========================================================
-    // VALID → EVIDENCE
-    // ==========================================================
+    // ----------------------------------------------------------
+    // SAVE BEFORE NAVIGATION
+    // ----------------------------------------------------------
 
-    Navigator.push(
+    _isNavigating = true;
+
+    final bool saved =
+    await _saveDraftImmediately(
+      showFailureMessage: true,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    if (!saved) {
+      _isNavigating = false;
+      return;
+    }
+
+    final String? userId =
+        _currentUserId;
+
+    if (userId == null) {
+      _isNavigating = false;
+
+      showMessage(
+        'Your login session is unavailable. Please sign in again.',
+      );
+
+      return;
+    }
+
+    try {
+      // --------------------------------------------------------
+      // MARK EVIDENCE AS NEXT ACTIVE STEP
+      // --------------------------------------------------------
+
+      await ReportDraftService.updateDraft(
+        userId: userId,
+        category:
+        selectedCategory!,
+        priority:
+        selectedPriority!,
+        title:
+        title,
+        description:
+        description,
+        currentStep:
+        2,
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      _isNavigating = false;
+
+      showMessage(
+        'Unable to prepare the saved report for the next step.',
+      );
+
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) =>
             CreateReportEvidenceScreen(
               category:
               selectedCategory!,
-
               priority:
               selectedPriority!,
-
               title:
               title,
-
               description:
               description,
             ),
       ),
     );
+
+    if (!mounted) {
+      return;
+    }
+
+    _isNavigating = false;
+
+    /*
+     * Evidence may later update:
+     * - evidence paths
+     * - AI results
+     * - currentStep
+     *
+     * Reload when returning to Details.
+     */
+    await _restoreDraft(
+      showRestoreNotice: false,
+    );
   }
 
   // ============================================================
-  // MEANINGFUL TEXT VALIDATOR
-  //
-  // Used for BOTH title and description.
-  //
-  // This does NOT attempt to replace Gemini.
-  //
-  // It catches obvious garbage locally:
-  //
-  // xxxxx
-  // @@@@@@@
-  // 123456789
-  // asdfghjkl
-  // zxcvbnm
-  // @@@WWWWijvkjd;clnodflwepwoefkndlv
-  //
-  // Semantic ambiguity is handled later by Smart Assist.
+  // MEANINGFUL TEXT VALIDATION
   // ============================================================
 
   String? validateMeaningfulText(
@@ -286,28 +1037,26 @@ class _CreateReportDetailsScreenState
     final String text =
     value.trim();
 
-    // ==========================================================
-    // 1. EMPTY
-    // ==========================================================
+    // ----------------------------------------------------------
+    // EMPTY
+    // ----------------------------------------------------------
 
     if (text.isEmpty) {
       return 'Please enter a $fieldName.';
     }
 
-    // ==========================================================
-    // 2. MINIMUM LENGTH
-    // ==========================================================
+    // ----------------------------------------------------------
+    // MINIMUM LENGTH
+    // ----------------------------------------------------------
 
     if (text.length <
         minimumLength) {
       return 'The $fieldName is too short to be useful.';
     }
 
-    // ==========================================================
-    // 3. MUST CONTAIN LETTERS
-    //
-    // Supports ordinary English / Malay Latin characters.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // LETTERS REQUIRED
+    // ----------------------------------------------------------
 
     final RegExp letterRegex =
     RegExp(
@@ -321,60 +1070,33 @@ class _CreateReportDetailsScreenState
         )
             .length;
 
-    if (letterCount ==
-        0) {
+    if (letterCount == 0) {
       return 'The $fieldName must contain meaningful words.';
     }
 
-    // ==========================================================
-    // 4. NUMBERS ONLY
-    //
-    // Reject:
-    //
-    // 123456789
-    // 999999
-    // ==========================================================
+    // ----------------------------------------------------------
+    // NUMBERS ONLY
+    // ----------------------------------------------------------
 
-    if (
-    RegExp(
+    if (RegExp(
       r'^[0-9\s]+$',
-    ).hasMatch(
-      text,
-    )
-    ) {
+    ).hasMatch(text)) {
       return 'The $fieldName cannot contain only numbers.';
     }
 
-    // ==========================================================
-    // 5. SYMBOLS ONLY
-    //
-    // Reject:
-    //
-    // @@@@@@
-    // !!!!!!
-    // ###///
-    // ==========================================================
+    // ----------------------------------------------------------
+    // SYMBOLS ONLY
+    // ----------------------------------------------------------
 
-    if (
-    RegExp(
+    if (RegExp(
       r'^[^A-Za-zÀ-ÖØ-öø-ÿ0-9]+$',
-    ).hasMatch(
-      text,
-    )
-    ) {
+    ).hasMatch(text)) {
       return 'The $fieldName cannot contain only symbols.';
     }
 
-    // ==========================================================
-    // 6. SAME CHARACTER REPEATED AS WHOLE VALUE
-    //
-    // Reject:
-    //
-    // xxxxx
-    // aaaaa
-    // 111111
-    // !!!!!!
-    // ==========================================================
+    // ----------------------------------------------------------
+    // SAME CHARACTER REPEATED
+    // ----------------------------------------------------------
 
     final String compact =
     text.replaceAll(
@@ -384,94 +1106,62 @@ class _CreateReportDetailsScreenState
       '',
     );
 
-    if (
-    compact.length >=
-        4 &&
+    if (compact.length >= 4 &&
         RegExp(
           r'^(.)\1+$',
           caseSensitive:
           false,
         ).hasMatch(
           compact,
-        )
-    ) {
+        )) {
       return 'The $fieldName contains repeated characters '
           'and does not appear to contain meaningful information.';
     }
 
-    // ==========================================================
-    // 7. LONG REPEATED CHARACTER RUN
-    //
-    // Rejects:
-    //
-    // WWWWabcd
-    // @@@@abc
-    // xxxxxroad
-    //
-    // Three repeated letters such as "ooo" are not automatically
-    // blocked; four or more are treated as suspicious.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // LONG REPEATED CHARACTER RUN
+    // ----------------------------------------------------------
 
-    if (
-    RegExp(
+    if (RegExp(
       r'(.)\1{3,}',
       caseSensitive:
       false,
-    ).hasMatch(
-      text,
-    )
-    ) {
-      return 'The $fieldName contains too many repeated '
-          'characters.';
+    ).hasMatch(text)) {
+      return 'The $fieldName contains too many repeated characters.';
     }
 
-    // ==========================================================
-    // 8. SYMBOL RATIO
-    //
-    // Some punctuation is normal:
-    //
-    // "Road damaged near Block A."
-    //
-    // But text dominated by @#$% etc is rejected.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // SYMBOL RATIO
+    // ----------------------------------------------------------
 
     final int symbolCount =
         RegExp(
           r'[^A-Za-zÀ-ÖØ-öø-ÿ0-9\s]',
-        ).allMatches(
-          text,
-        ).length;
+        ).allMatches(text).length;
 
     final double symbolRatio =
         symbolCount /
             text.length;
 
-    if (symbolRatio >
-        0.30) {
+    if (symbolRatio > 0.30) {
       return 'The $fieldName contains too many symbols.';
     }
 
-    // ==========================================================
-    // 9. LETTER RATIO
-    //
-    // Ensures the input is mostly actual written content.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // LETTER RATIO
+    // ----------------------------------------------------------
 
     final double letterRatio =
         letterCount /
             text.length;
 
-    if (letterRatio <
-        0.45) {
-      return 'The $fieldName does not contain enough '
-          'meaningful text.';
+    if (letterRatio < 0.45) {
+      return 'The $fieldName does not contain enough meaningful text.';
     }
 
-    // ==========================================================
-    // 10. EXTRACT WORDS
-    //
-    // Remove surrounding punctuation from every token.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // EXTRACT WORDS
+    // ----------------------------------------------------------
 
     final List<String> words =
     text
@@ -491,20 +1181,13 @@ class _CreateReportDetailsScreenState
     )
         .where(
           (word) =>
-      word.length >=
-          2,
+      word.length >= 2,
     )
         .toList();
 
-    // ==========================================================
-    // 11. MINIMUM MEANINGFUL WORD COUNT
-    //
-    // Title:
-    // minimum 2 words
-    //
-    // Description:
-    // minimum 3 words
-    // ==========================================================
+    // ----------------------------------------------------------
+    // MINIMUM WORD COUNT
+    // ----------------------------------------------------------
 
     if (words.length <
         minimumWords) {
@@ -518,16 +1201,9 @@ class _CreateReportDetailsScreenState
           'using at least three useful words.';
     }
 
-    // ==========================================================
-    // 12. VERY LONG RANDOM SINGLE TOKEN
-    //
-    // Reject:
-    //
-    // ijvkjdclnodflwepwoefkndlv
-    //
-    // Threshold is intentionally high so genuine terms such as
-    // "streetlight" are accepted.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // VERY LONG RANDOM SINGLE TOKEN
+    // ----------------------------------------------------------
 
     final String lettersOnly =
     text.replaceAll(
@@ -537,129 +1213,68 @@ class _CreateReportDetailsScreenState
       '',
     );
 
-    if (
-    lettersOnly.length >=
-        20 &&
+    if (lettersOnly.length >= 20 &&
         !text.contains(
           RegExp(
             r'\s',
           ),
-        )
-    ) {
+        )) {
       return 'The $fieldName does not appear to contain '
           'a clear phrase or sentence.';
     }
 
-    // ==========================================================
-    // 13. RANDOM-LOOKING WORD DETECTION
-    //
-    // Count suspicious tokens instead of rejecting the entire
-    // report because of one unusual word.
-    //
-    // This reduces false positives.
-    // ==========================================================
+    // ----------------------------------------------------------
+    // RANDOM-LOOKING TOKEN ANALYSIS
+    // ----------------------------------------------------------
 
-    int suspiciousWords =
-    0;
+    int suspiciousWords = 0;
 
-    for (final String word in words) {
+    for (final String word
+    in words) {
       final String lower =
       word.toLowerCase();
 
-      // ========================================================
-      // EXTREMELY LONG CONSONANT SEQUENCE
-      //
-      // Example:
-      //
-      // xdfghjklm
-      // ========================================================
-
-      if (
-      RegExp(
+      if (RegExp(
         r'[bcdfghjklmnpqrstvwxyz]{7,}',
         caseSensitive:
         false,
-      ).hasMatch(
-        lower,
-      )
-      ) {
+      ).hasMatch(lower)) {
         suspiciousWords++;
-
         continue;
       }
 
-      // ========================================================
-      // LONG TOKEN WITHOUT COMMON VOWEL
-      //
-      // Random keyboard strings often contain no vowels.
-      //
-      // Only apply to longer words.
-      // ========================================================
-
-      if (
-      lower.length >=
-          7 &&
+      if (lower.length >= 7 &&
           !RegExp(
             r'[aeiou]',
-          ).hasMatch(
-            lower,
-          )
-      ) {
+          ).hasMatch(lower)) {
         suspiciousWords++;
       }
     }
 
-    // ==========================================================
-    // 14. IF ALL / MOST WORDS LOOK RANDOM
-    //
-    // Example:
-    //
-    // "fkjdl skdlfj"
-    //
-    // This should fail.
-    //
-    // But:
-    //
-    // "road near skdlfj"
-    //
-    // is not automatically blocked here because Gemini can
-    // perform the deeper semantic check.
-    // ==========================================================
-
-    if (
-    words.isNotEmpty &&
+    if (words.isNotEmpty &&
         suspiciousWords >=
-            words.length
-    ) {
+            words.length) {
       return 'The $fieldName does not appear to contain '
           'meaningful words.';
     }
-
-    // ==========================================================
-    // PASSED LOCAL VALIDATION
-    // ==========================================================
 
     return null;
   }
 
   // ============================================================
   // TITLE CHANGED
-  //
-  // Remove old error while user corrects the field.
   // ============================================================
 
   void onTitleChanged(
       String value,
       ) {
-    if (titleError ==
-        null) {
-      return;
+    if (titleError != null) {
+      setState(() {
+        titleError = null;
+      });
     }
 
-    setState(() {
-      titleError =
-      null;
-    });
+    _scheduleDraftSave();
   }
 
   // ============================================================
@@ -669,15 +1284,13 @@ class _CreateReportDetailsScreenState
   void onDescriptionChanged(
       String value,
       ) {
-    if (descriptionError ==
-        null) {
-      return;
+    if (descriptionError != null) {
+      setState(() {
+        descriptionError = null;
+      });
     }
 
-    setState(() {
-      descriptionError =
-      null;
-    });
+    _scheduleDraftSave();
   }
 
   // ============================================================
@@ -746,685 +1359,778 @@ class _CreateReportDetailsScreenState
   Widget build(
       BuildContext context,
       ) {
-    return Scaffold(
-      backgroundColor:
-      AppColors.background,
+    return PopScope(
+      canPop:
+      _allowPop,
 
-      body:
-      SafeArea(
-        child:
-        Column(
-          children: [
-            Expanded(
-              child:
-              SingleChildScrollView(
-                padding:
-                const EdgeInsets.symmetric(
-                  horizontal:
-                  20,
-                  vertical:
-                  18,
-                ),
+      onPopInvokedWithResult:
+          (
+          bool didPop,
+          Object? result,
+          ) async {
+        if (didPop) {
+          return;
+        }
 
+        await _leaveScreenSafely();
+      },
+
+      child:
+      Scaffold(
+        backgroundColor:
+        AppColors.background,
+
+        body:
+        SafeArea(
+          child:
+          Column(
+            children: [
+              Expanded(
                 child:
-                Column(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
+                SingleChildScrollView(
+                  padding:
+                  const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 18,
+                  ),
 
-                  children: [
-                    // =================================================
-                    // HEADER
-                    // =================================================
+                  child:
+                  Column(
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
 
-                    Row(
-                      children: [
-                        Container(
-                          decoration:
-                          BoxDecoration(
-                            color:
-                            AppColors.surface,
+                    children: [
+                      // =================================================
+                      // HEADER
+                      // =================================================
 
-                            borderRadius:
-                            BorderRadius.circular(
-                              12,
-                            ),
-
-                            border:
-                            Border.all(
-                              color:
-                              AppColors.border,
-                            ),
-                          ),
-
-                          child:
-                          IconButton(
-                            onPressed: () {
-                              Navigator.pop(
-                                context,
-                              );
-                            },
-
-                            icon:
-                            const Icon(
-                              Icons.arrow_back,
-                              color:
-                              AppColors.textSecondary,
-                            ),
-                          ),
-                        ),
-
-                        const SizedBox(
-                          width:
-                          14,
-                        ),
-
-                        const Column(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.start,
-
-                          children: [
-                            Text(
-                              'Report Issue',
-
-                              style:
-                              TextStyle(
-                                fontSize:
-                                22,
-
-                                fontWeight:
-                                FontWeight.bold,
-                              ),
-                            ),
-
-                            SizedBox(
-                              height:
-                              2,
-                            ),
-
-                            Text(
-                              'Help improve your community',
-
-                              style:
-                              TextStyle(
-                                color:
-                                AppColors.textSecondary,
-
-                                fontSize:
-                                12,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(
-                      height:
-                      18,
-                    ),
-
-                    // =================================================
-                    // PROGRESS
-                    // =================================================
-
-                    const _ProgressHeader(
-                      currentStep:
-                      1,
-                    ),
-
-                    const SizedBox(
-                      height:
-                      26,
-                    ),
-
-                    // =================================================
-                    // CATEGORY
-                    // =================================================
-
-                    const Text(
-                      'ISSUE CATEGORY',
-                      style:
-                      _sectionTitle,
-                    ),
-
-                    const SizedBox(
-                      height:
-                      12,
-                    ),
-
-                    GridView.builder(
-                      shrinkWrap:
-                      true,
-
-                      physics:
-                      const NeverScrollableScrollPhysics(),
-
-                      itemCount:
-                      categories.length,
-
-                      gridDelegate:
-                      const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount:
-                        3,
-
-                        childAspectRatio:
-                        1.05,
-
-                        crossAxisSpacing:
-                        10,
-
-                        mainAxisSpacing:
-                        10,
-                      ),
-
-                      itemBuilder:
-                          (
-                          context,
-                          index,
-                          ) {
-                        final category =
-                        categories[index];
-
-                        final String name =
-                            category['name'] ??
-                                '';
-
-                        final String icon =
-                            category['icon'] ??
-                                '';
-
-                        final bool selected =
-                            selectedCategory ==
-                                name;
-
-                        return GestureDetector(
-                          onTap: () {
-                            setState(() {
-                              selectedCategory =
-                                  name;
-                            });
-                          },
-
-                          child:
-                          AnimatedContainer(
-                            duration:
-                            const Duration(
-                              milliseconds:
-                              160,
-                            ),
-
+                      Row(
+                        children: [
+                          Container(
                             decoration:
                             BoxDecoration(
                               color:
-                              selected
-                                  ? AppColors.primary.withOpacity(
-                                0.12,
-                              )
-                                  : AppColors.surface,
+                              AppColors.surface,
 
                               borderRadius:
                               BorderRadius.circular(
-                                14,
+                                12,
                               ),
 
                               border:
                               Border.all(
                                 color:
-                                selected
-                                    ? AppColors.primary
-                                    : AppColors.border,
-
-                                width:
-                                selected
-                                    ? 1.5
-                                    : 1,
+                                AppColors.border,
                               ),
                             ),
 
                             child:
+                            IconButton(
+                              onPressed:
+                              _isNavigating
+                                  ? null
+                                  : _leaveScreenSafely,
+
+                              icon:
+                              const Icon(
+                                Icons.arrow_back,
+                                color:
+                                AppColors.textSecondary,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width: 14,
+                          ),
+
+                          const Expanded(
+                            child:
                             Column(
-                              mainAxisAlignment:
-                              MainAxisAlignment.center,
+                              crossAxisAlignment:
+                              CrossAxisAlignment.start,
 
                               children: [
                                 Text(
-                                  icon,
-
+                                  'Report Issue',
                                   style:
-                                  const TextStyle(
-                                    fontSize:
-                                    28,
+                                  TextStyle(
+                                    fontSize: 22,
+                                    fontWeight:
+                                    FontWeight.bold,
                                   ),
                                 ),
 
-                                const SizedBox(
-                                  height:
-                                  8,
+                                SizedBox(
+                                  height: 2,
                                 ),
 
-                                Padding(
-                                  padding:
-                                  const EdgeInsets.symmetric(
-                                    horizontal:
-                                    4,
-                                  ),
-
-                                  child:
-                                  Text(
-                                    name,
-
-                                    textAlign:
-                                    TextAlign.center,
-
-                                    style:
-                                    TextStyle(
-                                      color:
-                                      selected
-                                          ? AppColors.primary
-                                          : AppColors.textSecondary,
-
-                                      fontSize:
-                                      11,
-
-                                      fontWeight:
-                                      selected
-                                          ? FontWeight.w600
-                                          : FontWeight.normal,
-                                    ),
+                                Text(
+                                  'Help improve your community',
+                                  style:
+                                  TextStyle(
+                                    color:
+                                    AppColors.textSecondary,
+                                    fontSize: 12,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                        );
-                      },
-                    ),
 
-                    const SizedBox(
-                      height:
-                      26,
-                    ),
+                          PopupMenuButton<String>(
+                            tooltip:
+                            'Report options',
 
-                    // =================================================
-                    // PRIORITY
-                    // =================================================
+                            color:
+                            AppColors.surface,
 
-                    const Text(
-                      'PRIORITY LEVEL',
-                      style:
-                      _sectionTitle,
-                    ),
+                            enabled:
+                            !_isNavigating,
 
-                    const SizedBox(
-                      height:
-                      12,
-                    ),
+                            icon:
+                            const Icon(
+                              Icons.more_vert,
+                              color:
+                              AppColors.textSecondary,
+                            ),
 
-                    Row(
-                      children:
-                      priorities.map(
+                            onSelected:
+                                (
+                                value,
+                                ) {
+                              if (value ==
+                                  'discard') {
+                                _confirmDiscardDraft();
+                              }
+                            },
+
+                            itemBuilder:
+                                (
+                                context,
+                                ) {
+                              return const [
+                                PopupMenuItem<String>(
+                                  value:
+                                  'discard',
+                                  child:
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.delete_outline,
+                                        color:
+                                        Colors.orangeAccent,
+                                        size: 20,
+                                      ),
+                                      SizedBox(
+                                        width: 10,
+                                      ),
+                                      Text(
+                                        'Discard Report',
+                                        style:
+                                        TextStyle(
+                                          color:
+                                          Colors.orangeAccent,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ];
+                            },
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 18,
+                      ),
+
+                      // =================================================
+                      // PROGRESS
+                      // =================================================
+
+                      const _ProgressHeader(
+                        currentStep: 1,
+                      ),
+
+                      const SizedBox(
+                        height: 12,
+                      ),
+
+                      // =================================================
+                      // SMART DRAFT STATUS
+                      // =================================================
+
+                      _DraftStatusCard(
+                        isRestoring:
+                        _isRestoringDraft,
+
+                        isSaving:
+                        _isSavingDraft,
+
+                        saveFailed:
+                        _draftSaveFailed,
+
+                        restored:
+                        _draftWasRestored,
+
+                        lastSavedAt:
+                        _lastDraftSavedAt,
+                      ),
+
+                      const SizedBox(
+                        height: 26,
+                      ),
+
+                      // =================================================
+                      // CATEGORY
+                      // =================================================
+
+                      const Text(
+                        'ISSUE CATEGORY',
+                        style:
+                        _sectionTitle,
+                      ),
+
+                      const SizedBox(
+                        height: 12,
+                      ),
+
+                      GridView.builder(
+                        shrinkWrap: true,
+
+                        physics:
+                        const NeverScrollableScrollPhysics(),
+
+                        itemCount:
+                        categories.length,
+
+                        gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          childAspectRatio: 1.05,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                        ),
+
+                        itemBuilder:
                             (
-                            priority,
+                            context,
+                            index,
                             ) {
+                          final category =
+                          categories[index];
+
+                          final String name =
+                              category['name'] ??
+                                  '';
+
+                          final String icon =
+                              category['icon'] ??
+                                  '';
+
                           final bool selected =
-                              selectedPriority ==
-                                  priority;
+                              selectedCategory ==
+                                  name;
 
-                          final Color color =
-                          getPriorityColor(
-                            priority,
-                          );
+                          return GestureDetector(
+                            onTap:
+                            _isRestoringDraft
+                                ? null
+                                : () {
+                              setState(() {
+                                selectedCategory =
+                                    name;
+                              });
 
-                          return Expanded(
+                              unawaited(
+                                _saveDraftImmediately(
+                                  showFailureMessage:
+                                  false,
+                                ),
+                              );
+                            },
+
                             child:
-                            Padding(
-                              padding:
-                              const EdgeInsets.only(
-                                right:
-                                7,
+                            AnimatedContainer(
+                              duration:
+                              const Duration(
+                                milliseconds: 160,
+                              ),
+
+                              decoration:
+                              BoxDecoration(
+                                color:
+                                selected
+                                    ? AppColors.primary
+                                    .withOpacity(
+                                  0.12,
+                                )
+                                    : AppColors.surface,
+
+                                borderRadius:
+                                BorderRadius.circular(
+                                  14,
+                                ),
+
+                                border:
+                                Border.all(
+                                  color:
+                                  selected
+                                      ? AppColors.primary
+                                      : AppColors.border,
+
+                                  width:
+                                  selected
+                                      ? 1.5
+                                      : 1,
+                                ),
                               ),
 
                               child:
-                              GestureDetector(
-                                onTap: () {
-                                  setState(() {
-                                    selectedPriority =
-                                        priority;
-                                  });
-                                },
+                              Column(
+                                mainAxisAlignment:
+                                MainAxisAlignment.center,
 
-                                child:
-                                AnimatedContainer(
-                                  duration:
-                                  const Duration(
-                                    milliseconds:
-                                    160,
+                                children: [
+                                  Text(
+                                    icon,
+                                    style:
+                                    const TextStyle(
+                                      fontSize: 28,
+                                    ),
                                   ),
 
-                                  height:
-                                  42,
+                                  const SizedBox(
+                                    height: 8,
+                                  ),
 
-                                  alignment:
-                                  Alignment.center,
-
-                                  decoration:
-                                  BoxDecoration(
-                                    color:
-                                    color.withOpacity(
-                                      selected
-                                          ? 0.17
-                                          : 0.08,
+                                  Padding(
+                                    padding:
+                                    const EdgeInsets.symmetric(
+                                      horizontal: 4,
                                     ),
 
-                                    borderRadius:
-                                    BorderRadius.circular(
-                                      12,
-                                    ),
+                                    child:
+                                    Text(
+                                      name,
 
-                                    border:
-                                    Border.all(
-                                      color:
-                                      selected
-                                          ? color
-                                          : color.withOpacity(
-                                        0.4,
+                                      textAlign:
+                                      TextAlign.center,
+
+                                      style:
+                                      TextStyle(
+                                        color:
+                                        selected
+                                            ? AppColors.primary
+                                            : AppColors.textSecondary,
+
+                                        fontSize: 11,
+
+                                        fontWeight:
+                                        selected
+                                            ? FontWeight.w600
+                                            : FontWeight.normal,
                                       ),
                                     ),
                                   ),
-
-                                  child:
-                                  Text(
-                                    priority,
-
-                                    style:
-                                    TextStyle(
-                                      color:
-                                      color,
-
-                                      fontSize:
-                                      11,
-
-                                      fontWeight:
-                                      FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
+                                ],
                               ),
                             ),
                           );
                         },
-                      ).toList(),
-                    ),
-
-                    const SizedBox(
-                      height:
-                      24,
-                    ),
-
-                    // =================================================
-                    // REPORT TITLE
-                    // =================================================
-
-                    const Text(
-                      'REPORT TITLE',
-                      style:
-                      _sectionTitle,
-                    ),
-
-                    const SizedBox(
-                      height:
-                      8,
-                    ),
-
-                    TextField(
-                      controller:
-                      titleController,
-
-                      onChanged:
-                      onTitleChanged,
-
-                      maxLength:
-                      100,
-
-                      textCapitalization:
-                      TextCapitalization.sentences,
-
-                      style:
-                      const TextStyle(
-                        color:
-                        Colors.white,
                       ),
 
-                      textInputAction:
-                      TextInputAction.next,
-
-                      decoration:
-                      _inputDecoration(
-                        hint:
-                        'e.g., Large pothole on Jalan Ampang',
-
-                        errorText:
-                        titleError,
-                      ),
-                    ),
-
-                    const SizedBox(
-                      height:
-                      22,
-                    ),
-
-                    // =================================================
-                    // DESCRIPTION
-                    // =================================================
-
-                    const Text(
-                      'DESCRIPTION',
-                      style:
-                      _sectionTitle,
-                    ),
-
-                    const SizedBox(
-                      height:
-                      8,
-                    ),
-
-                    TextField(
-                      controller:
-                      descriptionController,
-
-                      onChanged:
-                      onDescriptionChanged,
-
-                      maxLength:
-                      500,
-
-                      minLines:
-                      5,
-
-                      maxLines:
-                      7,
-
-                      textCapitalization:
-                      TextCapitalization.sentences,
-
-                      style:
-                      const TextStyle(
-                        color:
-                        Colors.white,
+                      const SizedBox(
+                        height: 26,
                       ),
 
-                      decoration:
-                      _inputDecoration(
-                        hint:
-                        'Describe the issue in detail. '
-                            'Include size, severity, and any '
-                            'safety concerns...',
+                      // =================================================
+                      // PRIORITY
+                      // =================================================
 
-                        errorText:
-                        descriptionError,
-                      ),
-                    ),
-
-                    // =================================================
-                    // QUALITY GUIDANCE
-                    // =================================================
-
-                    Container(
-                      width:
-                      double.infinity,
-
-                      padding:
-                      const EdgeInsets.all(
-                        12,
+                      const Text(
+                        'PRIORITY LEVEL',
+                        style:
+                        _sectionTitle,
                       ),
 
-                      decoration:
-                      BoxDecoration(
-                        color:
-                        AppColors.primary.withOpacity(
-                          0.06,
+                      const SizedBox(
+                        height: 12,
+                      ),
+
+                      Row(
+                        children:
+                        priorities.map(
+                              (
+                              priority,
+                              ) {
+                            final bool selected =
+                                selectedPriority ==
+                                    priority;
+
+                            final Color color =
+                            getPriorityColor(
+                              priority,
+                            );
+
+                            return Expanded(
+                              child:
+                              Padding(
+                                padding:
+                                const EdgeInsets.only(
+                                  right: 7,
+                                ),
+
+                                child:
+                                GestureDetector(
+                                  onTap:
+                                  _isRestoringDraft
+                                      ? null
+                                      : () {
+                                    setState(() {
+                                      selectedPriority =
+                                          priority;
+                                    });
+
+                                    unawaited(
+                                      _saveDraftImmediately(
+                                        showFailureMessage:
+                                        false,
+                                      ),
+                                    );
+                                  },
+
+                                  child:
+                                  AnimatedContainer(
+                                    duration:
+                                    const Duration(
+                                      milliseconds: 160,
+                                    ),
+
+                                    height: 42,
+
+                                    alignment:
+                                    Alignment.center,
+
+                                    decoration:
+                                    BoxDecoration(
+                                      color:
+                                      color.withOpacity(
+                                        selected
+                                            ? 0.17
+                                            : 0.08,
+                                      ),
+
+                                      borderRadius:
+                                      BorderRadius.circular(
+                                        12,
+                                      ),
+
+                                      border:
+                                      Border.all(
+                                        color:
+                                        selected
+                                            ? color
+                                            : color.withOpacity(
+                                          0.4,
+                                        ),
+                                      ),
+                                    ),
+
+                                    child:
+                                    Text(
+                                      priority,
+
+                                      style:
+                                      TextStyle(
+                                        color: color,
+                                        fontSize: 11,
+                                        fontWeight:
+                                        FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ).toList(),
+                      ),
+
+                      const SizedBox(
+                        height: 24,
+                      ),
+
+                      // =================================================
+                      // REPORT TITLE
+                      // =================================================
+
+                      const Text(
+                        'REPORT TITLE',
+                        style:
+                        _sectionTitle,
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      TextField(
+                        controller:
+                        titleController,
+
+                        enabled:
+                        !_isRestoringDraft,
+
+                        onChanged:
+                        onTitleChanged,
+
+                        maxLength: 100,
+
+                        textCapitalization:
+                        TextCapitalization.sentences,
+
+                        style:
+                        const TextStyle(
+                          color: Colors.white,
                         ),
 
-                        borderRadius:
-                        BorderRadius.circular(
+                        textInputAction:
+                        TextInputAction.next,
+
+                        decoration:
+                        _inputDecoration(
+                          hint:
+                          'e.g., Large pothole on Jalan Ampang',
+                          errorText:
+                          titleError,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 22,
+                      ),
+
+                      // =================================================
+                      // DESCRIPTION
+                      // =================================================
+
+                      const Text(
+                        'DESCRIPTION',
+                        style:
+                        _sectionTitle,
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      TextField(
+                        controller:
+                        descriptionController,
+
+                        enabled:
+                        !_isRestoringDraft,
+
+                        onChanged:
+                        onDescriptionChanged,
+
+                        maxLength: 500,
+
+                        minLines: 5,
+                        maxLines: 7,
+
+                        textCapitalization:
+                        TextCapitalization.sentences,
+
+                        style:
+                        const TextStyle(
+                          color: Colors.white,
+                        ),
+
+                        decoration:
+                        _inputDecoration(
+                          hint:
+                          'Describe the issue in detail. '
+                              'Include size, severity, and any '
+                              'safety concerns...',
+                          errorText:
+                          descriptionError,
+                        ),
+                      ),
+
+                      // =================================================
+                      // QUALITY GUIDANCE
+                      // =================================================
+
+                      Container(
+                        width:
+                        double.infinity,
+
+                        padding:
+                        const EdgeInsets.all(
                           12,
                         ),
 
-                        border:
-                        Border.all(
+                        decoration:
+                        BoxDecoration(
                           color:
-                          AppColors.primary.withOpacity(
-                            0.25,
+                          AppColors.primary
+                              .withOpacity(
+                            0.06,
                           ),
-                        ),
-                      ),
 
-                      child:
-                      const Row(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                          borderRadius:
+                          BorderRadius.circular(
+                            12,
+                          ),
 
-                        children: [
-                          Icon(
-                            Icons.info_outline,
-
+                          border:
+                          Border.all(
                             color:
-                            AppColors.primary,
-
-                            size:
-                            18,
-                          ),
-
-                          SizedBox(
-                            width:
-                            9,
-                          ),
-
-                          Expanded(
-                            child:
-                            Text(
-                              'Both the title and description must '
-                                  'clearly describe the infrastructure '
-                                  'issue. Random characters, repeated '
-                                  'text, or unusable information cannot '
-                                  'be submitted.',
-
-                              style:
-                              TextStyle(
-                                color:
-                                AppColors.textSecondary,
-
-                                fontSize:
-                                10,
-
-                                height:
-                                1.4,
-                              ),
+                            AppColors.primary
+                                .withOpacity(
+                              0.25,
                             ),
                           ),
-                        ],
+                        ),
+
+                        child:
+                        const Row(
+                          crossAxisAlignment:
+                          CrossAxisAlignment.start,
+
+                          children: [
+                            Icon(
+                              Icons.info_outline,
+                              color:
+                              AppColors.primary,
+                              size: 18,
+                            ),
+
+                            SizedBox(
+                              width: 9,
+                            ),
+
+                            Expanded(
+                              child:
+                              Text(
+                                'Both the title and description must '
+                                    'clearly describe the infrastructure '
+                                    'issue. Random characters, repeated '
+                                    'text, or unusable information cannot '
+                                    'be submitted.',
+                                style:
+                                TextStyle(
+                                  color:
+                                  AppColors.textSecondary,
+                                  fontSize: 10,
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            // =====================================================
-            // CONTINUE
-            // =====================================================
-
-            Container(
-              padding:
-              const EdgeInsets.fromLTRB(
-                20,
-                14,
-                20,
-                18,
-              ),
-
-              decoration:
-              const BoxDecoration(
-                color:
-                AppColors.background,
-
-                border:
-                Border(
-                  top:
-                  BorderSide(
-                    color:
-                    AppColors.border,
+                    ],
                   ),
                 ),
               ),
 
-              child:
-              SizedBox(
-                width:
-                double.infinity,
+              // =====================================================
+              // CONTINUE
+              // =====================================================
 
-                height:
-                56,
+              Container(
+                padding:
+                const EdgeInsets.fromLTRB(
+                  20,
+                  14,
+                  20,
+                  18,
+                ),
+
+                decoration:
+                const BoxDecoration(
+                  color:
+                  AppColors.background,
+
+                  border:
+                  Border(
+                    top:
+                    BorderSide(
+                      color:
+                      AppColors.border,
+                    ),
+                  ),
+                ),
 
                 child:
-                ElevatedButton(
-                  style:
-                  ElevatedButton.styleFrom(
-                    backgroundColor:
-                    AppColors.primaryDark,
+                SizedBox(
+                  width:
+                  double.infinity,
 
-                    foregroundColor:
-                    Colors.white,
-
-                    shape:
-                    RoundedRectangleBorder(
-                      borderRadius:
-                      BorderRadius.circular(
-                        15,
-                      ),
-                    ),
-                  ),
-
-                  onPressed:
-                  continueToEvidence,
+                  height: 56,
 
                   child:
-                  const Text(
-                    'Continue →',
-
+                  ElevatedButton(
                     style:
-                    TextStyle(
-                      fontSize:
-                      16,
+                    ElevatedButton.styleFrom(
+                      backgroundColor:
+                      AppColors.primaryDark,
 
-                      fontWeight:
-                      FontWeight.bold,
+                      foregroundColor:
+                      Colors.white,
+
+                      disabledBackgroundColor:
+                      AppColors.primaryDark
+                          .withOpacity(
+                        0.45,
+                      ),
+
+                      shape:
+                      RoundedRectangleBorder(
+                        borderRadius:
+                        BorderRadius.circular(
+                          15,
+                        ),
+                      ),
+                    ),
+
+                    onPressed:
+                    _isRestoringDraft ||
+                        _isNavigating
+                        ? null
+                        : continueToEvidence,
+
+                    child:
+                    _isNavigating
+                        ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child:
+                      CircularProgressIndicator(
+                        strokeWidth: 2.3,
+                        color:
+                        Colors.white,
+                      ),
+                    )
+                        : const Text(
+                      'Continue →',
+                      style:
+                      TextStyle(
+                        fontSize: 16,
+                        fontWeight:
+                        FontWeight.bold,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1441,15 +2147,10 @@ TextStyle(
   Color(
     0xFFA9C7EF,
   ),
-
-  fontSize:
-  12,
-
+  fontSize: 12,
   fontWeight:
   FontWeight.w600,
-
-  letterSpacing:
-  0.5,
+  letterSpacing: 0.5,
 );
 
 // ================================================================
@@ -1461,8 +2162,7 @@ InputDecoration _inputDecoration({
   String? errorText,
 }) {
   return InputDecoration(
-    hintText:
-    hint,
+    hintText: hint,
 
     errorText:
     errorText,
@@ -1477,16 +2177,11 @@ InputDecoration _inputDecoration({
     const TextStyle(
       color:
       Colors.orangeAccent,
-
-      fontSize:
-      10,
-
-      height:
-      1.25,
+      fontSize: 10,
+      height: 1.25,
     ),
 
-    filled:
-    true,
+    filled: true,
 
     fillColor:
     AppColors.surface,
@@ -1499,11 +2194,8 @@ InputDecoration _inputDecoration({
 
     contentPadding:
     const EdgeInsets.symmetric(
-      horizontal:
-      16,
-
-      vertical:
-      16,
+      horizontal: 16,
+      vertical: 16,
     ),
 
     enabledBorder:
@@ -1512,7 +2204,6 @@ InputDecoration _inputDecoration({
       BorderRadius.circular(
         14,
       ),
-
       borderSide:
       const BorderSide(
         color:
@@ -1526,14 +2217,11 @@ InputDecoration _inputDecoration({
       BorderRadius.circular(
         14,
       ),
-
       borderSide:
       const BorderSide(
         color:
         AppColors.primary,
-
-        width:
-        1.5,
+        width: 1.5,
       ),
     ),
 
@@ -1543,7 +2231,6 @@ InputDecoration _inputDecoration({
       BorderRadius.circular(
         14,
       ),
-
       borderSide:
       const BorderSide(
         color:
@@ -1557,14 +2244,26 @@ InputDecoration _inputDecoration({
       BorderRadius.circular(
         14,
       ),
-
       borderSide:
       const BorderSide(
         color:
         Colors.orangeAccent,
+        width: 1.5,
+      ),
+    ),
 
-        width:
-        1.5,
+    disabledBorder:
+    OutlineInputBorder(
+      borderRadius:
+      BorderRadius.circular(
+        14,
+      ),
+      borderSide:
+      BorderSide(
+        color:
+        AppColors.border.withOpacity(
+          0.6,
+        ),
       ),
     ),
   );
@@ -1591,39 +2290,28 @@ class _ProgressHeader
         _ProgressItem(
           label:
           'Details',
-
           active:
-          currentStep >=
-              1,
-
+          currentStep >= 1,
           complete:
-          currentStep >
-              1,
+          currentStep > 1,
         ),
 
         _ProgressItem(
           label:
           'Evidence',
-
           active:
-          currentStep >=
-              2,
-
+          currentStep >= 2,
           complete:
-          currentStep >
-              2,
+          currentStep > 2,
         ),
 
         _ProgressItem(
           label:
           'Location',
-
           active:
-          currentStep >=
-              3,
-
+          currentStep >= 3,
           complete:
-          false,
+          currentStep > 3,
         ),
       ],
     );
@@ -1637,9 +2325,7 @@ class _ProgressHeader
 class _ProgressItem
     extends StatelessWidget {
   final String label;
-
   final bool active;
-
   final bool complete;
 
   const _ProgressItem({
@@ -1657,13 +2343,11 @@ class _ProgressItem
       Column(
         children: [
           Container(
-            height:
-            4,
+            height: 4,
 
             margin:
             const EdgeInsets.symmetric(
-              horizontal:
-              4,
+              horizontal: 4,
             ),
 
             decoration:
@@ -1681,8 +2365,7 @@ class _ProgressItem
           ),
 
           const SizedBox(
-            height:
-            7,
+            height: 7,
           ),
 
           Text(
@@ -1697,12 +2380,249 @@ class _ProgressItem
                   ? AppColors.primary
                   : AppColors.textSecondary,
 
-              fontSize:
-              10,
+              fontSize: 10,
             ),
           ),
         ],
       ),
     );
+  }
+}
+
+// ================================================================
+// SMART DRAFT STATUS CARD
+// ================================================================
+
+class _DraftStatusCard
+    extends StatelessWidget {
+  final bool isRestoring;
+  final bool isSaving;
+  final bool saveFailed;
+  final bool restored;
+  final DateTime? lastSavedAt;
+
+  const _DraftStatusCard({
+    required this.isRestoring,
+    required this.isSaving,
+    required this.saveFailed,
+    required this.restored,
+    required this.lastSavedAt,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    IconData icon;
+    String title;
+    String subtitle;
+    Color statusColor;
+
+    if (isRestoring) {
+      icon =
+          Icons.sync;
+
+      title =
+      'Checking saved progress';
+
+      subtitle =
+      'Looking for an unfinished report on this device.';
+
+      statusColor =
+          AppColors.primary;
+    } else if (isSaving) {
+      icon =
+          Icons.save_outlined;
+
+      title =
+      'Saving report draft';
+
+      subtitle =
+      'Your latest changes are being protected automatically.';
+
+      statusColor =
+          AppColors.primary;
+    } else if (saveFailed) {
+      icon =
+          Icons.error_outline;
+
+      title =
+      'Draft save needs attention';
+
+      subtitle =
+      'The latest changes could not be saved locally.';
+
+      statusColor =
+          Colors.orangeAccent;
+    } else if (lastSavedAt != null) {
+      icon =
+          Icons.check_circle_outline;
+
+      title =
+      restored
+          ? 'Draft protected'
+          : 'Draft saved';
+
+      subtitle =
+      'Last saved ${_formatDraftTime(lastSavedAt!)}';
+
+      statusColor =
+      const Color(
+        0xFF2EE6A6,
+      );
+    } else {
+      icon =
+          Icons.shield_outlined;
+
+      title =
+      'Smart Draft Recovery';
+
+      subtitle =
+      'Your unfinished report will be saved automatically.';
+
+      statusColor =
+          AppColors.primary;
+    }
+
+    return AnimatedContainer(
+      duration:
+      const Duration(
+        milliseconds: 220,
+      ),
+
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        12,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        statusColor.withOpacity(
+          0.07,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          12,
+        ),
+
+        border:
+        Border.all(
+          color:
+          statusColor.withOpacity(
+            0.30,
+          ),
+        ),
+      ),
+
+      child:
+      Row(
+        children: [
+          if (isSaving ||
+              isRestoring)
+            SizedBox(
+              width: 18,
+              height: 18,
+
+              child:
+              CircularProgressIndicator(
+                strokeWidth: 2,
+                color:
+                statusColor,
+              ),
+            )
+          else
+            Icon(
+              icon,
+              color:
+              statusColor,
+              size: 19,
+            ),
+
+          const SizedBox(
+            width: 10,
+          ),
+
+          Expanded(
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                Text(
+                  title,
+
+                  style:
+                  TextStyle(
+                    color:
+                    statusColor,
+
+                    fontSize: 11,
+
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
+                ),
+
+                const SizedBox(
+                  height: 2,
+                ),
+
+                Text(
+                  subtitle,
+
+                  style:
+                  const TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    fontSize: 9,
+
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _formatDraftTime(
+      DateTime value,
+      ) {
+    final DateTime now =
+    DateTime.now();
+
+    final Duration difference =
+    now.difference(
+      value,
+    );
+
+    if (difference.isNegative) {
+      return 'just now';
+    }
+
+    if (difference.inSeconds < 60) {
+      return 'just now';
+    }
+
+    if (difference.inMinutes < 60) {
+      return '${difference.inMinutes} min ago';
+    }
+
+    if (difference.inHours < 24) {
+      return '${difference.inHours} hr ago';
+    }
+
+    return '${value.day.toString().padLeft(2, '0')}/'
+        '${value.month.toString().padLeft(2, '0')}/'
+        '${value.year}';
   }
 }
