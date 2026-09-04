@@ -10,6 +10,9 @@ import 'create_report_evidence_screen.dart';
 import 'widgets/voice_quick_report_panel.dart';
 import '../../services/voice_speech_service.dart';
 
+import '../../models/voice_report_analysis.dart';
+import '../../services/voice_report_ai_service.dart';
+
 import '../../utils/multilingual_text_validator.dart';
 
 // ================================================================
@@ -142,6 +145,44 @@ class _CreateReportDetailsScreenState
   bool _voiceTranscriptValidated = false;
 
   // ============================================================
+// PHASE 1D — VOICE AI STATE
+// ============================================================
+
+  VoiceReportAnalysis?
+  _voiceAnalysis;
+
+  bool _isAnalyzingVoice =
+  false;
+
+  String? _voiceAnalysisError;
+
+  bool _voiceAnalysisAccepted =
+  false;
+
+
+// ============================================================
+// ACCEPTED VOICE INTELLIGENCE
+//
+// These become draft data ONLY after explicit citizen acceptance.
+// ============================================================
+
+  String?
+  _acceptedVoiceLocationContext;
+
+  String?
+  _acceptedVoiceSafetyConcern;
+
+
+  // ============================================================
+  // REQUEST GENERATION
+  //
+  // Prevents an old async AI result from overwriting a newer
+  // transcript/result after Retry / Record Again.
+  // ============================================================
+
+  int _voiceAnalysisGeneration = 0;
+
+  // ============================================================
   // FIELD ERRORS
   // ============================================================
 
@@ -250,6 +291,8 @@ class _CreateReportDetailsScreenState
         _ReportInputMode.voice &&
         mode ==
             _ReportInputMode.manual) {
+      _voiceAnalysisGeneration++;
+
       if (VoiceSpeechService
           .instance
           .isListening) {
@@ -258,6 +301,13 @@ class _CreateReportDetailsScreenState
               .instance
               .cancelListening(),
         );
+      }
+
+      if (mounted) {
+        setState(() {
+          _isAnalyzingVoice =
+          false;
+        });
       }
     }
 
@@ -269,14 +319,22 @@ class _CreateReportDetailsScreenState
 
 
   // ============================================================
-// PHASE 1C — ACCEPT VOICE TRANSCRIPT
-// ============================================================
+  // PHASE 1C — ACCEPT VOICE TRANSCRIPT
+  // ============================================================
 
   void _handleVoiceTranscriptAccepted(
       String transcript,
       ) {
     final String normalized =
-    transcript.trim();
+    transcript
+        .replaceAll(
+      RegExp(
+        r'\s+',
+        unicode: true,
+      ),
+      ' ',
+    )
+        .trim();
 
     if (normalized.isEmpty) {
       showMessage(
@@ -286,30 +344,69 @@ class _CreateReportDetailsScreenState
       return;
     }
 
+    // Invalidate any outstanding AI response.
+    _voiceAnalysisGeneration++;
+
     setState(() {
       _voiceTranscript =
           normalized;
 
       _voiceTranscriptValidated =
       false;
+
+      _voiceAnalysis =
+      null;
+
+      _voiceAnalysisError =
+      null;
+
+      _voiceAnalysisAccepted =
+      false;
+
+      _acceptedVoiceLocationContext =
+      null;
+
+      _acceptedVoiceSafetyConcern =
+      null;
     });
 
     showMessage(
-      'Voice transcript captured. Please review it before continuing.',
+      'Voice transcript captured. Review it before AI analysis.',
     );
   }
 
   // ============================================================
-// PHASE 1C — RECORD VOICE AGAIN
-// ============================================================
+  // RECORD VOICE AGAIN
+  // ============================================================
 
   void _recordVoiceAgain() {
+    // Invalidate old AI request.
+    _voiceAnalysisGeneration++;
+
     setState(() {
       _voiceTranscript =
       null;
 
       _voiceTranscriptValidated =
       false;
+
+      _voiceAnalysis =
+      null;
+
+      _voiceAnalysisError =
+      null;
+
+      _voiceAnalysisAccepted =
+      false;
+
+      _isAnalyzingVoice =
+      false;
+
+      _acceptedVoiceLocationContext =
+      null;
+
+      _acceptedVoiceSafetyConcern =
+      null;
     });
 
     VoiceSpeechService
@@ -318,44 +415,65 @@ class _CreateReportDetailsScreenState
   }
 
 
-// ============================================================
-// PHASE 1C — CONTINUE VOICE REVIEW
-// ============================================================
+  // ============================================================
+  // CONTINUE VOICE REVIEW
+  // ============================================================
 
   Future<void>
   _continueVoiceTranscriptReview() async {
+    if (_isAnalyzingVoice ||
+        _isNavigating) {
+      return;
+    }
+
     final String transcript =
         _voiceTranscript
             ?.trim() ??
             '';
 
-    if (transcript.isEmpty) {
-      showMessage(
-        'Please record your voice report first.',
-      );
+    // ==========================================================
+    // LOCAL MULTILINGUAL VALIDATION
+    // ==========================================================
 
-      return;
-    }
-
-    final String? error =
-    _validateVoiceTranscript(
+    final String? validationError =
+    MultilingualTextValidator
+        .validateVoiceTranscript(
       transcript,
     );
 
-    if (error != null) {
-      if (mounted) {
-        setState(() {
-          _voiceTranscriptValidated =
-          false;
-        });
+    if (validationError !=
+        null) {
+      if (!mounted) {
+        return;
       }
 
+      setState(() {
+        _voiceTranscriptValidated =
+        false;
+
+        _voiceAnalysis =
+        null;
+
+        _voiceAnalysisError =
+            validationError;
+
+        _voiceAnalysisAccepted =
+        false;
+      });
+
       showMessage(
-        error,
+        validationError,
       );
 
       return;
     }
+
+    // ==========================================================
+    // REQUEST GENERATION
+    // ==========================================================
+
+    final int requestGeneration =
+    ++_voiceAnalysisGeneration;
 
     if (!mounted) {
       return;
@@ -364,16 +482,158 @@ class _CreateReportDetailsScreenState
     setState(() {
       _voiceTranscriptValidated =
       true;
+
+      _isAnalyzingVoice =
+      true;
+
+      _voiceAnalysis =
+      null;
+
+      _voiceAnalysisError =
+      null;
+
+      _voiceAnalysisAccepted =
+      false;
+    });
+
+    try {
+      // --------------------------------------------------------
+      // Speech locale is only supporting context.
+      // AI independently detects actual transcript language.
+      // --------------------------------------------------------
+
+      final String? speechLocaleId =
+          VoiceSpeechService
+              .instance
+              .state
+              .localeId;
+
+      final VoiceReportAnalysis result =
+      await VoiceReportAiService
+          .instance
+          .analyzeTranscript(
+        transcript:
+        transcript,
+
+        speechLocaleId:
+        speechLocaleId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      // --------------------------------------------------------
+      // STALE RESPONSE PROTECTION
+      //
+      // User may have:
+      // - recorded again
+      // - switched transcript
+      // - started another analysis
+      //
+      // Never let an older result replace the latest state.
+      // --------------------------------------------------------
+
+      if (requestGeneration !=
+          _voiceAnalysisGeneration) {
+        return;
+      }
+
+      setState(() {
+        _isAnalyzingVoice =
+        false;
+
+        _voiceAnalysis =
+            result;
+
+        _voiceAnalysisError =
+        null;
+
+        _voiceAnalysisAccepted =
+        false;
+      });
+
+      // --------------------------------------------------------
+      // INFORMATION SUFFICIENCY
+      // --------------------------------------------------------
+
+      if (!result
+          .reportInformationSufficient) {
+        showMessage(
+          'AI found that more information may be needed. '
+              'Review the missing information before accepting.',
+        );
+      } else if (result
+          .requiresCarefulReview ||
+          result.isLowConfidence) {
+        showMessage(
+          'AI created suggestions, but they need careful review.',
+        );
+      } else {
+        showMessage(
+          'AI suggestions are ready for your review.',
+        );
+      }
+    } on VoiceReportAiException catch (
+    error) {
+    if (!mounted) {
+    return;
+    }
+
+    if (requestGeneration !=
+    _voiceAnalysisGeneration) {
+    return;
+    }
+
+    setState(() {
+    _isAnalyzingVoice =
+    false;
+
+    _voiceAnalysis =
+    null;
+
+    _voiceAnalysisError =
+    error.message;
+
+    _voiceAnalysisAccepted =
+    false;
     });
 
     showMessage(
-      'Voice report passed the local quality check and is ready for AI analysis.',
+    error.message,
     );
+    } catch (_) {
+    if (!mounted) {
+    return;
+    }
+
+    if (requestGeneration !=
+    _voiceAnalysisGeneration) {
+    return;
+    }
+
+    setState(() {
+    _isAnalyzingVoice =
+    false;
+
+    _voiceAnalysis =
+    null;
+
+    _voiceAnalysisError =
+    'Unable to analyse the voice report. Please try again.';
+
+    _voiceAnalysisAccepted =
+    false;
+    });
+
+    showMessage(
+    'Unable to analyse the voice report. Please try again.',
+    );
+    }
   }
 
-
   // ============================================================
-  // PHASE 1C — VOICE TRANSCRIPT VALIDATION
+  // VOICE TRANSCRIPT VALIDATION
   // ============================================================
 
   String? _validateVoiceTranscript(
@@ -627,33 +887,48 @@ class _CreateReportDetailsScreenState
       addressDistanceMeters:
       existing?.addressDistanceMeters,
 
-// ==========================================================
-// PRESERVE VOICE DATA
-// ==========================================================
+      // ==========================================================
+      // PRESERVE VOICE DATA
+      // ==========================================================
+
+      // ==========================================================
+      // PHASE 1D — ACCEPTED VOICE INTELLIGENCE
+      //
+      // Never persist unaccepted AI suggestions.
+      //
+      // Existing saved voice data is preserved unless the citizen
+      // explicitly accepts a new Voice Intelligence result.
+      // ==========================================================
 
       voiceTranscript:
-      existing?.voiceTranscript,
+      _voiceAnalysisAccepted
+          ? _voiceTranscript
+          : existing?.voiceTranscript,
 
       voiceLocationContext:
-      existing?.voiceLocationContext,
+      _voiceAnalysisAccepted
+          ? _acceptedVoiceLocationContext
+          : existing?.voiceLocationContext,
 
       voiceSafetyConcern:
-      existing?.voiceSafetyConcern,
+      _voiceAnalysisAccepted
+          ? _acceptedVoiceSafetyConcern
+          : existing?.voiceSafetyConcern,
 
-// ==========================================================
-// PRESERVE PHOTO EVIDENCE
-// ==========================================================
+      // ==========================================================
+      // PRESERVE PHOTO EVIDENCE
+      // ==========================================================
 
       evidenceImagePaths:
       existing?.evidenceImagePaths ??
           const <String>[],
 
-// ==========================================================
-// PRESERVE VIDEO EVIDENCE
-//
-// Details screen does not own evidence.
-// It must preserve whatever Evidence screen already saved.
-// ==========================================================
+      // ==========================================================
+      // PRESERVE VIDEO EVIDENCE
+      //
+      // Details screen does not own evidence.
+      // It must preserve whatever Evidence screen already saved.
+      // ==========================================================
 
       evidenceVideoPaths:
       existing?.evidenceVideoPaths ??
@@ -779,6 +1054,165 @@ class _CreateReportDetailsScreenState
 
     return completer.future;
   }
+
+  Future<void>
+  _acceptVoiceAiSuggestion() async {
+    if (_isNavigating ||
+        _isAnalyzingVoice) {
+      return;
+    }
+
+    final VoiceReportAnalysis?
+    analysis =
+        _voiceAnalysis;
+
+    final String transcript =
+        _voiceTranscript
+            ?.trim() ??
+            '';
+
+    if (analysis == null ||
+        transcript.isEmpty) {
+      showMessage(
+        'No AI voice report is available to apply.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // DEFENSIVE ENUM VALIDATION
+    // ==========================================================
+
+    if (!VoiceReportAnalysis
+        .allowedCategories
+        .contains(
+      analysis.category,
+    )) {
+      showMessage(
+        'The AI category is not supported by this application.',
+      );
+
+      return;
+    }
+
+    if (!VoiceReportAnalysis
+        .allowedPriorities
+        .contains(
+      analysis.priority,
+    )) {
+      showMessage(
+        'The AI priority is not supported by this application.',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // VALIDATE AI-GENERATED TITLE + DESCRIPTION
+    //
+    // Use the SAME multilingual validation as Manual input.
+    // ==========================================================
+
+    final String? titleValidation =
+    MultilingualTextValidator
+        .validateReportTitle(
+      analysis.title,
+    );
+
+    if (titleValidation !=
+        null) {
+      showMessage(
+        'AI title requires review: $titleValidation',
+      );
+
+      return;
+    }
+
+    final String? descriptionValidation =
+    MultilingualTextValidator
+        .validateDescription(
+      analysis.description,
+    );
+
+    if (descriptionValidation !=
+        null) {
+      showMessage(
+        'AI description requires review: '
+            '$descriptionValidation',
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // EXPLICIT CITIZEN ACCEPTANCE
+    //
+    // This is the FIRST point at which AI-generated structured
+    // details are allowed to enter the actual report.
+    // ==========================================================
+
+    setState(() {
+      selectedCategory =
+          analysis.category;
+
+      selectedPriority =
+          analysis.priority;
+
+      titleController.text =
+          analysis.title;
+
+      descriptionController.text =
+          analysis.description;
+
+      titleError =
+      null;
+
+      descriptionError =
+      null;
+
+      _acceptedVoiceLocationContext =
+          analysis.locationContext;
+
+      _acceptedVoiceSafetyConcern =
+          analysis.safetyConcern;
+
+      _voiceAnalysisAccepted =
+      true;
+    });
+
+    // ==========================================================
+    // SAVE THROUGH EXISTING PHASE 0 SAFE DRAFT SYSTEM
+    // ==========================================================
+
+    final bool saved =
+    await _saveDraftImmediately(
+      showFailureMessage:
+      true,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    if (!saved) {
+      setState(() {
+        _voiceAnalysisAccepted =
+        false;
+      });
+
+      showMessage(
+        'The AI details could not be saved locally. Please try again.',
+      );
+
+      return;
+    }
+
+    showMessage(
+      'Voice report details applied. You can now continue to Evidence.',
+    );
+  }
+
   // ============================================================
   // ACTUAL SAVE OPERATION
   // ============================================================
@@ -1104,6 +1538,35 @@ class _CreateReportDetailsScreenState
         _lastDraftSavedAt = null;
 
         _allowPop = true;
+
+        _voiceTranscript =
+        null;
+
+        _voiceTranscriptValidated =
+        false;
+
+        _voiceAnalysis =
+        null;
+
+        _voiceAnalysisError =
+        null;
+
+        _voiceAnalysisAccepted =
+        false;
+
+        _isAnalyzingVoice =
+        false;
+
+        _acceptedVoiceLocationContext =
+        null;
+
+        _acceptedVoiceSafetyConcern =
+        null;
+
+        _voiceAnalysisGeneration++;
+
+        _reportInputMode =
+            _ReportInputMode.manual;
       });
 
       Navigator.of(context).pop();
@@ -2047,9 +2510,9 @@ class _CreateReportDetailsScreenState
                       ),
 
 
-// =================================================
-// VOICE QUICK REPORT
-// =================================================
+                      // =================================================
+                      // VOICE QUICK REPORT
+                      // =================================================
 
                       if (_reportInputMode ==
                           _ReportInputMode.voice) ...[
@@ -2080,10 +2543,56 @@ class _CreateReportDetailsScreenState
                         ],
                       ],
 
+                      if (_isAnalyzingVoice) ...[
+                        const SizedBox(
+                          height:
+                          14,
+                        ),
 
-// =================================================
-// MANUAL REPORT
-// =================================================
+                        const _VoiceAiLoadingCard(),
+                      ],
+
+                      if (_voiceAnalysisError !=
+                          null) ...[
+                        const SizedBox(
+                          height:
+                          14,
+                        ),
+
+                        _VoiceAiErrorCard(
+                          message:
+                          _voiceAnalysisError!,
+
+                          onRetry:
+                          _continueVoiceTranscriptReview,
+                        ),
+                      ],
+
+                      if (_voiceAnalysis !=
+                          null) ...[
+                        const SizedBox(
+                          height:
+                          14,
+                        ),
+
+                        _VoiceAiSuggestionCard(
+                          analysis:
+                          _voiceAnalysis!,
+
+                          accepted:
+                          _voiceAnalysisAccepted,
+
+                          onAccept:
+                          _acceptVoiceAiSuggestion,
+
+                          onAnalyzeAgain:
+                          _continueVoiceTranscriptReview,
+                        ),
+                      ],
+
+                      // =================================================
+                      // MANUAL REPORT
+                      // =================================================
 
                       if (_reportInputMode ==
                           _ReportInputMode.manual) ...[
@@ -2649,55 +3158,103 @@ class _CreateReportDetailsScreenState
                       ),
                     ),
 
+                    // ==========================================================
+                    // PHASE 1D — SAFE CONTINUE CONTROL
+                    // ==========================================================
+                    //
+                    // MANUAL:
+                    // Normal behaviour remains unchanged.
+                    //
+                    // VOICE:
+                    // Citizen cannot continue until:
+                    //
+                    // Transcript
+                    // → local multilingual validation
+                    // → AI analysis
+                    // → citizen reviews AI suggestions
+                    // → "Use These Details"
+                    // → _voiceAnalysisAccepted == true
+                    //
+                    // ==========================================================
+
                     onPressed:
                     _isRestoringDraft ||
-                        _isNavigating
+                        _isNavigating ||
+                        _isAnalyzingVoice
                         ? null
                         : _reportInputMode ==
                         _ReportInputMode.manual
                         ? continueToEvidence
-
-                    // ------------------------------------------------
-                    // VOICE MODE
-                    //
-                    // Phase 1C may validate the transcript, but the
-                    // report cannot go to Evidence until Phase 1D
-                    // creates and the citizen accepts Category,
-                    // Priority, Title and Description.
-                    // ------------------------------------------------
+                        : _voiceAnalysisAccepted
+                        ? continueToEvidence
                         : null,
 
                     child:
                     _isNavigating
                         ? const SizedBox(
-                      width:
-                      22,
-                      height:
-                      22,
+                      width: 22,
+                      height: 22,
 
                       child:
                       CircularProgressIndicator(
-                        strokeWidth:
-                        2.3,
-                        color:
-                        Colors.white,
+                        strokeWidth: 2.3,
+                        color: Colors.white,
                       ),
                     )
+
+                    // ========================================================
+                    // NORMAL BUTTON CONTENT
+                    // ========================================================
+
                         : Text(
                       _reportInputMode ==
                           _ReportInputMode.manual
+
+                      // ------------------------------------------------------
+                      // MANUAL
+                      // ------------------------------------------------------
+
                           ? 'Continue →'
-                          : _voiceTranscriptValidated
-                          ? 'Ready for AI Analysis'
-                          : 'Complete Voice Review Above',
 
-                      style:
-                      const TextStyle(
-                        fontSize:
-                        16,
+                      // ------------------------------------------------------
+                      // VOICE — AI CURRENTLY RUNNING
+                      // ------------------------------------------------------
 
-                        fontWeight:
-                        FontWeight.bold,
+                          : _isAnalyzingVoice
+                          ? 'Analysing Voice Report...'
+
+                      // ------------------------------------------------------
+                      // VOICE — AI RESULT ACCEPTED
+                      // ------------------------------------------------------
+
+                          : _voiceAnalysisAccepted
+                          ? 'Continue to Evidence →'
+
+                          // ------------------------------------------------------
+                          // VOICE — AI RESULT EXISTS BUT NOT ACCEPTED
+                          // ------------------------------------------------------
+
+                          : _voiceAnalysis != null
+                          ? 'Accept AI Details Above'
+
+                          // ------------------------------------------------------
+                          // VOICE — TRANSCRIPT EXISTS
+                          // ------------------------------------------------------
+
+                          : _voiceTranscript != null
+                          ? 'Analyse Voice Report Above'
+
+                          // ------------------------------------------------------
+                          // VOICE — NOTHING RECORDED YET
+                          // ------------------------------------------------------
+
+                          : 'Record Voice Report Above',
+
+                        style:
+                        const TextStyle(
+                          fontSize: 16,
+                          fontWeight:
+                          FontWeight.bold,
                       ),
                     ),
                   ),
@@ -4117,5 +4674,1163 @@ class _DraftStatusCard
     return '${value.day.toString().padLeft(2, '0')}/'
         '${value.month.toString().padLeft(2, '0')}/'
         '${value.year}';
+  }
+}
+
+class _VoiceAiLoadingCard
+    extends StatelessWidget {
+  const _VoiceAiLoadingCard();
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        16,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.surface,
+
+        borderRadius:
+        BorderRadius.circular(
+          15,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.primary
+              .withOpacity(
+            0.30,
+          ),
+        ),
+      ),
+
+      child:
+      const Row(
+        children: [
+          SizedBox(
+            width:
+            23,
+
+            height:
+            23,
+
+            child:
+            CircularProgressIndicator(
+              strokeWidth:
+              2.2,
+
+              color:
+              AppColors.primary,
+            ),
+          ),
+
+          SizedBox(
+            width:
+            13,
+          ),
+
+          Expanded(
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                Text(
+                  'Understanding your report',
+
+                  style:
+                  TextStyle(
+                    color:
+                    Colors.white,
+
+                    fontSize:
+                    12,
+
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
+                ),
+
+                SizedBox(
+                  height:
+                  3,
+                ),
+
+                Text(
+                  'AI is organising your transcript into report details. '
+                      'Nothing will change until you review and accept it.',
+
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    fontSize:
+                    9,
+
+                    height:
+                    1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceAiErrorCard
+    extends StatelessWidget {
+  final String message;
+
+  final VoidCallback onRetry;
+
+  const _VoiceAiErrorCard({
+    required this.message,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        14,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        Colors.orangeAccent
+            .withOpacity(
+          0.055,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          13,
+        ),
+
+        border:
+        Border.all(
+          color:
+          Colors.orangeAccent
+              .withOpacity(
+            0.30,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons
+                    .error_outline_rounded,
+
+                color:
+                Colors.orangeAccent,
+
+                size:
+                18,
+              ),
+
+              SizedBox(
+                width:
+                8,
+              ),
+
+              Text(
+                'VOICE ANALYSIS NEEDS ATTENTION',
+
+                style:
+                TextStyle(
+                  color:
+                  Colors.orangeAccent,
+
+                  fontSize:
+                  10,
+
+                  fontWeight:
+                  FontWeight.bold,
+
+                  letterSpacing:
+                  0.4,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            9,
+          ),
+
+          Text(
+            message,
+
+            style:
+            const TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              10,
+
+              height:
+              1.45,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            10,
+          ),
+
+          Align(
+            alignment:
+            Alignment.centerLeft,
+
+            child:
+            OutlinedButton.icon(
+              onPressed:
+              onRetry,
+
+              icon:
+              const Icon(
+                Icons.refresh_rounded,
+
+                size:
+                17,
+              ),
+
+              label:
+              const Text(
+                'Try Again',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceAiField
+    extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+
+  const _VoiceAiField({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Padding(
+      padding:
+      const EdgeInsets.only(
+        bottom:
+        14,
+      ),
+
+      child:
+      Row(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Container(
+            width:
+            32,
+
+            height:
+            32,
+
+            decoration:
+            BoxDecoration(
+              color:
+              AppColors.primary
+                  .withOpacity(
+                0.09,
+              ),
+
+              borderRadius:
+              BorderRadius.circular(
+                9,
+              ),
+            ),
+
+            child:
+            Icon(
+              icon,
+
+              color:
+              AppColors.primary,
+
+              size:
+              17,
+            ),
+          ),
+
+          const SizedBox(
+            width:
+            10,
+          ),
+
+          Expanded(
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                Text(
+                  label,
+
+                  style:
+                  const TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    fontSize:
+                    8,
+
+                    fontWeight:
+                    FontWeight.w600,
+
+                    letterSpacing:
+                    0.5,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  3,
+                ),
+
+                SelectableText(
+                  value,
+
+                  style:
+                  const TextStyle(
+                    color:
+                    Colors.white,
+
+                    fontSize:
+                    12,
+
+                    height:
+                    1.45,
+
+                    fontWeight:
+                    FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceAiSuggestionCard
+    extends StatelessWidget {
+  final VoiceReportAnalysis
+  analysis;
+
+  final bool accepted;
+
+  final VoidCallback
+  onAccept;
+
+  final VoidCallback
+  onAnalyzeAgain;
+
+  const _VoiceAiSuggestionCard({
+    required this.analysis,
+    required this.accepted,
+    required this.onAccept,
+    required this.onAnalyzeAgain,
+  });
+
+  Color get _confidenceColor {
+    if (analysis.confidence >=
+        0.80) {
+      return const Color(
+        0xFF2EE6A6,
+      );
+    }
+
+    if (analysis.confidence >=
+        0.60) {
+      return const Color(
+        0xFFFFC62E,
+      );
+    }
+
+    return Colors.orangeAccent;
+  }
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    final Color statusColor =
+    accepted
+        ? const Color(
+      0xFF2EE6A6,
+    )
+        : AppColors.primary;
+
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        16,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.surface,
+
+        borderRadius:
+        BorderRadius.circular(
+          16,
+        ),
+
+        border:
+        Border.all(
+          color:
+          statusColor
+              .withOpacity(
+            0.38,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          // =====================================================
+          // HEADER
+          // =====================================================
+
+          Row(
+            children: [
+              Icon(
+                accepted
+                    ? Icons
+                    .verified_rounded
+                    : Icons
+                    .auto_awesome_rounded,
+
+                color:
+                statusColor,
+
+                size:
+                20,
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  accepted
+                      ? 'AI DETAILS ACCEPTED'
+                      : 'AI REPORT SUGGESTION',
+
+                  style:
+                  TextStyle(
+                    color:
+                    statusColor,
+
+                    fontSize:
+                    11,
+
+                    fontWeight:
+                    FontWeight.bold,
+
+                    letterSpacing:
+                    0.5,
+                  ),
+                ),
+              ),
+
+              Container(
+                padding:
+                const EdgeInsets.symmetric(
+                  horizontal:
+                  8,
+
+                  vertical:
+                  4,
+                ),
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  _confidenceColor
+                      .withOpacity(
+                    0.08,
+                  ),
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    20,
+                  ),
+
+                  border:
+                  Border.all(
+                    color:
+                    _confidenceColor
+                        .withOpacity(
+                      0.35,
+                    ),
+                  ),
+                ),
+
+                child:
+                Text(
+                  '${analysis.confidencePercentage}% confidence',
+
+                  style:
+                  TextStyle(
+                    color:
+                    _confidenceColor,
+
+                    fontSize:
+                    8,
+
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          Text(
+            'Detected language: '
+                '${analysis.detectedLanguage}',
+
+            style:
+            const TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              9,
+            ),
+          ),
+
+          // =====================================================
+          // REVIEW WARNING
+          // =====================================================
+
+          if (analysis
+              .requiresCarefulReview ||
+              analysis
+                  .isLowConfidence ||
+              !analysis
+                  .reportInformationSufficient) ...[
+            const SizedBox(
+              height:
+              12,
+            ),
+
+            Container(
+              width:
+              double.infinity,
+
+              padding:
+              const EdgeInsets.all(
+                10,
+              ),
+
+              decoration:
+              BoxDecoration(
+                color:
+                const Color(
+                  0xFFFFC62E,
+                ).withOpacity(
+                  0.06,
+                ),
+
+                borderRadius:
+                BorderRadius.circular(
+                  10,
+                ),
+
+                border:
+                Border.all(
+                  color:
+                  const Color(
+                    0xFFFFC62E,
+                  ).withOpacity(
+                    0.25,
+                  ),
+                ),
+              ),
+
+              child:
+              const Row(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+
+                children: [
+                  Icon(
+                    Icons
+                        .rate_review_outlined,
+
+                    color:
+                    Color(
+                      0xFFFFC62E,
+                    ),
+
+                    size:
+                    16,
+                  ),
+
+                  SizedBox(
+                    width:
+                    7,
+                  ),
+
+                  Expanded(
+                    child:
+                    Text(
+                      'Review these suggestions carefully. '
+                          'AI may be uncertain or important information may be missing.',
+
+                      style:
+                      TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        9,
+
+                        height:
+                        1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
+          const SizedBox(
+            height:
+            16,
+          ),
+
+          // =====================================================
+          // STRUCTURED FIELDS
+          // =====================================================
+
+          _VoiceAiField(
+            label:
+            'CATEGORY',
+
+            value:
+            analysis.category,
+
+            icon:
+            Icons
+                .category_outlined,
+          ),
+
+          _VoiceAiField(
+            label:
+            'PRIORITY',
+
+            value:
+            analysis.priority,
+
+            icon:
+            Icons
+                .flag_outlined,
+          ),
+
+          _VoiceAiField(
+            label:
+            'TITLE',
+
+            value:
+            analysis.title,
+
+            icon:
+            Icons
+                .title_rounded,
+          ),
+
+          _VoiceAiField(
+            label:
+            'DESCRIPTION',
+
+            value:
+            analysis.description,
+
+            icon:
+            Icons
+                .notes_rounded,
+          ),
+
+          _VoiceAiField(
+            label:
+            'LOCATION CONTEXT',
+
+            value:
+            analysis.locationContext ??
+                'Not identified from the voice report',
+
+            icon:
+            Icons
+                .place_outlined,
+          ),
+
+          _VoiceAiField(
+            label:
+            'SAFETY CONCERN',
+
+            value:
+            analysis.safetyConcern ??
+                'No specific safety concern identified',
+
+            icon:
+            Icons
+                .health_and_safety_outlined,
+          ),
+
+          // =====================================================
+          // MISSING INFORMATION
+          // =====================================================
+
+          if (analysis
+              .hasMissingInformation) ...[
+            const SizedBox(
+              height:
+              2,
+            ),
+
+            const Text(
+              'MISSING INFORMATION',
+
+              style:
+              TextStyle(
+                color:
+                Color(
+                  0xFFFFC62E,
+                ),
+
+                fontSize:
+                9,
+
+                fontWeight:
+                FontWeight.bold,
+
+                letterSpacing:
+                0.5,
+              ),
+            ),
+
+            const SizedBox(
+              height:
+              8,
+            ),
+
+            ...analysis
+                .missingInformation
+                .map(
+                  (
+                  item,
+                  ) {
+                return Padding(
+                  padding:
+                  const EdgeInsets.only(
+                    bottom:
+                    6,
+                  ),
+
+                  child:
+                  Row(
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
+
+                    children: [
+                      const Padding(
+                        padding:
+                        EdgeInsets.only(
+                          top:
+                          2,
+                        ),
+
+                        child:
+                        Icon(
+                          Icons
+                              .circle,
+
+                          color:
+                          Color(
+                            0xFFFFC62E,
+                          ),
+
+                          size:
+                          5,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        width:
+                        7,
+                      ),
+
+                      Expanded(
+                        child:
+                        Text(
+                          item,
+
+                          style:
+                          const TextStyle(
+                            color:
+                            AppColors.textSecondary,
+
+                            fontSize:
+                            10,
+
+                            height:
+                            1.4,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+
+          // =====================================================
+          // SUMMARY
+          // =====================================================
+
+          if (analysis
+              .summary
+              .isNotEmpty) ...[
+            const SizedBox(
+              height:
+              8,
+            ),
+
+            Container(
+              width:
+              double.infinity,
+
+              padding:
+              const EdgeInsets.all(
+                11,
+              ),
+
+              decoration:
+              BoxDecoration(
+                color:
+                AppColors.primary
+                    .withOpacity(
+                  0.055,
+                ),
+
+                borderRadius:
+                BorderRadius.circular(
+                  10,
+                ),
+
+                border:
+                Border.all(
+                  color:
+                  AppColors.primary
+                      .withOpacity(
+                    0.18,
+                  ),
+                ),
+              ),
+
+              child:
+              Row(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+
+                children: [
+                  const Icon(
+                    Icons
+                        .psychology_alt_outlined,
+
+                    color:
+                    AppColors.primary,
+
+                    size:
+                    16,
+                  ),
+
+                  const SizedBox(
+                    width:
+                    7,
+                  ),
+
+                  Expanded(
+                    child:
+                    Text(
+                      analysis.summary,
+
+                      style:
+                      const TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        9,
+
+                        height:
+                        1.45,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
+          const SizedBox(
+            height:
+            16,
+          ),
+
+          // =====================================================
+          // IMPORTANT CITIZEN CONTROL NOTICE
+          // =====================================================
+
+          if (!accepted)
+            const Padding(
+              padding:
+              EdgeInsets.only(
+                bottom:
+                12,
+              ),
+
+              child:
+              Row(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+
+                children: [
+                  Icon(
+                    Icons
+                        .touch_app_outlined,
+
+                    color:
+                    AppColors.textSecondary,
+
+                    size:
+                    14,
+                  ),
+
+                  SizedBox(
+                    width:
+                    6,
+                  ),
+
+                  Expanded(
+                    child:
+                    Text(
+                      'Nothing above has changed your report yet. '
+                          'Select Use These Details only after reviewing the suggestions.',
+
+                      style:
+                      TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        9,
+
+                        height:
+                        1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // =====================================================
+          // ACTIONS
+          // =====================================================
+
+          Row(
+            children: [
+              Expanded(
+                child:
+                SizedBox(
+                  height:
+                  47,
+
+                  child:
+                  OutlinedButton.icon(
+                    onPressed:
+                    accepted
+                        ? null
+                        : onAnalyzeAgain,
+
+                    icon:
+                    const Icon(
+                      Icons
+                          .refresh_rounded,
+
+                      size:
+                      17,
+                    ),
+
+                    label:
+                    const Text(
+                      'Analyse Again',
+
+                      style:
+                      TextStyle(
+                        fontSize:
+                        10,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              Expanded(
+                child:
+                SizedBox(
+                  height:
+                  47,
+
+                  child:
+                  ElevatedButton.icon(
+                    onPressed:
+                    accepted
+                        ? null
+                        : onAccept,
+
+                    style:
+                    ElevatedButton.styleFrom(
+                      backgroundColor:
+                      AppColors.primaryDark,
+
+                      foregroundColor:
+                      Colors.white,
+
+                      disabledBackgroundColor:
+                      const Color(
+                        0xFF2EE6A6,
+                      ).withOpacity(
+                        0.12,
+                      ),
+
+                      disabledForegroundColor:
+                      const Color(
+                        0xFF2EE6A6,
+                      ),
+
+                      shape:
+                      RoundedRectangleBorder(
+                        borderRadius:
+                        BorderRadius.circular(
+                          12,
+                        ),
+                      ),
+                    ),
+
+                    icon:
+                    Icon(
+                      accepted
+                          ? Icons
+                          .check_rounded
+                          : Icons
+                          .done_all_rounded,
+
+                      size:
+                      17,
+                    ),
+
+                    label:
+                    Text(
+                      accepted
+                          ? 'Applied'
+                          : 'Use These Details',
+
+                      style:
+                      const TextStyle(
+                        fontSize:
+                        10,
+
+                        fontWeight:
+                        FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
