@@ -14,6 +14,8 @@ import '../../services/ai_evidence_service.dart';
 import '../../services/image_compression_service.dart';
 import '../../services/report_draft_service.dart';
 import '../../services/video_compression_service.dart';
+import '../../models/report_video_ai_analysis.dart';
+import '../../services/video_evidence_ai_service.dart';
 
 import '../../theme/app_colors.dart';
 
@@ -94,6 +96,18 @@ class _CreateReportEvidenceScreenState
 
   final AiEvidenceService aiEvidenceService =
   AiEvidenceService();
+
+  final VideoEvidenceAiService
+  videoAiService =
+      VideoEvidenceAiService.instance;
+
+  bool analyzingVideo =
+  false;
+
+  String? videoAiError;
+
+  ReportVideoAiAnalysis?
+  videoAiAnalysis;
 
   // ============================================================
   // LIMITS
@@ -268,6 +282,7 @@ class _CreateReportEvidenceScreenState
           loadingImage ||
           loadingVideo ||
           analyzingEvidence ||
+          analyzingVideo ||
           combiningAnalyses ||
           isNavigating;
 
@@ -351,6 +366,104 @@ class _CreateReportEvidenceScreenState
         _saveDraft(
           currentStep: 2,
         ),
+      );
+    }
+  }
+
+  Future<void> analyzeVideoEvidence(
+      File videoFile,
+      ) async {
+    if (analyzingVideo) {
+      return;
+    }
+
+    if (!await videoFile.exists()) {
+      showMessage(
+        'The selected video is no longer available.',
+      );
+
+      return;
+    }
+
+    setState(() {
+      analyzingVideo =
+      true;
+
+      videoAiError =
+      null;
+
+      videoAiAnalysis =
+      null;
+    });
+
+    try {
+      final ReportVideoAiAnalysis
+      result =
+      await videoAiService
+          .analyzeLocalVideo(
+        videoFile:
+        videoFile,
+
+        userCategory:
+        selectedCategory,
+
+        userPriority:
+        selectedPriority,
+
+        userTitle:
+        selectedTitle,
+
+        userDescription:
+        selectedDescription,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        videoAiAnalysis =
+            result;
+
+        analyzingVideo =
+        false;
+      });
+
+      if (!result.issueDetected) {
+        showMessage(
+          'Video analysed. The reported issue was not clearly '
+              'confirmed in the sampled frames. Please review the evidence.',
+        );
+      } else if (result.reportSufficient ==
+          false) {
+        showMessage(
+          'Video analysed. Additional report information may be useful.',
+        );
+      } else {
+        showMessage(
+          'Video evidence analysed successfully.',
+        );
+      }
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        analyzingVideo =
+        false;
+
+        videoAiError =
+            e
+                .toString()
+                .replaceFirst(
+              'Exception: ',
+              '',
+            );
+      });
+
+      showMessage(
+        videoAiError!,
       );
     }
   }
@@ -2425,19 +2538,60 @@ class _CreateReportEvidenceScreenState
         return;
       }
 
+// ==========================================================
+// 10. VIDEO AI ANALYSIS
+//
+// Run AI only AFTER:
+// ✓ video compressed
+// ✓ permanent file created
+// ✓ file verified
+// ✓ video added to screen
+// ✓ draft saved
+// ✓ saved draft verified
+//
+// This prevents AI results from being attached to a video
+// that later fails draft persistence.
+// ==========================================================
+
+      setState(() {
+        videoAiAnalysis =
+        null;
+
+        videoAiError =
+        null;
+
+        videoCompressionMessage =
+        'Video saved. Smart Assist is reviewing sampled frames...';
+      });
+
+      await analyzeVideoEvidence(
+        persistentFile,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
       // ==========================================================
-      // 10. SUCCESS
+      // 11. SUCCESS
       // ==========================================================
 
       if (result.compressed) {
         showMessage(
-          'Video optimized and saved to your draft.',
+          videoAiAnalysis != null
+              ? 'Video optimized, saved and analysed successfully.'
+              : 'Video optimized and saved. '
+              'AI analysis was unavailable, but your evidence is preserved.',
         );
       } else {
         showMessage(
-          'Video saved to your draft.',
+          videoAiAnalysis != null
+              ? 'Video saved and analysed successfully.'
+              : 'Video saved. AI analysis was unavailable, '
+              'but your evidence is preserved.',
         );
       }
+
     } catch (e) {
       // ==========================================================
       // ROLLBACK UI STATE WHEN DRAFT SAVE FAILED
@@ -4209,6 +4363,44 @@ class _CreateReportEvidenceScreenState
                             );
                           },
                         ),
+                        const SizedBox(
+                          height: 12,
+                        ),
+
+                        if (analyzingVideo)
+                          const _VideoAiLoadingCard(),
+
+                        if (videoAiError != null)
+                          _VideoAiErrorCard(
+                            message:
+                            videoAiError!,
+
+                            onRetry:
+                            evidenceVideos.isEmpty ||
+                                isBusy
+                                ? null
+                                : () async {
+                              await analyzeVideoEvidence(
+                                evidenceVideos.last,
+                              );
+                            },
+                          ),
+
+                        if (videoAiAnalysis != null)
+                          _VideoAiResultCard(
+                            result:
+                            videoAiAnalysis!,
+
+                            onAnalyzeAgain:
+                            isBusy ||
+                                evidenceVideos.isEmpty
+                                ? null
+                                : () async {
+                              await analyzeVideoEvidence(
+                                evidenceVideos.last,
+                              );
+                            },
+                          ),
                       ],
 
                       // =================================================
@@ -6570,3 +6762,658 @@ class _VideoPreviewDialogState
     );
   }
 }
+
+class _VideoAiLoadingCard
+    extends StatelessWidget {
+  const _VideoAiLoadingCard();
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        16,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.primary
+            .withValues(
+          alpha: 0.06,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          14,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.primary
+              .withValues(
+            alpha: 0.30,
+          ),
+        ),
+      ),
+
+      child:
+      const Row(
+        children: [
+          SizedBox(
+            width:
+            22,
+
+            height:
+            22,
+
+            child:
+            CircularProgressIndicator(
+              strokeWidth:
+              2.2,
+            ),
+          ),
+
+          SizedBox(
+            width:
+            12,
+          ),
+
+          Expanded(
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment
+                  .start,
+
+              children: [
+                Text(
+                  'Video Smart Assist',
+                  style:
+                  TextStyle(
+                    color:
+                    Colors.white,
+
+                    fontWeight:
+                    FontWeight.w700,
+                  ),
+                ),
+
+                SizedBox(
+                  height:
+                  4,
+                ),
+
+                Text(
+                  'Reviewing representative frames across the video...',
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors
+                        .textSecondary,
+
+                    fontSize:
+                    10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VideoAiErrorCard
+    extends StatelessWidget {
+  final String message;
+
+  final Future<void> Function()?
+  onRetry;
+
+  const _VideoAiErrorCard({
+    required this.message,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        14,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        Colors.orange
+            .withValues(
+          alpha:
+          0.06,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          14,
+        ),
+
+        border:
+        Border.all(
+          color:
+          Colors.orangeAccent
+              .withValues(
+            alpha:
+            0.35,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment
+            .start,
+
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons
+                    .warning_amber_rounded,
+
+                color:
+                Colors.orangeAccent,
+
+                size:
+                19,
+              ),
+
+              SizedBox(
+                width:
+                8,
+              ),
+
+              Text(
+                'Video AI Unavailable',
+                style:
+                TextStyle(
+                  color:
+                  Colors.white,
+
+                  fontWeight:
+                  FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          Text(
+            message,
+
+            style:
+            const TextStyle(
+              color:
+              AppColors
+                  .textSecondary,
+
+              fontSize:
+              10,
+
+              height:
+              1.4,
+            ),
+          ),
+
+          if (onRetry !=
+              null) ...[
+            const SizedBox(
+              height:
+              10,
+            ),
+
+            OutlinedButton.icon(
+              onPressed:
+                  () async {
+                await onRetry!();
+              },
+
+              icon:
+              const Icon(
+                Icons
+                    .refresh_rounded,
+              ),
+
+              label:
+              const Text(
+                'Analyse Again',
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _VideoAiLine
+    extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _VideoAiLine({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Padding(
+      padding:
+      const EdgeInsets.only(
+        bottom:
+        7,
+      ),
+
+      child:
+      Row(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          SizedBox(
+            width:
+            112,
+
+            child:
+            Text(
+              label,
+
+              style:
+              const TextStyle(
+                color:
+                AppColors
+                    .textSecondary,
+
+                fontSize:
+                9,
+              ),
+            ),
+          ),
+
+          Expanded(
+            child:
+            Text(
+              value,
+
+              style:
+              const TextStyle(
+                color:
+                Colors.white,
+
+                fontSize:
+                10,
+
+                fontWeight:
+                FontWeight.w600,
+
+                height:
+                1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ================================================================
+// VIDEO AI RESULT CARD
+// ================================================================
+
+class _VideoAiResultCard
+    extends StatelessWidget {
+
+  final ReportVideoAiAnalysis result;
+
+  final Future<void> Function()?
+  onAnalyzeAgain;
+
+  const _VideoAiResultCard({
+    required this.result,
+    required this.onAnalyzeAgain,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(16),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.primary.withValues(
+          alpha: 0.055,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(15),
+
+        border:
+        Border.all(
+          color:
+          AppColors.primary.withValues(
+            alpha: 0.32,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  AppColors.primary
+                      .withValues(
+                    alpha: 0.12,
+                  ),
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    10,
+                  ),
+                ),
+
+                child:
+                const Icon(
+                  Icons.movie_filter_outlined,
+                  color:
+                  AppColors.primary,
+                  size: 21,
+                ),
+              ),
+
+              const SizedBox(
+                width: 10,
+              ),
+
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
+                  children: [
+                    Text(
+                      'Video Evidence Intelligence',
+                      style: TextStyle(
+                        color:
+                        Colors.white,
+                        fontSize: 13,
+                        fontWeight:
+                        FontWeight.w700,
+                      ),
+                    ),
+
+                    SizedBox(
+                      height: 2,
+                    ),
+
+                    Text(
+                      'AI-reviewed sampled video frames',
+                      style: TextStyle(
+                        color:
+                        AppColors.textSecondary,
+                        fontSize: 9,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              Icon(
+                result.issueDetected
+                    ? Icons.verified_outlined
+                    : Icons.help_outline_rounded,
+
+                color:
+                result.issueDetected
+                    ? AppColors.success
+                    : Colors.orangeAccent,
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height: 15,
+          ),
+
+          _VideoAiLine(
+            label:
+            'Issue detected',
+            value:
+            result.issueDetected
+                ? 'Yes'
+                : 'Not confirmed',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Category',
+            value:
+            result.category ??
+                'Not available',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Severity',
+            value:
+            result.severity ??
+                'Not available',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Confidence',
+            value:
+            result.confidence ??
+                'Not available',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Evidence quality',
+            value:
+            result.evidenceQuality ??
+                'Not available',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Across frames',
+            value:
+            result.temporalConsistency ??
+                'Not assessable',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Useful frames',
+            value:
+            '${result.usefulFrameCount} / '
+                '${result.analyzedFrameCount}',
+          ),
+
+          _VideoAiLine(
+            label:
+            'Category match',
+
+            value:
+            result.categoryMatchesUser ==
+                true
+                ? 'Matches report'
+                : result.categoryMatchesUser ==
+                false
+                ? 'Possible mismatch'
+                : 'Not available',
+          ),
+
+          if ((result.reportQuality ?? '')
+              .trim()
+              .isNotEmpty)
+            _VideoAiLine(
+              label:
+              'Report quality',
+              value:
+              result.reportQuality!,
+            ),
+
+          if ((result.safetyConcern ?? '')
+              .trim()
+              .isNotEmpty)
+            _VideoAiLine(
+              label:
+              'Safety concern',
+              value:
+              result.safetyConcern!,
+            ),
+
+          if (result
+              .missingInformation
+              .isNotEmpty)
+            _VideoAiLine(
+              label:
+              'Missing info',
+
+              value:
+              result
+                  .missingInformation
+                  .join(' • '),
+            ),
+
+          if ((result.summary ?? '')
+              .trim()
+              .isNotEmpty) ...[
+            const SizedBox(
+              height: 10,
+            ),
+
+            Container(
+              width:
+              double.infinity,
+
+              padding:
+              const EdgeInsets.all(11),
+
+              decoration:
+              BoxDecoration(
+                color:
+                AppColors.surface,
+
+                borderRadius:
+                BorderRadius.circular(
+                  10,
+                ),
+              ),
+
+              child:
+              Text(
+                result.summary!,
+
+                style:
+                const TextStyle(
+                  color:
+                  Colors.white,
+                  fontSize: 10,
+                  height: 1.45,
+                ),
+              ),
+            ),
+          ],
+
+          const SizedBox(
+            height: 12,
+          ),
+
+          const Text(
+            'AI reviewed representative frames sampled across the video. '
+                'It did not continuously inspect every frame or independently '
+                'verify GPS location.',
+            style: TextStyle(
+              color:
+              AppColors.textSecondary,
+              fontSize: 9,
+              height: 1.4,
+            ),
+          ),
+
+          if (onAnalyzeAgain != null) ...[
+            const SizedBox(
+              height: 12,
+            ),
+
+            SizedBox(
+              width:
+              double.infinity,
+
+              child:
+              OutlinedButton.icon(
+                onPressed:
+                    () async {
+                  await onAnalyzeAgain!();
+                },
+
+                icon:
+                const Icon(
+                  Icons.refresh_rounded,
+                ),
+
+                label:
+                const Text(
+                  'Analyse Video Again',
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
