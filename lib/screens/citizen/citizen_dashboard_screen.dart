@@ -15,6 +15,7 @@ import '../reports/my_reports_screen.dart';
 import 'infrastructure_map_screen.dart';
 import 'malaysia_open_data_screen.dart';
 import 'profile_screen.dart';
+import '../community/community_screen.dart';
 
 class CitizenDashboardScreen
     extends StatefulWidget {
@@ -276,10 +277,25 @@ class _CitizenDashboardScreenState
   // COMMUNITY
   // ============================================================
 
-  void openCommunity() {
-    showMessage(
-      'Community feature is not included in the approved scope.',
+  Future<void> openCommunity() async {
+    await Navigator.push(
+      context,
+
+      MaterialPageRoute(
+        builder: (_) =>
+        const CommunityScreen(),
+      ),
     );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      selectedNavigationIndex = 0;
+    });
+
+    await loadDashboard();
   }
 
   // ============================================================
@@ -308,21 +324,6 @@ class _CitizenDashboardScreenState
 
       case 3:
         openCommunity();
-
-        Future.delayed(
-          const Duration(
-            milliseconds: 200,
-          ),
-              () {
-            if (mounted) {
-              setState(() {
-                selectedNavigationIndex =
-                0;
-              });
-            }
-          },
-        );
-
         break;
 
       case 4:
