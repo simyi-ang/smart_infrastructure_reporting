@@ -1,38 +1,72 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import 'package:flutter/material.dart';
-
 import '../../models/nearby_report.dart';
+import '../../models/report_draft.dart';
 import '../../models/report_final_ai_analysis.dart';
 import '../../models/report_image_ai_analysis.dart';
-import '../../models/report_draft.dart';
 import '../../services/location_service.dart';
 import '../../services/nearby_report_service.dart';
 import '../../services/report_draft_service.dart';
 import '../../theme/app_colors.dart';
-
 import 'map_picker_screen.dart';
 import 'report_preview_screen.dart';
+
+// ================================================================
+// ADDRESS GEOCODE RESULT
+// ================================================================
+
+class AddressGeocodeResult {
+  final String inputAddress;
+
+  final String formattedAddress;
+
+  final double latitude;
+
+  final double longitude;
+
+  final bool verified;
+
+  const AddressGeocodeResult({
+    required this.inputAddress,
+    required this.formattedAddress,
+    required this.latitude,
+    required this.longitude,
+    required this.verified,
+  });
+}
 
 // ================================================================
 // CREATE REPORT LOCATION SCREEN
 //
 // Existing design and functionality preserved.
 //
-// Added multi-image Smart Assist support:
+// LOCATION SOURCES:
 //
-// evidenceImages
-//      ↓
-// imageAnalyses
-//      ↓
-// finalAiAnalysis
+// 1. Current GPS
+//    → latitude / longitude
+//    → reverse-geocoded address
 //
-// This screen DOES NOT run AI.
-// It only preserves and forwards AI information from Evidence.
+// 2. Choose on Map
+//    → selected latitude / longitude
+//    → map address
 //
+// 3. Manual Address
+//    → forward geocoding
+//    → latitude / longitude
+//    → reverse-geocoded formatted address
+//
+// IMPORTANT:
+//
+// Manually entered free text is no longer accepted as a location
+// unless the geocoding provider can resolve it to map coordinates.
+//
+// This screen DOES NOT run Smart Assist evidence AI.
+// It preserves and forwards AI information from Evidence.
 // ================================================================
 
 class CreateReportLocationScreen
@@ -81,11 +115,6 @@ class CreateReportLocationScreen
 
   // ============================================================
   // LEGACY SINGLE IMAGE ANALYSIS
-  //
-  // Kept temporarily so older report flows remain compatible.
-  //
-  // Later ReportPreviewScreen can be fully migrated to the new
-  // multi-image structures.
   // ============================================================
 
   final ReportImageAiAnalysis?
@@ -93,24 +122,14 @@ class CreateReportLocationScreen
 
   const CreateReportLocationScreen({
     super.key,
-
     required this.category,
-
     required this.priority,
-
     required this.title,
-
     required this.description,
-
     required this.evidenceImages,
-
     this.evidenceVideos = const <File>[],
-
-    this.imageAnalyses =
-    const {},
-
+    this.imageAnalyses = const {},
     this.finalAiAnalysis,
-
     this.aiAnalysis,
   });
 
@@ -138,6 +157,9 @@ class _CreateReportLocationScreenState
   nearbyReportService =
   NearbyReportService();
 
+  final Geocoding geocoding =
+  Geocoding();
+
   // ============================================================
   // CONTROLLERS
   // ============================================================
@@ -158,15 +180,30 @@ class _CreateReportLocationScreenState
 
   double? longitude;
 
-  // GPS accuracy in metres.
+  // Device GPS accuracy only.
   //
-  // Available only when location comes from GPS.
+  // A manually geocoded address or manually selected map point
+  // does not have device-GPS accuracy information.
   double? gpsAccuracy;
 
   bool gettingLocation =
   false;
 
   bool locationDetected =
+  false;
+
+  // ============================================================
+  // MANUAL ADDRESS VERIFICATION
+  // ============================================================
+
+  bool validatingManualAddress =
+  false;
+
+  String? addressValidationError;
+
+  // Prevent addressController listeners from invalidating
+  // coordinates when WE update the address from GPS/map/geocoder.
+  bool _updatingAddressProgrammatically =
   false;
 
   // ============================================================
@@ -191,30 +228,50 @@ class _CreateReportLocationScreenState
   Future<void> _draftSaveQueue =
   Future<void>.value();
 
-  bool restoringDraft = true;
+  bool restoringDraft =
+  true;
 
-  bool savingDraft = false;
+  bool savingDraft =
+  false;
 
-  bool draftSaveFailed = false;
+  bool draftSaveFailed =
+  false;
 
-  bool _allowPop = false;
+  bool _allowPop =
+  false;
 
   String? detectedAddress;
 
+  // Possible values:
+  //
+  // manual
+  // manual_unverified
+  // gps
+  // map
+  // geocoded
+  // saved_coordinates
   String locationVerificationStatus =
       'manual';
 
   static const Duration _draftSaveDelay =
-  Duration(milliseconds: 500);
+  Duration(
+    milliseconds: 500,
+  );
 
   String? get _userId =>
-      Supabase.instance.client.auth.currentUser?.id;
+      Supabase
+          .instance
+          .client
+          .auth
+          .currentUser
+          ?.id;
 
   bool get _locationBusy =>
       restoringDraft ||
           savingDraft ||
           gettingLocation ||
-          checkingNearby;
+          checkingNearby ||
+          validatingManualAddress;
 
   // ============================================================
   // INIT
@@ -224,12 +281,16 @@ class _CreateReportLocationScreenState
   void initState() {
     super.initState();
 
-    WidgetsBinding.instance.addObserver(
+    WidgetsBinding
+        .instance
+        .addObserver(
       this,
     );
 
+    // Address uses its own listener because editing a previously
+    // verified address must invalidate the old coordinates.
     addressController.addListener(
-      _scheduleDraftSave,
+      _handleAddressChanged,
     );
 
     landmarkController.addListener(
@@ -250,9 +311,12 @@ class _CreateReportLocationScreenState
       AppLifecycleState state,
       ) {
     if (
-    state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached
+    state ==
+        AppLifecycleState.inactive ||
+        state ==
+            AppLifecycleState.paused ||
+        state ==
+            AppLifecycleState.detached
     ) {
       unawaited(
         _saveDraft(
@@ -267,12 +331,14 @@ class _CreateReportLocationScreenState
   // ============================================================
 
   Future<void> _restoreDraft() async {
-    final String? userId = _userId;
+    final String? userId =
+        _userId;
 
     if (userId == null) {
       if (mounted) {
         setState(() {
-          restoringDraft = false;
+          restoringDraft =
+          false;
         });
       }
 
@@ -281,7 +347,8 @@ class _CreateReportLocationScreenState
 
     try {
       final ReportDraft? draft =
-      await ReportDraftService.loadDraft(
+      await ReportDraftService
+          .loadDraft(
         userId: userId,
       );
 
@@ -290,9 +357,14 @@ class _CreateReportLocationScreenState
       }
 
       if (draft != null) {
-        latitude = draft.latitude;
-        longitude = draft.longitude;
-        gpsAccuracy = draft.locationAccuracy;
+        latitude =
+            draft.latitude;
+
+        longitude =
+            draft.longitude;
+
+        gpsAccuracy =
+            draft.locationAccuracy;
 
         detectedAddress =
             draft.detectedAddress;
@@ -313,23 +385,33 @@ class _CreateReportLocationScreenState
                 ''
         ).trim();
 
+        _updatingAddressProgrammatically =
+        true;
+
         addressController.text =
             restoredAddress;
 
+        _updatingAddressProgrammatically =
+        false;
+
         landmarkController.text =
-            (draft.landmark ?? '').trim();
+            (
+                draft.landmark ??
+                    ''
+            ).trim();
 
         locationDetected =
-            restoredAddress.isNotEmpty ||
-                (
-                    latitude != null &&
-                        longitude != null
-                );
+            restoredAddress.isNotEmpty &&
+                latitude != null &&
+                longitude != null;
       }
 
       setState(() {
-        restoringDraft = false;
-        draftSaveFailed = false;
+        restoringDraft =
+        false;
+
+        draftSaveFailed =
+        false;
       });
 
       if (
@@ -346,8 +428,11 @@ class _CreateReportLocationScreenState
       }
 
       setState(() {
-        restoringDraft = false;
-        draftSaveFailed = true;
+        restoringDraft =
+        false;
+
+        draftSaveFailed =
+        true;
       });
     }
   }
@@ -356,47 +441,70 @@ class _CreateReportLocationScreenState
   // BUILD LOCATION DRAFT
   // ============================================================
 
-  Future<ReportDraft> _buildCurrentDraft({
+  Future<ReportDraft>
+  _buildCurrentDraft({
     required int currentStep,
   }) async {
-    final String? userId = _userId;
+    final String? userId =
+        _userId;
 
     ReportDraft base =
     ReportDraft.empty();
 
     if (userId != null) {
       final ReportDraft? existing =
-      await ReportDraftService.loadDraft(
+      await ReportDraftService
+          .loadDraft(
         userId: userId,
       );
 
       if (existing != null) {
-        base = existing;
+        base =
+            existing;
       }
     }
 
     final String currentAddress =
-    addressController.text.trim();
+    addressController
+        .text
+        .trim();
 
     return base.copyWith(
-      category: widget.category,
-      priority: widget.priority,
-      title: widget.title,
-      description: widget.description,
+      category:
+      widget.category,
+
+      priority:
+      widget.priority,
+
+      title:
+      widget.title,
+
+      description:
+      widget.description,
 
       landmark:
-      landmarkController.text.trim().isEmpty
+      landmarkController
+          .text
+          .trim()
+          .isEmpty
           ? null
-          : landmarkController.text.trim(),
+          : landmarkController
+          .text
+          .trim(),
 
       manualAddress:
       currentAddress.isEmpty
           ? null
           : currentAddress,
 
-      latitude: latitude,
-      longitude: longitude,
-      locationAccuracy: gpsAccuracy,
+      latitude:
+      latitude,
+
+      longitude:
+      longitude,
+
+      locationAccuracy:
+      gpsAccuracy,
 
       detectedAddress:
       detectedAddress,
@@ -404,23 +512,33 @@ class _CreateReportLocationScreenState
       locationVerificationStatus:
       locationVerificationStatus,
 
-      currentStep: currentStep,
+      currentStep:
+      currentStep,
 
       evidenceImagePaths:
-      widget.evidenceImages
+      widget
+          .evidenceImages
           .map(
-            (File file) => file.path,
+            (
+            File file,
+            ) =>
+        file.path,
       )
           .toList(),
 
       evidenceVideoPaths:
-      widget.evidenceVideos
+      widget
+          .evidenceVideos
           .map(
-            (File file) => file.path,
+            (
+            File file,
+            ) =>
+        file.path,
       )
           .toList(),
 
-      updatedAt: DateTime.now(),
+      updatedAt:
+      DateTime.now(),
     );
   }
 
@@ -431,17 +549,24 @@ class _CreateReportLocationScreenState
   Future<bool> _saveDraft({
     required int currentStep,
   }) {
-    final Completer<bool> completer =
+    final Completer<bool>
+    completer =
     Completer<bool>();
 
     _draftSaveQueue =
         _draftSaveQueue.then(
               (_) async {
-            final String? userId = _userId;
+            final String? userId =
+                _userId;
 
             if (userId == null) {
-              if (!completer.isCompleted) {
-                completer.complete(false);
+              if (
+              !completer
+                  .isCompleted
+              ) {
+                completer.complete(
+                  false,
+                );
               }
 
               return;
@@ -449,42 +574,66 @@ class _CreateReportLocationScreenState
 
             if (mounted) {
               setState(() {
-                savingDraft = true;
-                draftSaveFailed = false;
+                savingDraft =
+                true;
+
+                draftSaveFailed =
+                false;
               });
             }
 
             try {
               final ReportDraft draft =
               await _buildCurrentDraft(
-                currentStep: currentStep,
+                currentStep:
+                currentStep,
               );
 
-              await ReportDraftService.saveDraft(
-                userId: userId,
-                draft: draft,
+              await ReportDraftService
+                  .saveDraft(
+                userId:
+                userId,
+
+                draft:
+                draft,
               );
 
               if (mounted) {
                 setState(() {
-                  savingDraft = false;
-                  draftSaveFailed = false;
+                  savingDraft =
+                  false;
+
+                  draftSaveFailed =
+                  false;
                 });
               }
 
-              if (!completer.isCompleted) {
-                completer.complete(true);
+              if (
+              !completer
+                  .isCompleted
+              ) {
+                completer.complete(
+                  true,
+                );
               }
             } catch (_) {
               if (mounted) {
                 setState(() {
-                  savingDraft = false;
-                  draftSaveFailed = true;
+                  savingDraft =
+                  false;
+
+                  draftSaveFailed =
+                  true;
                 });
               }
 
-              if (!completer.isCompleted) {
-                completer.complete(false);
+              if (
+              !completer
+                  .isCompleted
+              ) {
+                completer.complete(
+                  false,
+                );
               }
             }
           },
@@ -498,41 +647,131 @@ class _CreateReportLocationScreenState
   // ============================================================
 
   void _scheduleDraftSave() {
-    if (restoringDraft) {
+    if (
+    restoringDraft
+    ) {
       return;
     }
 
-    _draftDebounce?.cancel();
+    _draftDebounce
+        ?.cancel();
 
-    _draftDebounce = Timer(
-      _draftSaveDelay,
-          () {
-        unawaited(
-          _saveDraft(
-            currentStep: 3,
-          ),
+    _draftDebounce =
+        Timer(
+          _draftSaveDelay,
+              () {
+            unawaited(
+              _saveDraft(
+                currentStep: 3,
+              ),
+            );
+          },
         );
-      },
-    );
+  }
+
+  // ============================================================
+  // ADDRESS CHANGE HANDLER
+  //
+  // This is important:
+  //
+  // GPS:
+  // "Jalan A"
+  // coordinates A
+  //
+  // Citizen changes text to:
+  // "Jalan B"
+  //
+  // We must NOT keep coordinates A attached to Jalan B.
+  // ============================================================
+
+  void _handleAddressChanged() {
+    if (
+    restoringDraft ||
+        _updatingAddressProgrammatically
+    ) {
+      return;
+    }
+
+    final String currentAddress =
+    addressController
+        .text
+        .trim();
+
+    final String previousVerifiedAddress =
+    (
+        detectedAddress ??
+            ''
+    ).trim();
+
+    final bool hadVerifiedCoordinates =
+        latitude != null &&
+            longitude != null &&
+            (
+                locationVerificationStatus ==
+                    'gps' ||
+                    locationVerificationStatus ==
+                        'map' ||
+                    locationVerificationStatus ==
+                        'geocoded' ||
+                    locationVerificationStatus ==
+                        'saved_coordinates'
+            );
+
+    if (
+    hadVerifiedCoordinates &&
+        currentAddress !=
+            previousVerifiedAddress
+    ) {
+      setState(() {
+        // User has changed the text manually.
+        //
+        // Existing coordinates no longer safely describe
+        // the newly typed address.
+        latitude =
+        null;
+
+        longitude =
+        null;
+
+        gpsAccuracy =
+        null;
+
+        locationDetected =
+        false;
+
+        locationVerificationStatus =
+        'manual_unverified';
+
+        addressValidationError =
+        null;
+      });
+    }
+
+    _scheduleDraftSave();
   }
 
   // ============================================================
   // SAFE BACK
   // ============================================================
 
-  Future<void> _goBackSafely() async {
+  Future<void>
+  _goBackSafely() async {
     if (_locationBusy) {
       return;
     }
 
-    _draftDebounce?.cancel();
+    _draftDebounce
+        ?.cancel();
 
     final bool saved =
     await _saveDraft(
       currentStep: 3,
     );
 
-    if (!saved || !mounted) {
+    if (
+    !saved ||
+        !mounted
+    ) {
       showMessage(
         'Your location draft could not be saved. '
             'Please try again.',
@@ -541,7 +780,8 @@ class _CreateReportLocationScreenState
       return;
     }
 
-    _allowPop = true;
+    _allowPop =
+    true;
 
     if (mounted) {
       Navigator.pop(
@@ -578,22 +818,21 @@ class _CreateReportLocationScreenState
 
   // ============================================================
   // LEGACY ANALYSIS FALLBACK
-  //
-  // Current Preview screen may still expect one
-  // ReportImageAiAnalysis.
-  //
-  // Prefer explicitly supplied aiAnalysis.
-  //
-  // Otherwise use the first individual image analysis.
   // ============================================================
 
   ReportImageAiAnalysis?
   get legacyAiAnalysis {
-    if (widget.aiAnalysis != null) {
+    if (
+    widget.aiAnalysis != null
+    ) {
       return widget.aiAnalysis;
     }
 
-    if (widget.imageAnalyses.isNotEmpty) {
+    if (
+    widget
+        .imageAnalyses
+        .isNotEmpty
+    ) {
       return widget
           .imageAnalyses
           .values
@@ -601,6 +840,378 @@ class _CreateReportLocationScreenState
     }
 
     return null;
+  }
+
+  // ============================================================
+  // FORMAT GEOCODED ADDRESS
+  // ============================================================
+
+  String _formatPlacemarkAddress(
+      Placemark placemark,
+      String fallback,
+      ) {
+    final List<String> possibleParts =
+    <String>[
+      placemark.name ?? '',
+      placemark.street ?? '',
+      placemark.subLocality ?? '',
+      placemark.locality ?? '',
+      placemark.subAdministrativeArea ?? '',
+      placemark.administrativeArea ?? '',
+      placemark.postalCode ?? '',
+      placemark.country ?? '',
+    ];
+
+    final List<String> result =
+    <String>[];
+
+    final Set<String> used =
+    <String>{};
+
+    for (
+    final String raw
+    in possibleParts
+    ) {
+      final String clean =
+      raw.trim();
+
+      if (clean.isEmpty) {
+        continue;
+      }
+
+      final String comparison =
+      clean.toLowerCase();
+
+      if (
+      used.add(
+        comparison,
+      )
+      ) {
+        result.add(
+          clean,
+        );
+      }
+    }
+
+    if (result.isEmpty) {
+      return fallback;
+    }
+
+    return result.join(
+      ', ',
+    );
+  }
+
+  // ============================================================
+  // VALIDATE + GEOCODE MANUALLY TYPED ADDRESS
+  //
+  // Forward geocoding:
+  //
+  // typed address
+  //      ↓
+  // latitude / longitude
+  //
+  // Reverse geocoding:
+  //
+  // latitude / longitude
+  //      ↓
+  // normalized address
+  //
+  // Note:
+  //
+  // "verified" here means the geocoding provider successfully
+  // resolved the user's input to a geographic coordinate.
+  // ============================================================
+
+  Future<AddressGeocodeResult?>
+  _validateAndGeocodeAddress(
+      String rawAddress,
+      ) async {
+    final String inputAddress =
+    rawAddress.trim();
+
+    if (
+    inputAddress.isEmpty
+    ) {
+      return null;
+    }
+
+    if (
+    inputAddress.length <
+        3
+    ) {
+      return null;
+    }
+
+    try {
+      // ========================================================
+      // FORWARD GEOCODING
+      // ========================================================
+
+      final List<Location> locations =
+      await geocoding.locationFromAddress(
+        inputAddress,
+      );
+
+      if (locations.isEmpty) {
+        return null;
+      }
+
+      final Location resolved =
+          locations.first;
+
+      final double resolvedLatitude =
+          resolved.latitude;
+
+      final double resolvedLongitude =
+          resolved.longitude;
+
+      // ========================================================
+      // COORDINATE SAFETY
+      // ========================================================
+
+      if (
+      resolvedLatitude <
+          -90 ||
+          resolvedLatitude >
+              90 ||
+          resolvedLongitude <
+              -180 ||
+          resolvedLongitude >
+              180
+      ) {
+        return null;
+      }
+
+      // ========================================================
+      // REVERSE GEOCODING
+      //
+      // Prefer a normalized real-world display address.
+      // ========================================================
+
+      String formattedAddress =
+          inputAddress;
+
+      try {
+        final List<Placemark> placemarks =
+        await geocoding.placemarkFromCoordinates(
+          resolvedLatitude,
+          resolvedLongitude,
+        );
+
+        if (
+        placemarks.isNotEmpty
+        ) {
+          formattedAddress =
+              _formatPlacemarkAddress(
+                placemarks.first,
+                inputAddress,
+              );
+        }
+      } catch (_) {
+        // The address already successfully resolved to
+        // latitude / longitude.
+        //
+        // If reverse geocoding temporarily fails, keep the
+        // citizen's original address as the display value.
+      }
+
+      return AddressGeocodeResult(
+        inputAddress:
+        inputAddress,
+
+        formattedAddress:
+        formattedAddress,
+
+        latitude:
+        resolvedLatitude,
+
+        longitude:
+        resolvedLongitude,
+
+        verified:
+        true,
+      );
+    } catch (
+    error
+    ) {
+      debugPrint(
+        'Address geocoding failed: $error',
+      );
+
+      return null;
+    }
+  }
+
+  // ============================================================
+  // VERIFY MANUAL ADDRESS
+  // ============================================================
+
+  Future<bool>
+  _verifyTypedAddress() async {
+    if (
+    validatingManualAddress
+    ) {
+      return false;
+    }
+
+    final String rawAddress =
+    addressController
+        .text
+        .trim();
+
+    // ==========================================================
+    // EMPTY
+    // ==========================================================
+
+    if (
+    rawAddress.isEmpty
+    ) {
+      setState(() {
+        addressValidationError =
+        'Please enter an address.';
+      });
+
+      return false;
+    }
+
+    setState(() {
+      validatingManualAddress =
+      true;
+
+      addressValidationError =
+      null;
+    });
+
+    try {
+      final AddressGeocodeResult? result =
+      await _validateAndGeocodeAddress(
+        rawAddress,
+      );
+
+      if (!mounted) {
+        return false;
+      }
+
+      // ========================================================
+      // ADDRESS NOT FOUND
+      // ========================================================
+
+      if (
+      result == null ||
+          !result.verified
+      ) {
+        setState(() {
+          latitude =
+          null;
+
+          longitude =
+          null;
+
+          gpsAccuracy =
+          null;
+
+          locationDetected =
+          false;
+
+          detectedAddress =
+          null;
+
+          locationVerificationStatus =
+          'manual_unverified';
+
+          addressValidationError =
+          'This address could not be found on the map. '
+              'Please enter a valid real-world address '
+              'or choose the location on the map.';
+        });
+
+        return false;
+      }
+
+      // ========================================================
+      // ADDRESS RESOLVED SUCCESSFULLY
+      // ========================================================
+
+      setState(() {
+        latitude =
+            result.latitude;
+
+        longitude =
+            result.longitude;
+
+        // This coordinate came from geocoding,
+        // NOT the phone's GPS sensor.
+        gpsAccuracy =
+        null;
+
+        // Prevent the address listener from clearing the new
+        // coordinates while this code updates the controller.
+        _updatingAddressProgrammatically =
+        true;
+
+        addressController.text =
+            result.formattedAddress;
+
+        _updatingAddressProgrammatically =
+        false;
+
+        detectedAddress =
+            result.formattedAddress;
+
+        locationVerificationStatus =
+        'geocoded';
+
+        locationDetected =
+        true;
+
+        addressValidationError =
+        null;
+      });
+
+      // ========================================================
+      // SAVE
+      // ========================================================
+
+      await _saveDraft(
+        currentStep: 3,
+      );
+
+      // ========================================================
+      // DUPLICATE CHECK NOW HAS REAL COORDINATES
+      // ========================================================
+
+      await checkNearbyReports();
+
+      if (!mounted) {
+        return true;
+      }
+
+      showMessage(
+        'Address matched successfully to a real map location.',
+      );
+
+      return true;
+    } catch (_) {
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        addressValidationError =
+        'Unable to verify this address right now. '
+            'Please try again or choose the location on the map.';
+      });
+
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() {
+          validatingManualAddress =
+          false;
+        });
+      }
+    }
   }
 
   // ============================================================
@@ -616,6 +1227,9 @@ class _CreateReportLocationScreenState
     setState(() {
       gettingLocation =
       true;
+
+      addressValidationError =
+      null;
     });
 
     try {
@@ -637,8 +1251,14 @@ class _CreateReportLocationScreenState
         gpsAccuracy =
             result.accuracy;
 
+        _updatingAddressProgrammatically =
+        true;
+
         addressController.text =
             result.address;
+
+        _updatingAddressProgrammatically =
+        false;
 
         detectedAddress =
             result.address;
@@ -648,6 +1268,9 @@ class _CreateReportLocationScreenState
 
         locationDetected =
         true;
+
+        addressValidationError =
+        null;
       });
 
       await _saveDraft(
@@ -668,8 +1291,10 @@ class _CreateReportLocationScreenState
       // GPS QUALITY MESSAGE
       // ========================================================
 
-      if (result.accuracy >
-          50) {
+      if (
+      result.accuracy >
+          50
+      ) {
         showMessage(
           'Location detected, but GPS accuracy is low '
               '(±${result.accuracy.toStringAsFixed(0)} m). '
@@ -680,7 +1305,9 @@ class _CreateReportLocationScreenState
           'Location detected successfully.',
         );
       }
-    } catch (e) {
+    } catch (
+    e
+    ) {
       if (!mounted) {
         return;
       }
@@ -783,13 +1410,19 @@ class _CreateReportLocationScreenState
       longitude =
           result.longitude;
 
-      // Manually selected map point does not have device GPS
-      // accuracy metadata.
+      // Manually selected map point does not have
+      // device GPS accuracy metadata.
       gpsAccuracy =
       null;
 
+      _updatingAddressProgrammatically =
+      true;
+
       addressController.text =
           result.address;
+
+      _updatingAddressProgrammatically =
+      false;
 
       detectedAddress =
           result.address;
@@ -799,6 +1432,9 @@ class _CreateReportLocationScreenState
 
       locationDetected =
       true;
+
+      addressValidationError =
+      null;
     });
 
     await _saveDraft(
@@ -835,20 +1471,6 @@ class _CreateReportLocationScreenState
     });
 
     try {
-      // ========================================================
-      // IMPORTANT
-      //
-      // widget.category is already the EFFECTIVE category.
-      //
-      // Therefore:
-      //
-      // Keep Mine
-      //     → citizen category
-      //
-      // Apply AI
-      //     → final combined AI category
-      // ========================================================
-
       final List<NearbyReport>
       reports =
       await nearbyReportService
@@ -977,7 +1599,8 @@ class _CreateReportLocationScreenState
 
           actions: [
             TextButton(
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                 );
@@ -1034,8 +1657,9 @@ class _CreateReportLocationScreenState
 
   Future<void>
   previewReport() async {
-    final String address =
-    addressController.text
+    String address =
+    addressController
+        .text
         .trim();
 
     // ==========================================================
@@ -1051,78 +1675,56 @@ class _CreateReportLocationScreenState
     }
 
     // ==========================================================
-    // MANUAL ADDRESS WITHOUT COORDINATES
+    // MANUALLY TYPED ADDRESS MUST BE GEOCODED
+    //
+    // GPS and Map already provide coordinates.
+    //
+    // If coordinates are absent, treat the field as manual input
+    // and require it to resolve to a real-world map location.
     // ==========================================================
 
     if (
     latitude == null ||
         longitude == null
     ) {
-      final bool?
-      continueWithoutGps =
-      await showDialog<bool>(
-        context:
-        context,
-
-        builder:
-            (
-            dialogContext,
-            ) {
-          return AlertDialog(
-            backgroundColor:
-            AppColors.surface,
-
-            title:
-            const Text(
-              'No GPS Coordinates',
-            ),
-
-            content:
-            const Text(
-              'You entered an address manually, but no GPS '
-                  'coordinates are attached. Using the map or GPS '
-                  'is recommended for accurate issue tracking.',
-            ),
-
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(
-                    dialogContext,
-                    false,
-                  );
-                },
-
-                child:
-                const Text(
-                  'Choose Location',
-                ),
-              ),
-
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(
-                    dialogContext,
-                    true,
-                  );
-                },
-
-                child:
-                const Text(
-                  'Continue',
-                ),
-              ),
-            ],
-          );
-        },
-      );
+      final bool verified =
+      await _verifyTypedAddress();
 
       if (
-      continueWithoutGps !=
-          true
+      !verified ||
+          !mounted
       ) {
         return;
       }
+
+      // Address may have been normalized by reverse geocoding.
+      address =
+          addressController
+              .text
+              .trim();
+    }
+
+    // ==========================================================
+    // FINAL LOCATION SAFETY CHECK
+    // ==========================================================
+
+    if (
+    latitude == null ||
+        longitude == null
+    ) {
+      showMessage(
+        'A valid map location is required before preview.',
+      );
+
+      return;
+    }
+
+    if (address.isEmpty) {
+      showMessage(
+        'A valid address is required before preview.',
+      );
+
+      return;
     }
 
     // ==========================================================
@@ -1149,14 +1751,18 @@ class _CreateReportLocationScreenState
       return;
     }
 
-    _draftDebounce?.cancel();
+    _draftDebounce
+        ?.cancel();
 
     final bool draftSaved =
     await _saveDraft(
       currentStep: 4,
     );
 
-    if (!draftSaved || !mounted) {
+    if (
+    !draftSaved ||
+        !mounted
+    ) {
       showMessage(
         'Your report draft could not be saved before preview.',
       );
@@ -1167,26 +1773,20 @@ class _CreateReportLocationScreenState
     // ==========================================================
     // PREVIEW
     //
-    // IMPORTANT:
-    //
-    // ReportPreviewScreen currently still supports the legacy
-    // single aiAnalysis field.
-    //
-    // We retain all multi-image data here so this Location screen
-    // is already compatible with the upgraded Evidence screen.
-    //
-    // The next update will migrate ReportPreviewScreen itself.
+    // Existing report data, evidence, AI data and location
+    // forwarding are preserved.
     // ==========================================================
 
     final bool? submitted =
     await Navigator.push<bool>(
       context,
+
       MaterialPageRoute(
         builder: (_) =>
             ReportPreviewScreen(
-              // ====================================================
+              // ==================================================
               // REPORT
-              // ====================================================
+              // ==================================================
 
               category:
               widget.category,
@@ -1200,9 +1800,9 @@ class _CreateReportLocationScreenState
               description:
               widget.description,
 
-              // ====================================================
+              // ==================================================
               // EVIDENCE
-              // ====================================================
+              // ==================================================
 
               evidenceImages:
               List<File>.from(
@@ -1215,22 +1815,29 @@ class _CreateReportLocationScreenState
               ),
 
               imageAnalyses:
-              Map<String, ReportImageAiAnalysis>.from(
+              Map<
+                  String,
+                  ReportImageAiAnalysis
+              >.from(
                 widget.imageAnalyses,
               ),
 
               finalAiAnalysis:
               widget.finalAiAnalysis,
 
-              // ====================================================
+              // ==================================================
               // LOCATION
-              // ====================================================
+              // ==================================================
 
               address:
-              addressController.text.trim(),
+              addressController
+                  .text
+                  .trim(),
 
               landmark:
-              landmarkController.text.trim(),
+              landmarkController
+                  .text
+                  .trim(),
 
               latitude:
               latitude,
@@ -1247,9 +1854,9 @@ class _CreateReportLocationScreenState
               locationVerificationStatus:
               locationVerificationStatus,
 
-              // ====================================================
+              // ==================================================
               // LEGACY AI
-              // ====================================================
+              // ==================================================
 
               aiAnalysis:
               legacyAiAnalysis,
@@ -1257,19 +1864,23 @@ class _CreateReportLocationScreenState
       ),
     );
 
-  // ==========================================================
-  // PREVIEW REPORTED SUCCESS
-  //
-  // Forward TRUE back to Evidence.
-  // Do NOT save the Location draft again.
-  // ==========================================================
+    // ==========================================================
+    // PREVIEW REPORTED SUCCESS
+    //
+    // Forward TRUE back to Evidence.
+    // Do NOT save the Location draft again.
+    // ==========================================================
 
-    if (submitted == true) {
+    if (
+    submitted ==
+        true
+    ) {
       if (!mounted) {
         return;
       }
 
-      _allowPop = true;
+      _allowPop =
+      true;
 
       Navigator.pop(
         context,
@@ -1396,7 +2007,8 @@ class _CreateReportLocationScreenState
 
           actions: [
             TextButton(
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                   false,
@@ -1410,7 +2022,8 @@ class _CreateReportLocationScreenState
             ),
 
             ElevatedButton(
-              onPressed: () {
+              onPressed:
+                  () {
                 Navigator.pop(
                   dialogContext,
                   true,
@@ -1441,15 +2054,18 @@ class _CreateReportLocationScreenState
       return 'Unavailable';
     }
 
-    if (accuracy <= 10) {
+    if (accuracy <=
+        10) {
       return 'Excellent • ±${accuracy.toStringAsFixed(0)} m';
     }
 
-    if (accuracy <= 25) {
+    if (accuracy <=
+        25) {
       return 'Good • ±${accuracy.toStringAsFixed(0)} m';
     }
 
-    if (accuracy <= 50) {
+    if (accuracy <=
+        50) {
       return 'Moderate • ±${accuracy.toStringAsFixed(0)} m';
     }
 
@@ -1466,18 +2082,24 @@ class _CreateReportLocationScreenState
         gpsAccuracy;
 
     if (accuracy == null) {
-      return AppColors.textSecondary;
+      return AppColors
+          .textSecondary;
     }
 
-    if (accuracy <= 25) {
-      return AppColors.success;
+    if (accuracy <=
+        25) {
+      return AppColors
+          .success;
     }
 
-    if (accuracy <= 50) {
-      return AppColors.warning;
+    if (accuracy <=
+        50) {
+      return AppColors
+          .warning;
     }
 
-    return AppColors.danger;
+    return AppColors
+        .danger;
   }
 
   // ============================================================
@@ -1491,13 +2113,17 @@ class _CreateReportLocationScreenState
       return;
     }
 
-    ScaffoldMessenger.of(
+    ScaffoldMessenger
+        .of(
       context,
-    ).hideCurrentSnackBar();
+    )
+        .hideCurrentSnackBar();
 
-    ScaffoldMessenger.of(
+    ScaffoldMessenger
+        .of(
       context,
-    ).showSnackBar(
+    )
+        .showSnackBar(
       SnackBar(
         content:
         Text(
@@ -1513,11 +2139,14 @@ class _CreateReportLocationScreenState
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(
+    WidgetsBinding
+        .instance
+        .removeObserver(
       this,
     );
 
-    _draftDebounce?.cancel();
+    _draftDebounce
+        ?.cancel();
 
     addressController
         .dispose();
@@ -1576,9 +2205,9 @@ class _CreateReportLocationScreenState
                     CrossAxisAlignment.start,
 
                     children: [
-                      // =================================================
+                      // ===========================================
                       // HEADER
-                      // =================================================
+                      // ===========================================
 
                       Row(
                         children: [
@@ -1664,9 +2293,9 @@ class _CreateReportLocationScreenState
                         18,
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // PROGRESS
-                      // =================================================
+                      // ===========================================
 
                       const _LocationProgress(),
 
@@ -1675,9 +2304,9 @@ class _CreateReportLocationScreenState
                         24,
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // GPS / MAP CARD
-                      // =================================================
+                      // ===========================================
 
                       Container(
                         width:
@@ -1792,9 +2421,9 @@ class _CreateReportLocationScreenState
                               16,
                             ),
 
-                            // ===========================================
+                            // =====================================
                             // CURRENT GPS
-                            // ===========================================
+                            // =====================================
 
                             SizedBox(
                               width:
@@ -1814,7 +2443,8 @@ class _CreateReportLocationScreenState
                                 ),
 
                                 onPressed:
-                                gettingLocation
+                                gettingLocation ||
+                                    validatingManualAddress
                                     ? null
                                     : detectCurrentLocation,
 
@@ -1854,9 +2484,9 @@ class _CreateReportLocationScreenState
                               10,
                             ),
 
-                            // ===========================================
+                            // =====================================
                             // MAP
-                            // ===========================================
+                            // =====================================
 
                             SizedBox(
                               width:
@@ -1865,7 +2495,8 @@ class _CreateReportLocationScreenState
                               child:
                               OutlinedButton.icon(
                                 onPressed:
-                                gettingLocation
+                                gettingLocation ||
+                                    validatingManualAddress
                                     ? null
                                     : openMapPicker,
 
@@ -1884,9 +2515,9 @@ class _CreateReportLocationScreenState
                         ),
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // COORDINATE / ACCURACY
-                      // =================================================
+                      // ===========================================
 
                       if (
                       latitude != null &&
@@ -2021,9 +2652,9 @@ class _CreateReportLocationScreenState
                         ),
                       ],
 
-                      // =================================================
+                      // ===========================================
                       // NEARBY CHECKING
-                      // =================================================
+                      // ===========================================
 
                       if (checkingNearby) ...[
                         const SizedBox(
@@ -2034,9 +2665,9 @@ class _CreateReportLocationScreenState
                         const LinearProgressIndicator(),
                       ],
 
-                      // =================================================
+                      // ===========================================
                       // NEARBY RESULTS
-                      // =================================================
+                      // ===========================================
 
                       if (
                       !checkingNearby &&
@@ -2170,9 +2801,9 @@ class _CreateReportLocationScreenState
                         23,
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // DRAFT STATUS
-                      // =================================================
+                      // ===========================================
 
                       Container(
                         width:
@@ -2180,14 +2811,18 @@ class _CreateReportLocationScreenState
 
                         padding:
                         const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
+                          horizontal:
+                          12,
+
+                          vertical:
+                          10,
                         ),
 
                         decoration:
                         BoxDecoration(
                           color:
-                          _draftStatusColor.withOpacity(
+                          _draftStatusColor
+                              .withOpacity(
                             0.07,
                           ),
 
@@ -2199,7 +2834,8 @@ class _CreateReportLocationScreenState
                           border:
                           Border.all(
                             color:
-                            _draftStatusColor.withOpacity(
+                            _draftStatusColor
+                                .withOpacity(
                               0.45,
                             ),
                           ),
@@ -2213,8 +2849,10 @@ class _CreateReportLocationScreenState
                                   restoringDraft
                                   ? Icons.sync_rounded
                                   : draftSaveFailed
-                                  ? Icons.cloud_off_outlined
-                                  : Icons.cloud_done_outlined,
+                                  ? Icons
+                                  .cloud_off_outlined
+                                  : Icons
+                                  .cloud_done_outlined,
 
                               color:
                               _draftStatusColor,
@@ -2255,9 +2893,9 @@ class _CreateReportLocationScreenState
                         14,
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // ADDRESS
-                      // =================================================
+                      // ===========================================
 
                       const _FieldLabel(
                         'ADDRESS',
@@ -2278,6 +2916,14 @@ class _CreateReportLocationScreenState
                         maxLines:
                         3,
 
+                        textInputAction:
+                        TextInputAction.search,
+
+                        onSubmitted:
+                            (_) async {
+                          await _verifyTypedAddress();
+                        },
+
                         style:
                         const TextStyle(
                           color:
@@ -2287,7 +2933,7 @@ class _CreateReportLocationScreenState
                         decoration:
                         _inputDecoration(
                           hint:
-                          'Detect GPS, choose map or enter address manually',
+                          'Detect GPS, choose map or enter a real address',
 
                           prefixIcon:
                           const Icon(
@@ -2297,17 +2943,161 @@ class _CreateReportLocationScreenState
                             color:
                             AppColors.primary,
                           ),
+                        ).copyWith(
+                          errorText:
+                          addressValidationError,
+
+                          errorMaxLines:
+                          3,
                         ),
                       ),
+
+                      const SizedBox(
+                        height:
+                        10,
+                      ),
+
+                      // ===========================================
+                      // MANUAL ADDRESS LOOKUP
+                      // ===========================================
+
+                      SizedBox(
+                        width:
+                        double.infinity,
+
+                        child:
+                        OutlinedButton.icon(
+                          onPressed:
+                          validatingManualAddress ||
+                              gettingLocation
+                              ? null
+                              : _verifyTypedAddress,
+
+                          icon:
+                          validatingManualAddress
+                              ? const SizedBox(
+                            width:
+                            16,
+
+                            height:
+                            16,
+
+                            child:
+                            CircularProgressIndicator(
+                              strokeWidth:
+                              2,
+                            ),
+                          )
+                              : const Icon(
+                            Icons.search_rounded,
+                          ),
+
+                          label:
+                          Text(
+                            validatingManualAddress
+                                ? 'Checking Address...'
+                                : 'Find Address on Map',
+                          ),
+                        ),
+                      ),
+
+                      // ===========================================
+                      // GEOCODED ADDRESS CONFIRMATION
+                      // ===========================================
+
+                      if (
+                      locationVerificationStatus ==
+                          'geocoded' &&
+                          latitude != null &&
+                          longitude != null
+                      ) ...[
+                        const SizedBox(
+                          height:
+                          10,
+                        ),
+
+                        Container(
+                          width:
+                          double.infinity,
+
+                          padding:
+                          const EdgeInsets.all(
+                            11,
+                          ),
+
+                          decoration:
+                          BoxDecoration(
+                            color:
+                            AppColors.success
+                                .withOpacity(
+                              0.07,
+                            ),
+
+                            borderRadius:
+                            BorderRadius.circular(
+                              11,
+                            ),
+
+                            border:
+                            Border.all(
+                              color:
+                              AppColors.success
+                                  .withOpacity(
+                                0.45,
+                              ),
+                            ),
+                          ),
+
+                          child:
+                          const Row(
+                            children: [
+                              Icon(
+                                Icons
+                                    .verified_outlined,
+
+                                size:
+                                17,
+
+                                color:
+                                AppColors.success,
+                              ),
+
+                              SizedBox(
+                                width:
+                                8,
+                              ),
+
+                              Expanded(
+                                child:
+                                Text(
+                                  'Address matched to map coordinates.',
+
+                                  style:
+                                  TextStyle(
+                                    color:
+                                    AppColors.success,
+
+                                    fontSize:
+                                    10,
+
+                                    fontWeight:
+                                    FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
 
                       const SizedBox(
                         height:
                         20,
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // LANDMARK
-                      // =================================================
+                      // ===========================================
 
                       const _FieldLabel(
                         'ADDITIONAL LANDMARK',
@@ -2342,9 +3132,9 @@ class _CreateReportLocationScreenState
                         20,
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // INFO
-                      // =================================================
+                      // ===========================================
 
                       Container(
                         width:
@@ -2402,9 +3192,11 @@ class _CreateReportLocationScreenState
                                 'SmartCity automatically checks for '
                                     'similar reports within 500 metres. '
                                     'Issues within 100 metres are flagged '
-                                    'as possible duplicates. For best '
-                                    'results, GPS accuracy should normally '
-                                    'be within ±50 metres.',
+                                    'as possible duplicates. A manually '
+                                    'entered address must first match a real '
+                                    'map location. For best GPS results, '
+                                    'accuracy should normally be within '
+                                    '±50 metres.',
 
                                 style:
                                 TextStyle(
@@ -2423,13 +3215,11 @@ class _CreateReportLocationScreenState
                         ),
                       ),
 
-                      // =================================================
+                      // ===========================================
                       // SMART ASSIST TRANSFER STATUS
                       //
-                      // Small information box only.
-                      //
-                      // Does not change the existing flow.
-                      // =================================================
+                      // Existing design/function preserved.
+                      // ===========================================
 
                       if (
                       widget.imageAnalyses.isNotEmpty ||
@@ -2535,9 +3325,9 @@ class _CreateReportLocationScreenState
                 ),
               ),
 
-              // =====================================================
+              // ===============================================
               // BOTTOM
-              // =====================================================
+              // ===============================================
 
               Container(
                 padding:
@@ -2806,6 +3596,34 @@ InputDecoration _inputDecoration({
       const BorderSide(
         color:
         AppColors.primary,
+      ),
+    ),
+
+    errorBorder:
+    OutlineInputBorder(
+      borderRadius:
+      BorderRadius.circular(
+        13,
+      ),
+
+      borderSide:
+      const BorderSide(
+        color:
+        AppColors.danger,
+      ),
+    ),
+
+    focusedErrorBorder:
+    OutlineInputBorder(
+      borderRadius:
+      BorderRadius.circular(
+        13,
+      ),
+
+      borderSide:
+      const BorderSide(
+        color:
+        AppColors.danger,
       ),
     ),
   );

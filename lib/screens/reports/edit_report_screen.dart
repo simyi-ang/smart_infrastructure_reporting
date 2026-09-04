@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../models/infrastructure_report.dart';
@@ -44,6 +45,12 @@ class _EditReportScreenState
 
   final AiEvidenceService aiService =
   AiEvidenceService();
+
+  final LocationService locationService =
+  LocationService();
+
+  final Geocoding geocoding =
+  Geocoding();
 
   final ImagePicker _picker =
   ImagePicker();
@@ -91,6 +98,30 @@ class _EditReportScreenState
 
   List<EditableReportEvidence> evidence =
   [];
+
+  // ============================================================
+  // EDITABLE LOCATION
+  // ============================================================
+
+  double? latitude;
+
+  double? longitude;
+
+  double? gpsAccuracy;
+
+  bool gettingLocation = false;
+
+  bool validatingAddress = false;
+
+  String? addressValidationError;
+
+  String? verifiedAddress;
+
+  String locationVerificationStatus =
+      'saved';
+
+  bool _updatingAddressProgrammatically =
+  false;
 
   // ============================================================
   // OPTIONS
