@@ -88,6 +88,9 @@ class ReportService {
   static const String reportImagesTable =
       'report_images';
 
+  static const String reportEvidenceTable =
+      'report_evidence';
+
   static const String imageAiAnalysisTable =
       'report_image_ai_analysis';
 
@@ -152,6 +155,8 @@ class ReportService {
     double? longitude,
 
     required List<File> evidenceImages,
+
+    required List<File> evidenceVideos,
 
     Map<String, ReportImageAiAnalysis>
     imageAnalyses =
@@ -230,9 +235,10 @@ class ReportService {
       );
     }
 
-    if (evidenceImages.isEmpty) {
+    if (evidenceImages.isEmpty &&
+        evidenceVideos.isEmpty) {
       throw Exception(
-        'Please provide at least one evidence image.',
+        'Please provide at least one evidence photo or video.',
       );
     }
 
@@ -260,6 +266,34 @@ class ReportService {
       if (fileSize <= 0) {
         throw Exception(
           'Evidence image ${index + 1} is empty.',
+        );
+      }
+    }
+
+    // ==========================================================
+    // VERIFY LOCAL VIDEO FILES BEFORE CREATING DB RECORD
+    // ==========================================================
+
+    for (
+    int index = 0;
+    index < evidenceVideos.length;
+    index++
+    ) {
+      final File file =
+      evidenceVideos[index];
+
+      if (!await file.exists()) {
+        throw Exception(
+          'Evidence video ${index + 1} is no longer available.',
+        );
+      }
+
+      final int fileSize =
+      await file.length();
+
+      if (fileSize <= 0) {
+        throw Exception(
+          'Evidence video ${index + 1} is empty.',
         );
       }
     }
@@ -649,6 +683,140 @@ class ReportService {
       }
 
       // ========================================================
+      // UPLOAD VIDEO EVIDENCE
+      //
+      // Images keep using report_images so the existing image AI
+      // relationship remains unchanged. Videos use report_evidence.
+      // ========================================================
+
+      for (
+      int index = 0;
+      index < evidenceVideos.length;
+      index++
+      ) {
+        final File file =
+        evidenceVideos[index];
+
+        final String extension =
+        _getVideoExtension(
+          file.path,
+        );
+
+        final String fileName =
+            'video_'
+            '${index + 1}_'
+            '${DateTime.now().microsecondsSinceEpoch}.'
+            '$extension';
+
+        final String storagePath =
+            '${user.id}/'
+            '$reportId/'
+            '$fileName';
+
+        onProgress?.call(
+          ReportUploadProgress(
+            stage:
+            ReportUploadStage.uploadingEvidence,
+
+            currentImage:
+            evidenceImages.length +
+                index +
+                1,
+
+            totalImages:
+            evidenceImages.length +
+                evidenceVideos.length,
+
+            progress:
+            0.70 +
+                (
+                    0.10 *
+                        (
+                            (index + 1) /
+                                evidenceVideos.length
+                        )
+                ),
+
+            message:
+            'Uploading video '
+                '${index + 1} of '
+                '${evidenceVideos.length}...',
+          ),
+        );
+
+        await _supabase.storage
+            .from(
+          evidenceBucket,
+        )
+            .upload(
+          storagePath,
+
+          file,
+
+          fileOptions:
+          FileOptions(
+            cacheControl:
+            '3600',
+
+            upsert:
+            false,
+
+            contentType:
+            _videoMimeType(
+              extension,
+            ),
+          ),
+        );
+
+        uploadedStoragePaths.add(
+          storagePath,
+        );
+
+        await _supabase
+            .from(
+          reportEvidenceTable,
+        )
+            .insert({
+          'report_id':
+          reportId,
+
+          'evidence_type':
+          'video',
+
+          'storage_path':
+          storagePath,
+
+          'original_file_name':
+          _fileNameFromPath(
+            file.path,
+          ),
+
+          'mime_type':
+          _videoMimeType(
+            extension,
+          ),
+
+          'file_size_bytes':
+          await file.length(),
+
+          'duration_seconds':
+          null,
+
+          'thumbnail_storage_path':
+          null,
+
+          'evidence_role':
+          'supporting',
+
+          'latitude':
+          latitude,
+
+          'longitude':
+          longitude,
+        });
+      }
+
+      // ========================================================
       // SAVE FINAL COMBINED AI ANALYSIS
       // ========================================================
 
@@ -840,6 +1008,24 @@ class ReportService {
           } catch (_) {
             // Best-effort rollback.
           }
+        }
+
+        // ======================================================
+        // REMOVE GENERIC VIDEO EVIDENCE RECORDS
+        // ======================================================
+
+        try {
+          await _supabase
+              .from(
+            reportEvidenceTable,
+          )
+              .delete()
+              .eq(
+            'report_id',
+            reportId,
+          );
+        } catch (_) {
+          // Best-effort rollback.
         }
 
         // ======================================================
@@ -1561,14 +1747,63 @@ class ReportService {
         reportId,
       );
 
-      if (imagePaths.isNotEmpty) {
+      final List<dynamic> evidenceRows =
+      await _supabase
+          .from(
+        reportEvidenceTable,
+      )
+          .select(
+        'storage_path, thumbnail_storage_path',
+      )
+          .eq(
+        'report_id',
+        reportId,
+      );
+
+      final List<String> evidencePaths =
+      [];
+
+      for (final dynamic row in evidenceRows) {
+        final Map<String, dynamic> item =
+        Map<String, dynamic>.from(
+          row as Map,
+        );
+
+        final String? storagePath =
+        item['storage_path']?.toString();
+
+        final String? thumbnailPath =
+        item['thumbnail_storage_path']?.toString();
+
+        if (storagePath != null &&
+            storagePath.isNotEmpty) {
+          evidencePaths.add(
+            storagePath,
+          );
+        }
+
+        if (thumbnailPath != null &&
+            thumbnailPath.isNotEmpty) {
+          evidencePaths.add(
+            thumbnailPath,
+          );
+        }
+      }
+
+      final List<String> allStoragePaths =
+      <String>{
+        ...imagePaths,
+        ...evidencePaths,
+      }.toList();
+
+      if (allStoragePaths.isNotEmpty) {
         await _supabase
             .storage
             .from(
           evidenceBucket,
         )
             .remove(
-          imagePaths,
+          allStoragePaths,
         );
       }
 
@@ -1999,6 +2234,97 @@ class ReportService {
       default:
         return 'jpg';
     }
+  }
+
+  // ============================================================
+  // VIDEO FILE EXTENSION
+  // ============================================================
+
+  String _getVideoExtension(
+      String path,
+      ) {
+    final String fileName =
+    _fileNameFromPath(
+      path,
+    );
+
+    final int dotIndex =
+    fileName.lastIndexOf(
+      '.',
+    );
+
+    if (
+    dotIndex < 0 ||
+        dotIndex ==
+            fileName.length - 1
+    ) {
+      return 'mp4';
+    }
+
+    final String extension =
+    fileName
+        .substring(
+      dotIndex + 1,
+    )
+        .toLowerCase();
+
+    switch (extension) {
+      case 'mp4':
+      case 'mov':
+      case 'm4v':
+      case 'webm':
+      case '3gp':
+        return extension;
+
+      default:
+        return 'mp4';
+    }
+  }
+
+  // ============================================================
+  // VIDEO MIME TYPE
+  // ============================================================
+
+  String _videoMimeType(
+      String extension,
+      ) {
+    switch (
+    extension.toLowerCase()
+    ) {
+      case 'mov':
+        return 'video/quicktime';
+
+      case 'm4v':
+        return 'video/x-m4v';
+
+      case 'webm':
+        return 'video/webm';
+
+      case '3gp':
+        return 'video/3gpp';
+
+      case 'mp4':
+      default:
+        return 'video/mp4';
+    }
+  }
+
+  // ============================================================
+  // FILE NAME FROM PATH
+  // ============================================================
+
+  String _fileNameFromPath(
+      String path,
+      ) {
+    return path
+        .replaceAll(
+      '\\',
+      '/',
+    )
+        .split(
+      '/',
+    )
+        .last;
   }
 
   // ============================================================

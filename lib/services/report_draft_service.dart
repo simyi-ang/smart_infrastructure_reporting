@@ -209,29 +209,83 @@ class ReportDraftService {
   // Keeps backward compatibility with your existing screens.
   // ============================================================
 
+  // ============================================================
+// UPDATE DRAFT — SAFE PARTIAL UPDATE
+//
+// IMPORTANT:
+//
+// Nullable fields use Object? + sentinel.
+//
+// This allows us to distinguish:
+//
+// not supplied
+//     → preserve existing value
+//
+// supplied null
+//     → intentionally clear value
+//
+// This prevents Details / Evidence / Location / Preview from
+// accidentally deleting one another's saved information.
+// ============================================================
+
+  static const Object _notProvided =
+  Object();
+
   static Future<ReportDraft> updateDraft({
     required String userId,
+
     String? category,
     String? priority,
     String? title,
     String? description,
-    String? landmark,
-    String? manualAddress,
-    double? latitude,
-    double? longitude,
-    double? locationAccuracy,
-    String? detectedAddress,
-    String? locationVerificationStatus,
-    double? addressDistanceMeters,
-    String? voiceTranscript,
-    String? voiceLocationContext,
-    String? voiceSafetyConcern,
+
+    Object? landmark =
+        _notProvided,
+
+    Object? manualAddress =
+        _notProvided,
+
+    Object? latitude =
+        _notProvided,
+
+    Object? longitude =
+        _notProvided,
+
+    Object? locationAccuracy =
+        _notProvided,
+
+    Object? detectedAddress =
+        _notProvided,
+
+    Object? locationVerificationStatus =
+        _notProvided,
+
+    Object? addressDistanceMeters =
+        _notProvided,
+
+    Object? voiceTranscript =
+        _notProvided,
+
+    Object? voiceLocationContext =
+        _notProvided,
+
+    Object? voiceSafetyConcern =
+        _notProvided,
+
     int? currentStep,
+
     bool? hasCloseUpEvidence,
+
     bool? hasContextEvidence,
+
     List<String>? evidenceImagePaths,
+
     List<String>? evidenceVideoPaths,
   }) async {
+    // ==========================================================
+    // 1. LOAD CURRENT DRAFT
+    // ==========================================================
+
     final ReportDraft? existing =
     await loadDraft(
       userId: userId,
@@ -241,7 +295,11 @@ class ReportDraftService {
         existing ??
             ReportDraft.empty();
 
-    final ReportDraft updated =
+    // ==========================================================
+    // 2. START WITH NON-NULLABLE VALUES
+    // ==========================================================
+
+    ReportDraft updated =
     base.copyWith(
       category:
       category,
@@ -254,39 +312,6 @@ class ReportDraftService {
 
       description:
       description,
-
-      landmark:
-      landmark,
-
-      manualAddress:
-      manualAddress,
-
-      latitude:
-      latitude,
-
-      longitude:
-      longitude,
-
-      locationAccuracy:
-      locationAccuracy,
-
-      detectedAddress:
-      detectedAddress,
-
-      locationVerificationStatus:
-      locationVerificationStatus,
-
-      addressDistanceMeters:
-      addressDistanceMeters,
-
-      voiceTranscript:
-      voiceTranscript,
-
-      voiceLocationContext:
-      voiceLocationContext,
-
-      voiceSafetyConcern:
-      voiceSafetyConcern,
 
       currentStep:
       currentStep,
@@ -307,9 +332,154 @@ class ReportDraftService {
       DateTime.now(),
     );
 
+    // ==========================================================
+    // 3. LOCATION
+    //
+    // Only modify a field when the caller actually supplied it.
+    // ==========================================================
+
+    if (!identical(
+      landmark,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            landmark:
+            landmark as String?,
+          );
+    }
+
+    if (!identical(
+      manualAddress,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            manualAddress:
+            manualAddress as String?,
+          );
+    }
+
+    if (!identical(
+      latitude,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            latitude:
+            latitude as double?,
+          );
+    }
+
+    if (!identical(
+      longitude,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            longitude:
+            longitude as double?,
+          );
+    }
+
+    if (!identical(
+      locationAccuracy,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            locationAccuracy:
+            locationAccuracy
+            as double?,
+          );
+    }
+
+    if (!identical(
+      detectedAddress,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            detectedAddress:
+            detectedAddress
+            as String?,
+          );
+    }
+
+    if (!identical(
+      locationVerificationStatus,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            locationVerificationStatus:
+            locationVerificationStatus
+            as String?,
+          );
+    }
+
+    if (!identical(
+      addressDistanceMeters,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            addressDistanceMeters:
+            addressDistanceMeters
+            as double?,
+          );
+    }
+
+    // ==========================================================
+    // 4. VOICE DATA
+    // ==========================================================
+
+    if (!identical(
+      voiceTranscript,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            voiceTranscript:
+            voiceTranscript
+            as String?,
+          );
+    }
+
+    if (!identical(
+      voiceLocationContext,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            voiceLocationContext:
+            voiceLocationContext
+            as String?,
+          );
+    }
+
+    if (!identical(
+      voiceSafetyConcern,
+      _notProvided,
+    )) {
+      updated =
+          updated.copyWith(
+            voiceSafetyConcern:
+            voiceSafetyConcern
+            as String?,
+          );
+    }
+
+    // ==========================================================
+    // 5. SAVE
+    // ==========================================================
+
     await saveDraft(
-      userId: userId,
-      draft: updated,
+      userId:
+      userId,
+
+      draft:
+      updated,
     );
 
     return updated;

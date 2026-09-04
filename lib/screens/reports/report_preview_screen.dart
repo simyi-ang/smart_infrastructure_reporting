@@ -559,6 +559,10 @@ class _ReportPreviewScreenState
       return;
     }
 
+    // ==========================================================
+    // SAVE LATEST PREVIEW DRAFT BEFORE SUBMISSION
+    // ==========================================================
+
     final bool draftSaved =
     await _savePreviewDraft();
 
@@ -567,8 +571,7 @@ class _ReportPreviewScreenState
         context,
       ).showSnackBar(
         const SnackBar(
-          content:
-          Text(
+          content: Text(
             'Your report draft could not be saved. '
                 'Please try again before submitting.',
           ),
@@ -578,38 +581,16 @@ class _ReportPreviewScreenState
       return;
     }
 
-    // IMPORTANT:
-    // Current ReportService uploads image evidence only.
-    // Never silently discard an attached video.
-    if (widget.evidenceVideos.isNotEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
-        const SnackBar(
-          content:
-          Text(
-            'Video evidence is safely preserved in the draft, '
-                'but video upload must be enabled in ReportService '
-                'before this report can be submitted.',
-          ),
-        ),
-      );
-
-      return;
-    }
+    // ==========================================================
+    // START SUBMISSION
+    // ==========================================================
 
     setState(() {
-      submitting =
-      true;
-
-      uploadProgress =
-      0.02;
-
+      submitting = true;
+      uploadProgress = 0.02;
       uploadMessage =
       'Checking internet connection...';
-
-      submissionError =
-      null;
+      submissionError = null;
     });
 
     try {
@@ -625,22 +606,22 @@ class _ReportPreviewScreenState
       }
 
       setState(() {
-        uploadProgress =
-        0.05;
-
+        uploadProgress = 0.05;
         uploadMessage =
         'Preparing submission...';
       });
 
       // ========================================================
-      // CURRENT REPORT SERVICE
+      // SUBMIT REPORT
       //
-      // AI persistence added in next step.
+      // ReportService now supports:
+      // - photo only
+      // - video only
+      // - photo + video
       // ========================================================
 
       final result =
-      await reportService
-          .submitReport(
+      await reportService.submitReport(
         title:
         widget.title,
 
@@ -668,10 +649,18 @@ class _ReportPreviewScreenState
         evidenceImages:
         widget.evidenceImages,
 
+        evidenceVideos:
+        widget.evidenceVideos,
+
+        imageAnalyses:
+        widget.imageAnalyses,
+
+        finalAiAnalysis:
+        widget.finalAiAnalysis,
+
         onProgress:
             (
-            ReportUploadProgress
-            progress,
+            ReportUploadProgress progress,
             ) {
           if (!mounted) {
             return;
@@ -679,8 +668,7 @@ class _ReportPreviewScreenState
 
           setState(() {
             uploadProgress =
-                progress.progress
-                    .clamp(
+                progress.progress.clamp(
                   0.0,
                   1.0,
                 );
@@ -696,7 +684,9 @@ class _ReportPreviewScreenState
       }
 
       // ========================================================
-      // CLEAR ACTIVE DRAFT ONLY AFTER REMOTE SUCCESS
+      // REMOTE SUBMISSION SUCCEEDED
+      //
+      // ONLY NOW CLEAR LOCAL DRAFT
       // ========================================================
 
       final String? userId =
@@ -705,11 +695,12 @@ class _ReportPreviewScreenState
       if (userId != null) {
         try {
           await ReportDraftService.clearDraft(
-            userId: userId,
+            userId:
+            userId,
           );
         } catch (_) {
-          // Remote submission already succeeded.
-          // Local cleanup failure must not turn success into failure.
+          // Remote submission succeeded.
+          // Local cleanup failure must not change that success.
         }
       }
 
@@ -736,9 +727,7 @@ class _ReportPreviewScreenState
             const Row(
               children: [
                 Icon(
-                  Icons
-                      .check_circle_outline,
-
+                  Icons.check_circle_outline,
                   color:
                   AppColors.success,
                 ),
@@ -774,12 +763,10 @@ class _ReportPreviewScreenState
 
                 const Text(
                   'REFERENCE NUMBER',
-
                   style:
                   TextStyle(
                     color:
                     AppColors.textSecondary,
-
                     fontSize:
                     10,
                   ),
@@ -792,26 +779,19 @@ class _ReportPreviewScreenState
 
                 SelectableText(
                   result.referenceNumber,
-
                   style:
                   const TextStyle(
                     color:
                     AppColors.primary,
-
                     fontSize:
                     18,
-
                     fontWeight:
                     FontWeight.bold,
                   ),
                 ),
 
-                if (
-                widget.latitude !=
-                    null &&
-                    widget.longitude !=
-                        null
-                ) ...[
+                if (widget.latitude != null &&
+                    widget.longitude != null) ...[
                   const SizedBox(
                     height:
                     16,
@@ -819,12 +799,10 @@ class _ReportPreviewScreenState
 
                   const Text(
                     'GPS LOCATION',
-
                     style:
                     TextStyle(
                       color:
                       AppColors.textSecondary,
-
                       fontSize:
                       10,
                     ),
@@ -838,12 +816,10 @@ class _ReportPreviewScreenState
                   Text(
                     '${widget.latitude!.toStringAsFixed(6)}, '
                         '${widget.longitude!.toStringAsFixed(6)}',
-
                     style:
                     const TextStyle(
                       color:
                       AppColors.success,
-
                       fontSize:
                       10,
                     ),
@@ -854,7 +830,8 @@ class _ReportPreviewScreenState
 
             actions: [
               ElevatedButton(
-                onPressed: () {
+                onPressed:
+                    () {
                   Navigator.pop(
                     dialogContext,
                   );
@@ -873,10 +850,6 @@ class _ReportPreviewScreenState
       if (!mounted) {
         return;
       }
-
-      // ========================================================
-      // RETURN HOME
-      // ========================================================
 
       Navigator.of(
         context,
@@ -900,7 +873,7 @@ class _ReportPreviewScreenState
       );
 
       // ========================================================
-      // PRESERVE USER DATA FOR RETRY
+      // FAILURE — KEEP THE DRAFT
       // ========================================================
 
       setState(() {

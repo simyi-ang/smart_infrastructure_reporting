@@ -401,9 +401,12 @@ class _CreateReportDetailsScreenState
       description:
       descriptionController.text.trim(),
 
-      // --------------------------------------------------------
-      // PRESERVE LATER-PHASE DATA
-      // --------------------------------------------------------
+      // ==========================================================
+// PRESERVE LOCATION DATA
+//
+// Details screen does not own Location.
+// Never erase Location data when saving Details.
+// ==========================================================
 
       landmark:
       existing?.landmark,
@@ -429,6 +432,10 @@ class _CreateReportDetailsScreenState
       addressDistanceMeters:
       existing?.addressDistanceMeters,
 
+// ==========================================================
+// PRESERVE VOICE DATA
+// ==========================================================
+
       voiceTranscript:
       existing?.voiceTranscript,
 
@@ -438,24 +445,6 @@ class _CreateReportDetailsScreenState
       voiceSafetyConcern:
       existing?.voiceSafetyConcern,
 
-      /*
-       * User is currently on Details.
-       *
-       * Later screens change this to:
-       * Evidence = 2
-       * Location = 3
-       * Preview = 4
-       */
-      currentStep: 1,
-
-      hasCloseUpEvidence:
-      existing?.hasCloseUpEvidence ??
-          false,
-
-      hasContextEvidence:
-      existing?.hasContextEvidence ??
-          false,
-
 // ==========================================================
 // PRESERVE PHOTO EVIDENCE
 // ==========================================================
@@ -464,13 +453,12 @@ class _CreateReportDetailsScreenState
       existing?.evidenceImagePaths ??
           const <String>[],
 
-    // ==========================================================
-    // PRESERVE VIDEO EVIDENCE
-    //
-    // IMPORTANT:
-    // Details screen does not own evidence.
-    // It must preserve whatever Evidence screen already saved.
-    // ==========================================================
+// ==========================================================
+// PRESERVE VIDEO EVIDENCE
+//
+// Details screen does not own evidence.
+// It must preserve whatever Evidence screen already saved.
+// ==========================================================
 
       evidenceVideoPaths:
       existing?.evidenceVideoPaths ??
