@@ -7,7 +7,7 @@ import '../../models/report_draft.dart';
 import '../../services/report_draft_service.dart';
 import '../../theme/app_colors.dart';
 import 'create_report_evidence_screen.dart';
-import 'voice_speech_test_screen.dart';
+import 'widgets/voice_quick_report_panel.dart';
 
 // ================================================================
 // CREATE REPORT DETAILS SCREEN
@@ -119,6 +119,22 @@ class _CreateReportDetailsScreenState
   String? selectedPriority;
 
   // ============================================================
+  // PHASE 1B — REPORT INPUT MODE
+  // ============================================================
+
+  _ReportInputMode _reportInputMode =
+      _ReportInputMode.manual;
+
+  /// Phase 1B keeps accepted voice text only in memory.
+  ///
+  /// IMPORTANT:
+  /// Do not write this into ReportDraft yet.
+  ///
+  /// Phase 1C will introduce the formal transcript review and
+  /// persistence workflow.
+  String? _phase1BVoiceTranscript;
+
+  // ============================================================
   // FIELD ERRORS
   // ============================================================
 
@@ -199,10 +215,62 @@ class _CreateReportDetailsScreenState
   }
 
   // ============================================================
+  // PHASE 1B — INPUT MODE
+  // ============================================================
+
+  void _selectReportInputMode(
+      _ReportInputMode mode,
+      ) {
+    if (_isRestoringDraft ||
+        _isNavigating) {
+      return;
+    }
+
+    if (_reportInputMode ==
+        mode) {
+      return;
+    }
+
+    FocusScope
+        .of(context)
+        .unfocus();
+
+    setState(() {
+      _reportInputMode =
+          mode;
+    });
+  }
+
+
+  // ============================================================
+  // PHASE 1B — ACCEPT VOICE TRANSCRIPT
+  // ============================================================
+
+  void _handleVoiceTranscriptAccepted(
+      String transcript,
+      ) {
+    final String normalized =
+    transcript.trim();
+
+    if (normalized.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _phase1BVoiceTranscript =
+          normalized;
+    });
+
+    showMessage(
+      'Voice transcript kept for review. '
+          'Your report fields have not been changed.',
+    );
+  }
+
+  // ============================================================
   // APP LIFECYCLE PROTECTION
   // ============================================================
 
-  @override
   @override
   void didChangeAppLifecycleState(
       AppLifecycleState state,
@@ -1736,24 +1804,6 @@ class _CreateReportDetailsScreenState
                                 value,
                                 ) {
                               // ============================================================
-                              // PHASE 1A — VOICE TEST
-                              // ============================================================
-
-                              if (value ==
-                                  'voice_test') {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder:
-                                        (_) =>
-                                    const VoiceSpeechTestScreen(),
-                                  ),
-                                );
-
-                                return;
-                              }
-
-                              // ============================================================
                               // DISCARD REPORT
                               // ============================================================
 
@@ -1768,48 +1818,6 @@ class _CreateReportDetailsScreenState
                                 context,
                                 ) {
                               return const [
-                                // =========================================================
-                                // VOICE TEST
-                                // =========================================================
-
-                                PopupMenuItem<String>(
-                                  value:
-                                  'voice_test',
-
-                                  child:
-                                  Row(
-                                    children: [
-                                      Icon(
-                                        Icons.mic_none_rounded,
-
-                                        color:
-                                        AppColors.primary,
-
-                                        size:
-                                        20,
-                                      ),
-
-                                      SizedBox(
-                                        width:
-                                        10,
-                                      ),
-
-                                      Text(
-                                        'Voice Test',
-
-                                        style:
-                                        TextStyle(
-                                          color:
-                                          AppColors.primary,
-
-                                          fontWeight:
-                                          FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-
                                 // =========================================================
                                 // DISCARD REPORT
                                 // =========================================================
@@ -1843,6 +1851,9 @@ class _CreateReportDetailsScreenState
                                         TextStyle(
                                           color:
                                           Colors.orangeAccent,
+
+                                          fontWeight:
+                                          FontWeight.w600,
                                         ),
                                       ),
                                     ],
@@ -1892,7 +1903,186 @@ class _CreateReportDetailsScreenState
                       ),
 
                       const SizedBox(
-                        height: 26,
+                        height:
+                        26,
+                      ),
+
+
+// =================================================
+// PHASE 1B — REPORT INPUT METHOD
+// =================================================
+
+                      const Text(
+                        'REPORT INPUT METHOD',
+                        style:
+                        _sectionTitle,
+                      ),
+
+                      const SizedBox(
+                        height:
+                        10,
+                      ),
+
+                      _ReportInputModeSelector(
+                        selectedMode:
+                        _reportInputMode,
+
+                        enabled:
+                        !_isRestoringDraft &&
+                            !_isNavigating,
+
+                        onSelected:
+                        _selectReportInputMode,
+                      ),
+
+
+// =================================================
+// VOICE QUICK REPORT
+// =================================================
+
+                      AnimatedSwitcher(
+                        duration:
+                        const Duration(
+                          milliseconds:
+                          220,
+                        ),
+
+                        switchInCurve:
+                        Curves.easeOut,
+
+                        switchOutCurve:
+                        Curves.easeIn,
+
+                        child:
+                        _reportInputMode ==
+                            _ReportInputMode.voice
+                            ? Padding(
+                          key:
+                          const ValueKey(
+                            'voice-report-mode',
+                          ),
+
+                          padding:
+                          const EdgeInsets.only(
+                            top:
+                            14,
+                          ),
+
+                          child:
+                          VoiceQuickReportPanel(
+                            onTranscriptAccepted:
+                            _handleVoiceTranscriptAccepted,
+                          ),
+                        )
+                            : const SizedBox(
+                          key:
+                          ValueKey(
+                            'manual-report-mode',
+                          ),
+                        ),
+                      ),
+
+
+                    // =================================================
+                    // PHASE 1B — ACCEPTED TRANSCRIPT NOTICE
+                    // =================================================
+
+                      if (_reportInputMode ==
+                          _ReportInputMode.voice &&
+                          _phase1BVoiceTranscript !=
+                              null) ...[
+                        const SizedBox(
+                          height:
+                          10,
+                        ),
+
+                        Container(
+                          width:
+                          double.infinity,
+
+                          padding:
+                          const EdgeInsets.all(
+                            11,
+                          ),
+
+                          decoration:
+                          BoxDecoration(
+                            color:
+                            const Color(
+                              0xFF2EE6A6,
+                            ).withOpacity(
+                              0.05,
+                            ),
+
+                            borderRadius:
+                            BorderRadius.circular(
+                              11,
+                            ),
+
+                            border:
+                            Border.all(
+                              color:
+                              const Color(
+                                0xFF2EE6A6,
+                              ).withOpacity(
+                                0.25,
+                              ),
+                            ),
+                          ),
+
+                          child:
+                          const Row(
+                            crossAxisAlignment:
+                            CrossAxisAlignment.start,
+
+                            children: [
+                              Icon(
+                                Icons.check_circle_outline_rounded,
+
+                                color:
+                                Color(
+                                  0xFF2EE6A6,
+                                ),
+
+                                size:
+                                17,
+                              ),
+
+                              SizedBox(
+                                width:
+                                8,
+                              ),
+
+                              Expanded(
+                                child:
+                                Text(
+                                  'Voice transcript captured. '
+                                      'The manual fields below remain unchanged until '
+                                      'you explicitly review and accept structured '
+                                      'suggestions in the next Voice Intelligence stage.',
+
+                                  style:
+                                  TextStyle(
+                                    color:
+                                    AppColors.textSecondary,
+
+                                    fontSize:
+                                    9,
+
+                                    height:
+                                    1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+
+
+                      const SizedBox(
+                        height:
+                        26,
                       ),
 
                       // =================================================
@@ -2579,6 +2769,343 @@ InputDecoration _inputDecoration({
       ),
     ),
   );
+}
+
+// ================================================================
+// PHASE 1B — REPORT INPUT MODE
+// ================================================================
+
+enum _ReportInputMode {
+  manual,
+  voice,
+}
+
+// ================================================================
+// PHASE 1B — REPORT INPUT MODE SELECTOR
+// ================================================================
+
+class _ReportInputModeSelector
+    extends StatelessWidget {
+
+  final _ReportInputMode selectedMode;
+  final bool enabled;
+
+  final ValueChanged<_ReportInputMode>
+  onSelected;
+
+  const _ReportInputModeSelector({
+    required this.selectedMode,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      padding:
+      const EdgeInsets.all(
+        4,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.surface,
+
+        borderRadius:
+        BorderRadius.circular(
+          14,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.border,
+        ),
+      ),
+
+      child:
+      Row(
+        children: [
+          Expanded(
+            child:
+            _ReportInputModeButton(
+              icon:
+              Icons.edit_note_rounded,
+
+              title:
+              'Manual',
+
+              subtitle:
+              'Type details',
+
+              selected:
+              selectedMode ==
+                  _ReportInputMode.manual,
+
+              enabled:
+              enabled,
+
+              onTap:
+                  () {
+                onSelected(
+                  _ReportInputMode.manual,
+                );
+              },
+            ),
+          ),
+
+          const SizedBox(
+            width:
+            5,
+          ),
+
+          Expanded(
+            child:
+            _ReportInputModeButton(
+              icon:
+              Icons.mic_none_rounded,
+
+              title:
+              'Voice',
+
+              subtitle:
+              'Speak naturally',
+
+              selected:
+              selectedMode ==
+                  _ReportInputMode.voice,
+
+              enabled:
+              enabled,
+
+              onTap:
+                  () {
+                onSelected(
+                  _ReportInputMode.voice,
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+// ================================================================
+// REPORT INPUT MODE BUTTON
+// ================================================================
+
+class _ReportInputModeButton
+    extends StatelessWidget {
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _ReportInputModeButton({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Material(
+      color:
+      Colors.transparent,
+
+      child:
+      InkWell(
+        onTap:
+        enabled
+            ? onTap
+            : null,
+
+        borderRadius:
+        BorderRadius.circular(
+          11,
+        ),
+
+        child:
+        AnimatedContainer(
+          duration:
+          const Duration(
+            milliseconds:
+            170,
+          ),
+
+          padding:
+          const EdgeInsets.symmetric(
+            horizontal:
+            10,
+
+            vertical:
+            11,
+          ),
+
+          decoration:
+          BoxDecoration(
+            color:
+            selected
+                ? AppColors.primary
+                .withOpacity(
+              0.11,
+            )
+                : Colors.transparent,
+
+            borderRadius:
+            BorderRadius.circular(
+              11,
+            ),
+
+            border:
+            Border.all(
+              color:
+              selected
+                  ? AppColors.primary
+                  : Colors.transparent,
+
+              width:
+              selected
+                  ? 1.2
+                  : 1,
+            ),
+          ),
+
+          child:
+          Row(
+            children: [
+              Container(
+                width:
+                34,
+
+                height:
+                34,
+
+                decoration:
+                BoxDecoration(
+                  color:
+                  selected
+                      ? AppColors.primary
+                      .withOpacity(
+                    0.13,
+                  )
+                      : AppColors.background
+                      .withOpacity(
+                    0.30,
+                  ),
+
+                  borderRadius:
+                  BorderRadius.circular(
+                    10,
+                  ),
+                ),
+
+                child:
+                Icon(
+                  icon,
+
+                  color:
+                  selected
+                      ? AppColors.primary
+                      : AppColors.textSecondary,
+
+                  size:
+                  19,
+                ),
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              Expanded(
+                child:
+                Column(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
+                  children: [
+                    Text(
+                      title,
+
+                      maxLines:
+                      1,
+
+                      style:
+                      TextStyle(
+                        color:
+                        selected
+                            ? AppColors.primary
+                            : Colors.white,
+
+                        fontSize:
+                        11,
+
+                        fontWeight:
+                        FontWeight.w600,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      2,
+                    ),
+
+                    Text(
+                      subtitle,
+
+                      maxLines:
+                      1,
+
+                      overflow:
+                      TextOverflow.ellipsis,
+
+                      style:
+                      const TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        8,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              if (selected)
+                const Icon(
+                  Icons.check_circle_rounded,
+
+                  color:
+                  AppColors.primary,
+
+                  size:
+                  16,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ================================================================

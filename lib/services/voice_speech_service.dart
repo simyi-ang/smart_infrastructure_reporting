@@ -88,6 +88,9 @@ class VoiceSpeechService {
   String _latestRecognizedWords =
       '';
 
+  String _confirmedTranscript =
+      '';
+
   List<LocaleName> _locales =
   const [];
 
@@ -344,14 +347,36 @@ class VoiceSpeechService {
   Future<bool> startListening({
     String? localeId,
 
+    // ============================================================
+    // LONGER VOICE REPORT SESSION
+    //
+    // Citizen has enough time to explain:
+    // - infrastructure issue
+    // - location
+    // - severity
+    // - safety concern
+    // - surrounding condition
+    //
+    // Note:
+    // Android may still terminate recognition earlier depending
+    // on the native speech recognition service.
+    // ============================================================
+
     Duration listenFor =
     const Duration(
-      seconds: 45,
+      seconds: 60,
     ),
+
+    // ============================================================
+    // PAUSE TOLERANCE
+    //
+    // Allows the citizen to pause briefly while thinking.
+    // Android can still impose its own shorter silence timeout.
+    // ============================================================
 
     Duration pauseFor =
     const Duration(
-      seconds: 4,
+      seconds: 6,
     ),
   }) async {
     if (_disposed) {
@@ -426,6 +451,9 @@ class VoiceSpeechService {
     _latestRecognizedWords =
     '';
 
+    _confirmedTranscript =
+    '';
+
     final DateTime now =
     DateTime.now();
 
@@ -482,26 +510,43 @@ class VoiceSpeechService {
 
         listenOptions:
         SpeechListenOptions(
+          // Long-form speech rather than command-style recognition.
           listenMode:
           ListenMode.dictation,
 
+          // Show words while citizen is still speaking.
           partialResults:
           true,
 
+          // Stop safely if native recognizer reports an error.
           cancelOnError:
           true,
 
+          // Use platform/network recognizer where available.
+          // This normally provides stronger recognition than forcing
+          // offline recognition on devices without a strong local model.
           onDevice:
           false,
 
-          pauseFor:
-          pauseFor,
-
+          // Maximum requested session duration.
           listenFor:
           listenFor,
 
+          // Allow thinking pauses where supported.
+          pauseFor:
+          pauseFor,
+
+          // Use selected/system speech language.
           localeId:
           effectiveLocale,
+
+          // Useful on platforms that support punctuation.
+          autoPunctuation:
+          true,
+
+          // Let platform decide the best sample rate.
+          sampleRate:
+          0,
         ),
       );
 
@@ -578,10 +623,20 @@ class VoiceSpeechService {
     // ============================================================
 
     if (result.finalResult) {
+      // ============================================================
+      // PRESERVE THE MOST COMPLETE FINAL RESULT
+      // ============================================================
+
+      if (recognized.length >
+          _confirmedTranscript.length) {
+        _confirmedTranscript =
+            recognized;
+      }
+
       _emit(
         _state.copyWith(
           transcript:
-          recognized,
+          _confirmedTranscript,
 
           partialTranscript:
           '',
@@ -602,7 +657,7 @@ class VoiceSpeechService {
       );
 
       debugPrint(
-        '[VOICE] Final transcript: $recognized',
+        '[VOICE] Final transcript: $_confirmedTranscript',
       );
 
       return;
@@ -746,7 +801,12 @@ class VoiceSpeechService {
 
   void _finalizeSession() {
     String transcript =
-    _state.transcript.trim();
+    _confirmedTranscript.trim();
+
+    if (transcript.isEmpty) {
+      transcript =
+          _state.transcript.trim();
+    }
 
     if (transcript.isEmpty) {
       transcript =
