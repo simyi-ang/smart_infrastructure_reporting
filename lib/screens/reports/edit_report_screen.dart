@@ -221,6 +221,34 @@ class _EditReportScreenState
   finalAiAnalysis;
 
   // ============================================================
+  // MANDATORY SEMANTIC TEXT REVIEW
+  //
+  // Local validators catch obvious invalid text. They cannot
+  // reliably detect a grammatically valid but irrelevant sentence
+  // such as "good by to you all".
+  //
+  // Therefore, when Title or Description is changed, Save requires
+  // a fresh final Smart Assist assessment. If AI reports the text
+  // as not meaningful, insufficient, or suggests substantially
+  // different wording, the citizen must choose:
+  //
+  // 1. Use AI Version
+  // 2. Re-edit
+  //
+  // Re-edit blocks Save until the changed wording is reviewed again.
+  // ============================================================
+
+  AiTextReviewChoice textReviewChoice =
+      AiTextReviewChoice.unresolved;
+
+  bool semanticTextReviewResolved =
+  false;
+
+  String? lastAiReviewedTitle;
+
+  String? lastAiReviewedDescription;
+
+  // ============================================================
   // OPTIONS
   // ============================================================
 
@@ -692,6 +720,18 @@ class _EditReportScreenState
 
       aiSuggestionsApplied =
       false;
+
+      semanticTextReviewResolved =
+      false;
+
+      textReviewChoice =
+          AiTextReviewChoice.unresolved;
+
+      lastAiReviewedTitle =
+      null;
+
+      lastAiReviewedDescription =
+      null;
     });
   }
 
@@ -1633,8 +1673,24 @@ class _EditReportScreenState
   }
 
   // ============================================================
-  // REMOVE EVIDENCE
-  // ============================================================
+// REMOVE EVIDENCE
+//
+// EVIDENCE IS MANDATORY
+//
+// Create Report AND Edit Report must always retain at least ONE
+// evidence item:
+//
+// - one photo, OR
+// - one short video.
+//
+// The final evidence item cannot be removed directly. The citizen
+// can choose Add Replacement, then remove the old item.
+//
+// For non-final evidence deletion:
+// - delete in Supabase first,
+// - verify by reloading from the server,
+// - invalidate stale individual/final AI.
+// ============================================================
 
   Future<void> removeEvidence(
       EditableReportEvidence item,
@@ -1643,19 +1699,129 @@ class _EditReportScreenState
       return;
     }
 
-    if (evidence.length <=
-        1) {
-      showMessage(
-        'A report must keep at least one evidence photo or video.',
+    // ==========================================================
+    // PROTECT LAST EVIDENCE
+    // ==========================================================
+
+    if (evidence.length <= 1) {
+      final bool? addReplacement =
+      await showDialog<bool>(
+        context:
+        context,
+
+        barrierDismissible:
+        false,
+
+        builder:
+            (
+            dialogContext,
+            ) {
+          return AlertDialog(
+            backgroundColor:
+            AppColors.surface,
+
+            title:
+            const Row(
+              children: [
+                Icon(
+                  Icons.verified_user_outlined,
+
+                  color:
+                  AppColors.primary,
+                ),
+
+                SizedBox(
+                  width:
+                  10,
+                ),
+
+                Expanded(
+                  child:
+                  Text(
+                    'Evidence Required',
+                  ),
+                ),
+              ],
+            ),
+
+            content:
+            const Text(
+              'Every report must keep at least one evidence photo or '
+                  'short video. This is currently the only evidence item, '
+                  'so it cannot be removed.\n\n'
+                  'To replace it, add a new photo or video first. '
+                  'After the replacement is saved, you can remove this item.',
+
+              style:
+              TextStyle(
+                color:
+                AppColors.textSecondary,
+
+                height:
+                1.45,
+              ),
+            ),
+
+            actions: [
+              TextButton(
+                onPressed:
+                    () {
+                  Navigator.pop(
+                    dialogContext,
+                    false,
+                  );
+                },
+
+                child:
+                const Text(
+                  'Keep Evidence',
+                ),
+              ),
+
+              ElevatedButton.icon(
+                onPressed:
+                    () {
+                  Navigator.pop(
+                    dialogContext,
+                    true,
+                  );
+                },
+
+                icon:
+                const Icon(
+                  Icons.add_photo_alternate_outlined,
+
+                  size:
+                  17,
+                ),
+
+                label:
+                const Text(
+                  'Add Replacement',
+                ),
+              ),
+            ],
+          );
+        },
       );
+
+      if (addReplacement == true &&
+          mounted) {
+        await showAddEvidenceMenu();
+      }
 
       return;
     }
+
+    // ==========================================================
+    // CONFIRM NORMAL DELETE
+    // ==========================================================
 
     final bool? confirmed =
     await showDialog<bool>(
       context:
       context,
+
       builder:
           (
           dialogContext,
@@ -1663,46 +1829,57 @@ class _EditReportScreenState
         return AlertDialog(
           backgroundColor:
           AppColors.surface,
+
           title:
           const Text(
             'Remove Evidence?',
           ),
+
           content:
           const Text(
             'This evidence will be permanently removed. '
-                'Its Smart Assist result will also stop being used '
-                'in the final combined assessment.',
+                'Its individual AI result and the old final combined '
+                'assessment will no longer be valid.',
+
             style:
             TextStyle(
               color:
               AppColors.textSecondary,
+
               height:
               1.4,
             ),
           ),
+
           actions: [
             TextButton(
               onPressed:
-                  () =>
-                  Navigator.pop(
-                    dialogContext,
-                    false,
-                  ),
+                  () {
+                Navigator.pop(
+                  dialogContext,
+                  false,
+                );
+              },
+
               child:
               const Text(
                 'Keep',
               ),
             ),
+
             TextButton(
               onPressed:
-                  () =>
-                  Navigator.pop(
-                    dialogContext,
-                    true,
-                  ),
+                  () {
+                Navigator.pop(
+                  dialogContext,
+                  true,
+                );
+              },
+
               child:
               const Text(
                 'Remove',
+
                 style:
                 TextStyle(
                   color:
@@ -1715,8 +1892,7 @@ class _EditReportScreenState
       },
     );
 
-    if (confirmed !=
-        true) {
+    if (confirmed != true) {
       return;
     }
 
@@ -1725,46 +1901,68 @@ class _EditReportScreenState
       true;
     });
 
+    final String removedKey =
+    evidenceKey(
+      item,
+    );
+
     try {
+      // ========================================================
+      // 1. DELETE FROM DATABASE + STORAGE
+      //
+      // The service now verifies that the database row was
+      // actually deleted. RLS "0 rows deleted" is treated as an
+      // error instead of pretending deletion succeeded.
+      // ========================================================
+
       await evidenceService.removeEvidence(
         evidence:
         item,
       );
 
+      // ========================================================
+      // 2. REMOVE STALE FINAL AI DATABASE ROW
+      // ========================================================
+
+      try {
+        await supabase
+            .from(
+          'report_final_ai_analysis',
+        )
+            .delete()
+            .eq(
+          'report_id',
+          widget.report.id,
+        );
+      } catch (e) {
+        debugPrint(
+          'Unable to clear stale final AI analysis: $e',
+        );
+      }
+
       if (!mounted) {
         return;
       }
 
-      final String key =
-      evidenceKey(
-        item,
-      );
+      // ========================================================
+      // 3. CLEAR LOCAL AI STATE
+      // ========================================================
 
       setState(() {
-        evidence.removeWhere(
-              (
-              current,
-              ) =>
-          current.id ==
-              item.id &&
-              current.sourceTable ==
-                  item.sourceTable,
-        );
-
         imageAnalyses.remove(
-          key,
+          removedKey,
         );
 
         imageAnalysisErrors.remove(
-          key,
+          removedKey,
         );
 
         videoAnalyses.remove(
-          key,
+          removedKey,
         );
 
         videoAnalysisErrors.remove(
-          key,
+          removedKey,
         );
 
         finalAiAnalysis =
@@ -1773,30 +1971,114 @@ class _EditReportScreenState
         finalAnalysisError =
         null;
 
+        analyzingEvidenceKey =
+        null;
+
         aiSuggestionsApplied =
         false;
+
+        semanticTextReviewResolved =
+        false;
+
+        textReviewChoice =
+            AiTextReviewChoice.unresolved;
+
+        lastAiReviewedTitle =
+        null;
+
+        lastAiReviewedDescription =
+        null;
+      });
+
+      // ========================================================
+      // 4. RELOAD FROM SUPABASE
+      //
+      // This is the important persistence fix.
+      //
+      // We do NOT trust only evidence.removeWhere(...).
+      // The list shown after deletion is loaded again from the
+      // database, so reopening Edit Report shows the same result.
+      // ========================================================
+
+      final List<EditableReportEvidence> serverEvidence =
+      await evidenceService.loadEvidence(
+        reportId:
+        widget.report.id,
+      );
+
+      // The deleted exact row must no longer exist.
+      final bool stillExists =
+      serverEvidence.any(
+            (
+            current,
+            ) =>
+        current.id ==
+            item.id &&
+            current.sourceTable ==
+                item.sourceTable,
+      );
+
+      if (stillExists) {
+        throw Exception(
+          'The evidence was not removed from the database. '
+              'Please check the Supabase DELETE/RLS policy and try again.',
+        );
+      }
+
+      // Defensive invariant: edit must still retain one item.
+      if (serverEvidence.isEmpty) {
+        throw Exception(
+          'Evidence cannot be left empty. Add replacement evidence '
+              'before removing the final item.',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        evidence =
+            serverEvidence;
 
         editingEvidence =
         false;
       });
 
-      if (successfulAiCount >
-          0) {
-        await combineAllAnalyses();
-      }
-
       showMessage(
-        'Evidence removed.',
+        'Evidence removed permanently. '
+            '${serverEvidence.length} evidence item(s) remain.',
       );
     } catch (e) {
       if (!mounted) {
         return;
       }
 
-      setState(() {
-        editingEvidence =
-        false;
-      });
+      // Reload server truth even after failure. This prevents a
+      // local UI-only delete from making the screen look correct
+      // when the database row still exists.
+      try {
+        final List<EditableReportEvidence> serverEvidence =
+        await evidenceService.loadEvidence(
+          reportId:
+          widget.report.id,
+        );
+
+        if (mounted) {
+          setState(() {
+            evidence =
+                serverEvidence;
+
+            editingEvidence =
+            false;
+          });
+        }
+      } catch (_) {
+        setState(() {
+          editingEvidence =
+          false;
+        });
+      }
 
       showMessage(
         cleanError(
@@ -2490,6 +2772,20 @@ class _EditReportScreenState
 
         finalAnalysisError =
         null;
+
+        // This exact Title + Description pair is what the final
+        // combined AI has reviewed.
+        lastAiReviewedTitle =
+            titleController.text.trim();
+
+        lastAiReviewedDescription =
+            descriptionController.text.trim();
+
+        semanticTextReviewResolved =
+        false;
+
+        textReviewChoice =
+            AiTextReviewChoice.unresolved;
       });
     } catch (e) {
       if (!mounted) {
@@ -2605,7 +2901,8 @@ class _EditReportScreenState
 
     if (evidence.isEmpty) {
       showMessage(
-        'Smart Assist needs at least one evidence photo or video.',
+        'Evidence is required. Add at least one photo or short video '
+            'before running Smart Assist.',
       );
 
       return;
@@ -2761,6 +3058,760 @@ class _EditReportScreenState
         });
       }
     }
+  }
+
+  // ============================================================
+  // TEXT COMPARISON HELPERS
+  //
+  // This client-side similarity check is only a conservative
+  // "large rewrite" trigger. Semantic meaning is decided by the
+  // final AI fields such as titleMeaningful/descriptionMeaningful.
+  // ============================================================
+
+  String normalizeTextForComparison(
+      String value,
+      ) {
+    return value
+        .toLowerCase()
+        .replaceAll(
+      RegExp(
+        r'[^\p{L}\p{N}\s]',
+        unicode:
+        true,
+      ),
+      ' ',
+    )
+        .replaceAll(
+      RegExp(
+        r'\s+',
+        unicode:
+        true,
+      ),
+      ' ',
+    )
+        .trim();
+  }
+
+  Set<String> comparisonTokens(
+      String value,
+      ) {
+    final String normalized =
+    normalizeTextForComparison(
+      value,
+    );
+
+    if (normalized.isEmpty) {
+      return <String>{};
+    }
+
+    final bool containsCjk =
+    RegExp(
+      r'[\u3040-\u30FF'
+      r'\u3400-\u4DBF'
+      r'\u4E00-\u9FFF'
+      r'\uAC00-\uD7AF]',
+      unicode:
+      true,
+    ).hasMatch(
+      normalized,
+    );
+
+    if (containsCjk) {
+      return normalized
+          .replaceAll(
+        ' ',
+        '',
+      )
+          .split(
+        '',
+      )
+          .where(
+            (
+            character,
+            ) =>
+        character.trim().isNotEmpty,
+      )
+          .toSet();
+    }
+
+    return normalized
+        .split(
+      ' ',
+    )
+        .where(
+          (
+          word,
+          ) =>
+      word.trim().isNotEmpty,
+    )
+        .toSet();
+  }
+
+  double textSimilarity(
+      String first,
+      String second,
+      ) {
+    final Set<String> a =
+    comparisonTokens(
+      first,
+    );
+
+    final Set<String> b =
+    comparisonTokens(
+      second,
+    );
+
+    if (a.isEmpty &&
+        b.isEmpty) {
+      return 1.0;
+    }
+
+    if (a.isEmpty ||
+        b.isEmpty) {
+      return 0.0;
+    }
+
+    final Set<String> union =
+    a.union(
+      b,
+    );
+
+    if (union.isEmpty) {
+      return 1.0;
+    }
+
+    return a
+        .intersection(
+      b,
+    )
+        .length /
+        union.length;
+  }
+
+  bool isSubstantiallyDifferent(
+      String current,
+      String suggestion, {
+        required bool isTitle,
+      }) {
+    final String currentClean =
+    current.trim();
+
+    final String suggestionClean =
+    suggestion.trim();
+
+    if (currentClean.isEmpty ||
+        suggestionClean.isEmpty) {
+      return false;
+    }
+
+    if (normalizeTextForComparison(
+      currentClean,
+    ) ==
+        normalizeTextForComparison(
+          suggestionClean,
+        )) {
+      return false;
+    }
+
+    final double similarity =
+    textSimilarity(
+      currentClean,
+      suggestionClean,
+    );
+
+    final int longer =
+    currentClean.length >
+        suggestionClean.length
+        ? currentClean.length
+        : suggestionClean.length;
+
+    final int shorter =
+    currentClean.length <
+        suggestionClean.length
+        ? currentClean.length
+        : suggestionClean.length;
+
+    final double lengthRatio =
+    longer == 0
+        ? 1
+        : shorter / longer;
+
+    if (isTitle) {
+      return similarity < 0.40 ||
+          lengthRatio < 0.45;
+    }
+
+    return similarity < 0.30 ||
+        lengthRatio < 0.40;
+  }
+
+  bool get reportTextChanged {
+    return titleController.text.trim() !=
+        widget.report.title.trim() ||
+        descriptionController.text.trim() !=
+            widget.report.description.trim();
+  }
+
+  bool get currentTextHasFreshAiReview {
+    return finalAiAnalysis != null &&
+        lastAiReviewedTitle ==
+            titleController.text.trim() &&
+        lastAiReviewedDescription ==
+            descriptionController.text.trim();
+  }
+
+  bool finalAiReportsTextConcern(
+      ReportFinalAiAnalysis result,
+      ) {
+    final String currentTitle =
+    titleController.text.trim();
+
+    final String currentDescription =
+    descriptionController.text.trim();
+
+    final String aiTitle =
+        result.suggestedTitle?.trim() ??
+            '';
+
+    final String aiDescription =
+        result.suggestedDescription?.trim() ??
+            '';
+
+    final String reportIssue =
+        result.reportIssue?.trim().toLowerCase() ??
+            '';
+
+    final bool explicitMeaningProblem =
+        result.titleMeaningful == false ||
+            result.descriptionMeaningful == false ||
+            result.reportSufficient == false;
+
+    final bool explicitReportIssue =
+        reportIssue.isNotEmpty &&
+            reportIssue != 'none' &&
+            reportIssue != 'no issue' &&
+            reportIssue != 'not applicable' &&
+            reportIssue != 'n/a';
+
+    final bool largeTitleRewrite =
+        aiTitle.isNotEmpty &&
+            isSubstantiallyDifferent(
+              currentTitle,
+              aiTitle,
+              isTitle:
+              true,
+            );
+
+    final bool largeDescriptionRewrite =
+        aiDescription.isNotEmpty &&
+            isSubstantiallyDifferent(
+              currentDescription,
+              aiDescription,
+              isTitle:
+              false,
+            );
+
+    return explicitMeaningProblem ||
+        explicitReportIssue ||
+        largeTitleRewrite ||
+        largeDescriptionRewrite;
+  }
+
+  // ============================================================
+  // REQUIRE FRESH AI REVIEW FOR CHANGED TITLE / DESCRIPTION
+  //
+  // This closes the gap where text such as:
+  // "good by to you all"
+  //
+  // can pass simple length/word-count validation even though it
+  // does not meaningfully describe the infrastructure issue.
+  // ============================================================
+
+  Future<bool> ensureSemanticTextReviewBeforeSave() async {
+    if (!reportTextChanged) {
+      return true;
+    }
+
+    // If the user already explicitly accepted the AI version,
+    // and did not change the text afterward, allow Save.
+    if (semanticTextReviewResolved &&
+        textReviewChoice ==
+            AiTextReviewChoice.ai) {
+      return true;
+    }
+
+    // Changed report text must have a final AI assessment for the
+    // exact current text.
+    if (!currentTextHasFreshAiReview) {
+      final bool? runReview =
+      await showDialog<bool>(
+        context:
+        context,
+
+        barrierDismissible:
+        false,
+
+        builder:
+            (
+            dialogContext,
+            ) {
+          return AlertDialog(
+            backgroundColor:
+            AppColors.surface,
+
+            title:
+            const Row(
+              children: [
+                Icon(
+                  Icons.fact_check_outlined,
+
+                  color:
+                  AppColors.primary,
+                ),
+
+                SizedBox(
+                  width:
+                  10,
+                ),
+
+                Expanded(
+                  child:
+                  Text(
+                    'AI Text Review Required',
+                  ),
+                ),
+              ],
+            ),
+
+            content:
+            const Text(
+              'You changed the report title or description. '
+                  'Before the edited report can be saved, Smart Assist '
+                  'must check that the new wording still meaningfully '
+                  'describes the evidence.\n\n'
+                  'This prevents unrelated or meaningless text from being '
+                  'saved even when it passes basic word-count validation.',
+
+              style:
+              TextStyle(
+                color:
+                AppColors.textSecondary,
+
+                height:
+                1.45,
+              ),
+            ),
+
+            actions: [
+              TextButton(
+                onPressed:
+                    () {
+                  Navigator.pop(
+                    dialogContext,
+                    false,
+                  );
+                },
+
+                child:
+                const Text(
+                  'Re-edit',
+                ),
+              ),
+
+              ElevatedButton.icon(
+                onPressed:
+                    () {
+                  Navigator.pop(
+                    dialogContext,
+                    true,
+                  );
+                },
+
+                icon:
+                const Icon(
+                  Icons.auto_awesome,
+
+                  size:
+                  17,
+                ),
+
+                label:
+                const Text(
+                  'Run AI Review',
+                ),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (runReview != true) {
+        textReviewChoice =
+            AiTextReviewChoice.reedit;
+
+        semanticTextReviewResolved =
+        false;
+
+        return false;
+      }
+
+      await runAiAssist();
+
+      if (!mounted) {
+        return false;
+      }
+
+      if (!currentTextHasFreshAiReview) {
+        showMessage(
+          'AI review could not be completed for the current wording. '
+              'Please re-edit or try Smart Assist again.',
+        );
+
+        return false;
+      }
+    }
+
+    final ReportFinalAiAnalysis result =
+    finalAiAnalysis!;
+
+    // If AI finds no semantic concern and the final evidence
+    // assessment says the report is sufficient, the changed text
+    // is accepted as reviewed.
+    if (!finalAiReportsTextConcern(
+      result,
+    )) {
+      semanticTextReviewResolved =
+      true;
+
+      textReviewChoice =
+          AiTextReviewChoice.original;
+
+      return true;
+    }
+
+    final String currentTitle =
+    titleController.text.trim();
+
+    final String currentDescription =
+    descriptionController.text.trim();
+
+    final String aiTitle =
+        result.suggestedTitle?.trim() ??
+            '';
+
+    final String aiDescription =
+        result.suggestedDescription?.trim() ??
+            '';
+
+    // If AI says a field is not meaningful, AI must actually
+    // provide a usable replacement before "Use AI Version" can
+    // be selected.
+    final bool aiCanRepairTitle =
+        result.titleMeaningful != false ||
+            aiTitle.isNotEmpty;
+
+    final bool aiCanRepairDescription =
+        result.descriptionMeaningful != false ||
+            aiDescription.isNotEmpty;
+
+    final bool canUseAiVersion =
+        aiCanRepairTitle &&
+            aiCanRepairDescription &&
+            (aiTitle.isNotEmpty ||
+                aiDescription.isNotEmpty);
+
+    final bool? useAiVersion =
+    await showDialog<bool>(
+      context:
+      context,
+
+      barrierDismissible:
+      false,
+
+      builder:
+          (
+          dialogContext,
+          ) {
+        return AlertDialog(
+          backgroundColor:
+          AppColors.surface,
+
+          title:
+          const Row(
+            children: [
+              Icon(
+                Icons.warning_amber_rounded,
+
+                color:
+                Colors.orangeAccent,
+              ),
+
+              SizedBox(
+                width:
+                10,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  'Report Wording Needs Review',
+                ),
+              ),
+            ],
+          ),
+
+          content:
+          SingleChildScrollView(
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                const Text(
+                  'Smart Assist found that the edited title/description '
+                      'may be unclear, insufficient, unrelated to the '
+                      'evidence, or substantially different from the '
+                      'recommended wording.\n\n'
+                      'The report cannot be saved until you choose how '
+                      'to correct the wording.',
+
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    height:
+                    1.45,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  14,
+                ),
+
+                _TextReviewPanel(
+                  label:
+                  'CURRENT EDITED VERSION',
+
+                  title:
+                  currentTitle,
+
+                  description:
+                  currentDescription,
+                ),
+
+                const SizedBox(
+                  height:
+                  10,
+                ),
+
+                _TextReviewPanel(
+                  label:
+                  'AI RECOMMENDED VERSION',
+
+                  title:
+                  aiTitle.isEmpty
+                      ? 'No replacement title suggested'
+                      : aiTitle,
+
+                  description:
+                  aiDescription.isEmpty
+                      ? 'No replacement description suggested'
+                      : aiDescription,
+                ),
+
+                if ((result.reportIssue ?? '')
+                    .trim()
+                    .isNotEmpty) ...[
+                  const SizedBox(
+                    height:
+                    10,
+                  ),
+
+                  Text(
+                    'AI review: ${result.reportIssue}',
+
+                    style:
+                    const TextStyle(
+                      color:
+                      Colors.orangeAccent,
+
+                      fontSize:
+                      10,
+
+                      height:
+                      1.4,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          actions: [
+            TextButton.icon(
+              onPressed:
+                  () {
+                Navigator.pop(
+                  dialogContext,
+                  false,
+                );
+              },
+
+              icon:
+              const Icon(
+                Icons.edit_outlined,
+
+                size:
+                17,
+              ),
+
+              label:
+              const Text(
+                'Re-edit',
+              ),
+            ),
+
+            ElevatedButton.icon(
+              onPressed:
+              canUseAiVersion
+                  ? () {
+                Navigator.pop(
+                  dialogContext,
+                  true,
+                );
+              }
+                  : null,
+
+              icon:
+              const Icon(
+                Icons.auto_fix_high,
+
+                size:
+                17,
+              ),
+
+              label:
+              const Text(
+                'Use AI Version',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (useAiVersion != true) {
+      semanticTextReviewResolved =
+      false;
+
+      textReviewChoice =
+          AiTextReviewChoice.reedit;
+
+      showMessage(
+        'Please re-edit the title or description. '
+            'Save remains blocked until the updated wording passes review.',
+      );
+
+      return false;
+    }
+
+    // ==========================================================
+    // APPLY AI TEXT VERSION
+    // ==========================================================
+
+    setState(() {
+      if (aiTitle.isNotEmpty) {
+        titleController.text =
+            aiTitle;
+      }
+
+      if (aiDescription.isNotEmpty) {
+        descriptionController.text =
+            aiDescription;
+      }
+
+      final String suggestedCategory =
+          result.category?.trim() ??
+              '';
+
+      if (result.categoryMatchesUser == false &&
+          categories.contains(
+            suggestedCategory,
+          )) {
+        selectedCategory =
+            suggestedCategory;
+      }
+
+      final String recommendedPriority =
+          result.recommendedPriority?.trim() ??
+              '';
+
+      if (result.priorityChangeRecommended == true &&
+          priorities.contains(
+            recommendedPriority,
+          )) {
+        selectedPriority =
+            recommendedPriority;
+      }
+
+      aiSuggestionsApplied =
+      true;
+
+      semanticTextReviewResolved =
+      true;
+
+      textReviewChoice =
+          AiTextReviewChoice.ai;
+
+      // The user explicitly accepted this AI version.
+      lastAiReviewedTitle =
+          titleController.text.trim();
+
+      lastAiReviewedDescription =
+          descriptionController.text.trim();
+
+      finalAiAnalysis =
+          result.copyWith(
+            reviewedByUser:
+            true,
+
+            suggestionsApplied:
+            true,
+          );
+
+      semanticTextReviewResolved =
+      true;
+
+      textReviewChoice =
+          AiTextReviewChoice.ai;
+
+      lastAiReviewedTitle =
+          titleController.text.trim();
+
+      lastAiReviewedDescription =
+          descriptionController.text.trim();
+    });
+
+    // AI text must still pass deterministic local validation.
+    if (!formKey.currentState!
+        .validate()) {
+      semanticTextReviewResolved =
+      false;
+
+      textReviewChoice =
+          AiTextReviewChoice.reedit;
+
+      showMessage(
+        'The AI wording still needs editing before it can be saved.',
+      );
+
+      return false;
+    }
+
+    return true;
   }
 
   // ============================================================
@@ -2998,6 +4049,14 @@ class _EditReportScreenState
       aiSuggestionsApplied =
       false;
 
+      semanticTextReviewResolved =
+      !reportTextChanged;
+
+      textReviewChoice =
+      reportTextChanged
+          ? AiTextReviewChoice.unresolved
+          : AiTextReviewChoice.original;
+
       finalAiAnalysis =
           finalAiAnalysis!
               .copyWith(
@@ -3104,7 +4163,8 @@ class _EditReportScreenState
 
     if (evidence.isEmpty) {
       showMessage(
-        'Please keep at least one evidence photo or video.',
+        'Evidence is required. Keep at least one photo or short video '
+            'before saving the report.',
       );
 
       return;
@@ -3151,6 +4211,21 @@ class _EditReportScreenState
         'Please confirm a valid map location before saving.',
       );
 
+      return;
+    }
+
+    // ==========================================================
+    // MANDATORY AI SEMANTIC REVIEW FOR CHANGED TEXT
+    //
+    // Basic validators alone are not enough to detect a sentence
+    // that has valid words but is unrelated to the report issue.
+    // ==========================================================
+
+    final bool semanticTextReady =
+    await ensureSemanticTextReviewBeforeSave();
+
+    if (!semanticTextReady ||
+        !mounted) {
       return;
     }
 
@@ -5216,7 +6291,7 @@ class _EvidenceEditor
 
                     Text(
                       '${evidence.length} / $maxEvidenceItems items · '
-                          'photos and short videos',
+                          'minimum 1 required',
 
                       style:
                       const TextStyle(
@@ -6061,6 +7136,161 @@ class _AiResultLine
                 height:
                 1.35,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =================================================================
+// TEXT REVIEW PANEL
+// =================================================================
+
+class _TextReviewPanel
+    extends StatelessWidget {
+  final String label;
+
+  final String title;
+
+  final String description;
+
+  const _TextReviewPanel({
+    required this.label,
+    required this.title,
+    required this.description,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        11,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.background.withOpacity(
+          0.55,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          11,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.border,
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Text(
+            label,
+
+            style:
+            const TextStyle(
+              color:
+              AppColors.primary,
+
+              fontSize:
+              9,
+
+              fontWeight:
+              FontWeight.w700,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          const Text(
+            'Title',
+
+            style:
+            TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              8,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            3,
+          ),
+
+          Text(
+            title,
+
+            style:
+            const TextStyle(
+              color:
+              Colors.white,
+
+              fontSize:
+              10,
+
+              height:
+              1.35,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            8,
+          ),
+
+          const Text(
+            'Description',
+
+            style:
+            TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              8,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            3,
+          ),
+
+          Text(
+            description,
+
+            style:
+            const TextStyle(
+              color:
+              Colors.white,
+
+              fontSize:
+              10,
+
+              height:
+              1.4,
             ),
           ),
         ],

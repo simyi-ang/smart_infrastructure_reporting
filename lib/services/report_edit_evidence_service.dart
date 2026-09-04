@@ -478,17 +478,46 @@ class ReportEditEvidenceService {
 
   // ============================================================
   // REMOVE EVIDENCE
+  //
+  // IMPORTANT:
+  // Supabase DELETE with RLS can succeed at HTTP level while
+  // affecting ZERO rows. The previous implementation treated that
+  // as a successful delete, so the UI removed the card locally but
+  // the evidence returned when Edit Report was opened again.
+  //
+  // This implementation requests the deleted id using .select('id')
+  // and requires exactly one matching row to be returned.
   // ============================================================
 
   Future<void> removeEvidence({
     required EditableReportEvidence evidence,
   }) async {
+    final User? user =
+        _supabase.auth.currentUser;
+
+    if (user == null) {
+      throw Exception(
+        'You must be logged in to remove evidence.',
+      );
+    }
+
+    final String evidenceId =
+    evidence.id.trim();
+
+    if (evidenceId.isEmpty) {
+      throw Exception(
+        'Evidence ID is required.',
+      );
+    }
+
     try {
+      List<dynamic> deletedRows =
+      <dynamic>[];
+
       if (evidence.sourceTable ==
           reportImagesTable) {
         // --------------------------------------------------------
-        // Remove AI result first.
-        // FK cascade may already do this, but this is safe.
+        // Delete per-image AI first.
         // --------------------------------------------------------
 
         try {
@@ -499,10 +528,14 @@ class ReportEditEvidenceService {
               .delete()
               .eq(
             'report_image_id',
-            evidence.id,
+            evidenceId,
           );
-        } catch (_) {}
+        } catch (_) {
+          // AI cleanup is best effort. The evidence row deletion
+          // below is authoritative.
+        }
 
+        deletedRows =
         await _supabase
             .from(
           reportImagesTable,
@@ -510,9 +543,14 @@ class ReportEditEvidenceService {
             .delete()
             .eq(
           'id',
-          evidence.id,
+          evidenceId,
+        )
+            .select(
+          'id',
         );
-      } else {
+      } else if (evidence.sourceTable ==
+          reportEvidenceTable) {
+        deletedRows =
         await _supabase
             .from(
           reportEvidenceTable,
@@ -520,9 +558,53 @@ class ReportEditEvidenceService {
             .delete()
             .eq(
           'id',
-          evidence.id,
+          evidenceId,
+        )
+            .select(
+          'id',
+        );
+      } else {
+        throw Exception(
+          'Unsupported evidence source: ${evidence.sourceTable}.',
         );
       }
+
+      // ========================================================
+      // VERIFY DATABASE DELETE
+      //
+      // Zero rows commonly means an RLS DELETE policy prevented
+      // the citizen from deleting the row.
+      // ========================================================
+
+      final bool deleted =
+      deletedRows.any(
+            (
+            row,
+            ) {
+          if (row is! Map) {
+            return false;
+          }
+
+          return row['id']
+              ?.toString() ==
+              evidenceId;
+        },
+      );
+
+      if (!deleted) {
+        throw Exception(
+          'The evidence was not deleted from the database. '
+              'Your Supabase Row Level Security DELETE policy may '
+              'not allow the current citizen to delete this evidence.',
+        );
+      }
+
+      // ========================================================
+      // STORAGE CLEANUP
+      //
+      // Database deletion is already confirmed. Storage cleanup is
+      // best effort so a storage problem cannot resurrect a DB row.
+      // ========================================================
 
       await _safeDeleteStorage(
         evidence.storagePath,
