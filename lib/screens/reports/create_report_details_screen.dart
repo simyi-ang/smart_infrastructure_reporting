@@ -8,6 +8,9 @@ import '../../services/report_draft_service.dart';
 import '../../theme/app_colors.dart';
 import 'create_report_evidence_screen.dart';
 import 'widgets/voice_quick_report_panel.dart';
+import '../../services/voice_speech_service.dart';
+
+import '../../utils/multilingual_text_validator.dart';
 
 // ================================================================
 // CREATE REPORT DETAILS SCREEN
@@ -119,20 +122,24 @@ class _CreateReportDetailsScreenState
   String? selectedPriority;
 
   // ============================================================
-  // PHASE 1B — REPORT INPUT MODE
+  // PHASE 1C — REPORT INPUT MODE + VOICE TRANSCRIPT
   // ============================================================
 
   _ReportInputMode _reportInputMode =
       _ReportInputMode.manual;
 
-  /// Phase 1B keeps accepted voice text only in memory.
+  /// Transcript explicitly accepted by the citizen.
+  ///
+  /// Phase 1C validates and reviews this transcript locally.
+  /// Structured AI extraction is intentionally deferred to
+  /// Phase 1D.
   ///
   /// IMPORTANT:
-  /// Do not write this into ReportDraft yet.
-  ///
-  /// Phase 1C will introduce the formal transcript review and
-  /// persistence workflow.
-  String? _phase1BVoiceTranscript;
+  /// This value does not silently modify Category, Priority,
+  /// Title, or Description.
+  String? _voiceTranscript;
+
+  bool _voiceTranscriptValidated = false;
 
   // ============================================================
   // FIELD ERRORS
@@ -215,8 +222,8 @@ class _CreateReportDetailsScreenState
   }
 
   // ============================================================
-  // PHASE 1B — INPUT MODE
-  // ============================================================
+// PHASE 1C — INPUT MODE
+// ============================================================
 
   void _selectReportInputMode(
       _ReportInputMode mode,
@@ -231,9 +238,28 @@ class _CreateReportDetailsScreenState
       return;
     }
 
-    FocusScope
-        .of(context)
+    FocusScope.of(context)
         .unfocus();
+
+    // ----------------------------------------------------------
+    // If Voice widget is about to disappear, make sure active
+    // speech recognition is not left running.
+    // ----------------------------------------------------------
+
+    if (_reportInputMode ==
+        _ReportInputMode.voice &&
+        mode ==
+            _ReportInputMode.manual) {
+      if (VoiceSpeechService
+          .instance
+          .isListening) {
+        unawaited(
+          VoiceSpeechService
+              .instance
+              .cancelListening(),
+        );
+      }
+    }
 
     setState(() {
       _reportInputMode =
@@ -243,8 +269,8 @@ class _CreateReportDetailsScreenState
 
 
   // ============================================================
-  // PHASE 1B — ACCEPT VOICE TRANSCRIPT
-  // ============================================================
+// PHASE 1C — ACCEPT VOICE TRANSCRIPT
+// ============================================================
 
   void _handleVoiceTranscriptAccepted(
       String transcript,
@@ -253,17 +279,109 @@ class _CreateReportDetailsScreenState
     transcript.trim();
 
     if (normalized.isEmpty) {
+      showMessage(
+        'No voice transcript was captured.',
+      );
+
       return;
     }
 
     setState(() {
-      _phase1BVoiceTranscript =
+      _voiceTranscript =
           normalized;
+
+      _voiceTranscriptValidated =
+      false;
     });
 
     showMessage(
-      'Voice transcript kept for review. '
-          'Your report fields have not been changed.',
+      'Voice transcript captured. Please review it before continuing.',
+    );
+  }
+
+  // ============================================================
+// PHASE 1C — RECORD VOICE AGAIN
+// ============================================================
+
+  void _recordVoiceAgain() {
+    setState(() {
+      _voiceTranscript =
+      null;
+
+      _voiceTranscriptValidated =
+      false;
+    });
+
+    VoiceSpeechService
+        .instance
+        .clearTranscript();
+  }
+
+
+// ============================================================
+// PHASE 1C — CONTINUE VOICE REVIEW
+// ============================================================
+
+  Future<void>
+  _continueVoiceTranscriptReview() async {
+    final String transcript =
+        _voiceTranscript
+            ?.trim() ??
+            '';
+
+    if (transcript.isEmpty) {
+      showMessage(
+        'Please record your voice report first.',
+      );
+
+      return;
+    }
+
+    final String? error =
+    _validateVoiceTranscript(
+      transcript,
+    );
+
+    if (error != null) {
+      if (mounted) {
+        setState(() {
+          _voiceTranscriptValidated =
+          false;
+        });
+      }
+
+      showMessage(
+        error,
+      );
+
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _voiceTranscriptValidated =
+      true;
+    });
+
+    showMessage(
+      'Voice report passed the local quality check and is ready for AI analysis.',
+    );
+  }
+
+
+  // ============================================================
+  // PHASE 1C — VOICE TRANSCRIPT VALIDATION
+  // ============================================================
+
+  String? _validateVoiceTranscript(
+      String transcript,
+      ) {
+    return MultilingualTextValidator
+        .validateVoiceTranscript(
+      transcript,
     );
   }
 
@@ -1048,29 +1166,20 @@ class _CreateReportDetailsScreenState
     // ----------------------------------------------------------
 
     final String? currentTitleError =
-    validateMeaningfulText(
+    MultilingualTextValidator
+        .validateReportTitle(
       title,
-      fieldName:
-      'report title',
-      minimumLength:
-      5,
-      minimumWords:
-      2,
     );
 
     // ----------------------------------------------------------
     // DESCRIPTION QUALITY
     // ----------------------------------------------------------
 
-    final String? currentDescriptionError =
-    validateMeaningfulText(
+    final String?
+    currentDescriptionError =
+    MultilingualTextValidator
+        .validateDescription(
       description,
-      fieldName:
-      'description',
-      minimumLength:
-      10,
-      minimumWords:
-      3,
     );
 
     if (!mounted) {
@@ -1907,9 +2016,8 @@ class _CreateReportDetailsScreenState
                         26,
                       ),
 
-
-// =================================================
-// PHASE 1B — REPORT INPUT METHOD
+                      // =================================================
+// PHASE 1C — REPORT INPUT METHOD
 // =================================================
 
                       const Text(
@@ -1919,8 +2027,7 @@ class _CreateReportDetailsScreenState
                       ),
 
                       const SizedBox(
-                        height:
-                        10,
+                        height: 10,
                       ),
 
                       _ReportInputModeSelector(
@@ -1935,66 +2042,472 @@ class _CreateReportDetailsScreenState
                         _selectReportInputMode,
                       ),
 
+                      const SizedBox(
+                        height: 14,
+                      ),
+
 
 // =================================================
 // VOICE QUICK REPORT
 // =================================================
 
-                      AnimatedSwitcher(
-                        duration:
-                        const Duration(
-                          milliseconds:
-                          220,
+                      if (_reportInputMode ==
+                          _ReportInputMode.voice) ...[
+                        VoiceQuickReportPanel(
+                          onTranscriptAccepted:
+                          _handleVoiceTranscriptAccepted,
                         ),
 
-                        switchInCurve:
-                        Curves.easeOut,
-
-                        switchOutCurve:
-                        Curves.easeIn,
-
-                        child:
-                        _reportInputMode ==
-                            _ReportInputMode.voice
-                            ? Padding(
-                          key:
-                          const ValueKey(
-                            'voice-report-mode',
+                        if (_voiceTranscript !=
+                            null) ...[
+                          const SizedBox(
+                            height: 14,
                           ),
 
-                          padding:
-                          const EdgeInsets.only(
-                            top:
-                            14,
-                          ),
+                          _VoiceTranscriptReviewCard(
+                            transcript:
+                            _voiceTranscript!,
 
-                          child:
-                          VoiceQuickReportPanel(
-                            onTranscriptAccepted:
-                            _handleVoiceTranscriptAccepted,
+                            validated:
+                            _voiceTranscriptValidated,
+
+                            onRecordAgain:
+                            _recordVoiceAgain,
+
+                            onContinue:
+                            _continueVoiceTranscriptReview,
                           ),
-                        )
-                            : const SizedBox(
-                          key:
-                          ValueKey(
-                            'manual-report-mode',
-                          ),
-                        ),
-                      ),
+                        ],
+                      ],
 
 
-                    // =================================================
-                    // PHASE 1B — ACCEPTED TRANSCRIPT NOTICE
-                    // =================================================
+// =================================================
+// MANUAL REPORT
+// =================================================
 
                       if (_reportInputMode ==
-                          _ReportInputMode.voice &&
-                          _phase1BVoiceTranscript !=
-                              null) ...[
+                          _ReportInputMode.manual) ...[
                         const SizedBox(
-                          height:
-                          10,
+                          height: 12,
                         ),
+
+
+                        // =================================================
+                        // CATEGORY
+                        // =================================================
+
+                        const Text(
+                          'ISSUE CATEGORY',
+                          style:
+                          _sectionTitle,
+                        ),
+
+                        const SizedBox(
+                          height: 12,
+                        ),
+
+                        GridView.builder(
+                          shrinkWrap:
+                          true,
+
+                          physics:
+                          const NeverScrollableScrollPhysics(),
+
+                          itemCount:
+                          categories.length,
+
+                          gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            childAspectRatio: 1.05,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 10,
+                          ),
+
+                          itemBuilder:
+                              (
+                              context,
+                              index,
+                              ) {
+                            final Map<String, String>
+                            category =
+                            categories[index];
+
+                            final String name =
+                                category['name'] ??
+                                    '';
+
+                            final String icon =
+                                category['icon'] ??
+                                    '';
+
+                            final bool selected =
+                                selectedCategory ==
+                                    name;
+
+                            return GestureDetector(
+                              onTap:
+                              _isRestoringDraft ||
+                                  _isNavigating
+                                  ? null
+                                  : () {
+                                setState(() {
+                                  selectedCategory =
+                                      name;
+                                });
+
+                                unawaited(
+                                  _saveDraftImmediately(
+                                    showFailureMessage:
+                                    false,
+                                  ),
+                                );
+                              },
+
+                              child:
+                              AnimatedContainer(
+                                duration:
+                                const Duration(
+                                  milliseconds: 160,
+                                ),
+
+                                decoration:
+                                BoxDecoration(
+                                  color:
+                                  selected
+                                      ? AppColors
+                                      .primary
+                                      .withOpacity(
+                                    0.12,
+                                  )
+                                      : AppColors
+                                      .surface,
+
+                                  borderRadius:
+                                  BorderRadius.circular(
+                                    14,
+                                  ),
+
+                                  border:
+                                  Border.all(
+                                    color:
+                                    selected
+                                        ? AppColors
+                                        .primary
+                                        : AppColors
+                                        .border,
+
+                                    width:
+                                    selected
+                                        ? 1.5
+                                        : 1,
+                                  ),
+                                ),
+
+                                child:
+                                Column(
+                                  mainAxisAlignment:
+                                  MainAxisAlignment.center,
+
+                                  children: [
+                                    Text(
+                                      icon,
+                                      style:
+                                      const TextStyle(
+                                        fontSize: 28,
+                                      ),
+                                    ),
+
+                                    const SizedBox(
+                                      height: 8,
+                                    ),
+
+                                    Padding(
+                                      padding:
+                                      const EdgeInsets.symmetric(
+                                        horizontal: 4,
+                                      ),
+
+                                      child:
+                                      Text(
+                                        name,
+
+                                        textAlign:
+                                        TextAlign.center,
+
+                                        style:
+                                        TextStyle(
+                                          color:
+                                          selected
+                                              ? AppColors
+                                              .primary
+                                              : AppColors
+                                              .textSecondary,
+
+                                          fontSize:
+                                          11,
+
+                                          fontWeight:
+                                          selected
+                                              ? FontWeight
+                                              .w600
+                                              : FontWeight
+                                              .normal,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+
+                        const SizedBox(
+                          height: 26,
+                        ),
+
+
+                        // =================================================
+                        // PRIORITY
+                        // =================================================
+
+                        const Text(
+                          'PRIORITY LEVEL',
+                          style:
+                          _sectionTitle,
+                        ),
+
+                        const SizedBox(
+                          height: 12,
+                        ),
+
+                        Row(
+                          children:
+                          priorities.map(
+                                (
+                                priority,
+                                ) {
+                              final bool selected =
+                                  selectedPriority ==
+                                      priority;
+
+                              final Color color =
+                              getPriorityColor(
+                                priority,
+                              );
+
+                              return Expanded(
+                                child:
+                                Padding(
+                                  padding:
+                                  const EdgeInsets.only(
+                                    right: 7,
+                                  ),
+
+                                  child:
+                                  GestureDetector(
+                                    onTap:
+                                    _isRestoringDraft ||
+                                        _isNavigating
+                                        ? null
+                                        : () {
+                                      setState(() {
+                                        selectedPriority =
+                                            priority;
+                                      });
+
+                                      unawaited(
+                                        _saveDraftImmediately(
+                                          showFailureMessage:
+                                          false,
+                                        ),
+                                      );
+                                    },
+
+                                    child:
+                                    AnimatedContainer(
+                                      duration:
+                                      const Duration(
+                                        milliseconds:
+                                        160,
+                                      ),
+
+                                      height:
+                                      42,
+
+                                      alignment:
+                                      Alignment.center,
+
+                                      decoration:
+                                      BoxDecoration(
+                                        color:
+                                        color.withOpacity(
+                                          selected
+                                              ? 0.17
+                                              : 0.08,
+                                        ),
+
+                                        borderRadius:
+                                        BorderRadius.circular(
+                                          12,
+                                        ),
+
+                                        border:
+                                        Border.all(
+                                          color:
+                                          selected
+                                              ? color
+                                              : color
+                                              .withOpacity(
+                                            0.4,
+                                          ),
+                                        ),
+                                      ),
+
+                                      child:
+                                      Text(
+                                        priority,
+
+                                        style:
+                                        TextStyle(
+                                          color:
+                                          color,
+
+                                          fontSize:
+                                          11,
+
+                                          fontWeight:
+                                          FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ).toList(),
+                        ),
+
+                        const SizedBox(
+                          height: 24,
+                        ),
+
+
+                        // =================================================
+                        // REPORT TITLE
+                        // =================================================
+
+                        const Text(
+                          'REPORT TITLE',
+                          style:
+                          _sectionTitle,
+                        ),
+
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        TextField(
+                          controller:
+                          titleController,
+
+                          enabled:
+                          !_isRestoringDraft &&
+                              !_isNavigating,
+
+                          onChanged:
+                          onTitleChanged,
+
+                          maxLength:
+                          100,
+
+                          textCapitalization:
+                          TextCapitalization.sentences,
+
+                          textInputAction:
+                          TextInputAction.next,
+
+                          style:
+                          const TextStyle(
+                            color:
+                            Colors.white,
+                          ),
+
+                          decoration:
+                          _inputDecoration(
+                            hint:
+                            'e.g., Large pothole on Jalan Ampang',
+
+                            errorText:
+                            titleError,
+                          ),
+                        ),
+
+                        const SizedBox(
+                          height: 22,
+                        ),
+
+
+                        // =================================================
+                        // DESCRIPTION
+                        // =================================================
+
+                        const Text(
+                          'DESCRIPTION',
+                          style:
+                          _sectionTitle,
+                        ),
+
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        TextField(
+                          controller:
+                          descriptionController,
+
+                          enabled:
+                          !_isRestoringDraft &&
+                              !_isNavigating,
+
+                          onChanged:
+                          onDescriptionChanged,
+
+                          maxLength:
+                          500,
+
+                          minLines:
+                          5,
+
+                          maxLines:
+                          7,
+
+                          textCapitalization:
+                          TextCapitalization.sentences,
+
+                          style:
+                          const TextStyle(
+                            color:
+                            Colors.white,
+                          ),
+
+                          decoration:
+                          _inputDecoration(
+                            hint:
+                            'Describe the issue in detail. '
+                                'Include size, severity, and any '
+                                'safety concerns...',
+
+                            errorText:
+                            descriptionError,
+                          ),
+                        ),
+
+
+                        // =================================================
+                        // QUALITY GUIDANCE
+                        // =================================================
 
                         Container(
                           width:
@@ -2002,29 +2515,27 @@ class _CreateReportDetailsScreenState
 
                           padding:
                           const EdgeInsets.all(
-                            11,
+                            12,
                           ),
 
                           decoration:
                           BoxDecoration(
                             color:
-                            const Color(
-                              0xFF2EE6A6,
-                            ).withOpacity(
-                              0.05,
+                            AppColors.primary
+                                .withOpacity(
+                              0.06,
                             ),
 
                             borderRadius:
                             BorderRadius.circular(
-                              11,
+                              12,
                             ),
 
                             border:
                             Border.all(
                               color:
-                              const Color(
-                                0xFF2EE6A6,
-                              ).withOpacity(
+                              AppColors.primary
+                                  .withOpacity(
                                 0.25,
                               ),
                             ),
@@ -2037,38 +2548,33 @@ class _CreateReportDetailsScreenState
 
                             children: [
                               Icon(
-                                Icons.check_circle_outline_rounded,
-
+                                Icons.info_outline,
                                 color:
-                                Color(
-                                  0xFF2EE6A6,
-                                ),
-
+                                AppColors.primary,
                                 size:
-                                17,
+                                18,
                               ),
 
                               SizedBox(
                                 width:
-                                8,
+                                9,
                               ),
 
                               Expanded(
                                 child:
                                 Text(
-                                  'Voice transcript captured. '
-                                      'The manual fields below remain unchanged until '
-                                      'you explicitly review and accept structured '
-                                      'suggestions in the next Voice Intelligence stage.',
+                                  'Both the title and description must '
+                                      'clearly describe the infrastructure '
+                                      'issue. Random characters, repeated '
+                                      'text, or unusable information cannot '
+                                      'be submitted.',
 
                                   style:
                                   TextStyle(
                                     color:
                                     AppColors.textSecondary,
-
                                     fontSize:
-                                    9,
-
+                                    10,
                                     height:
                                     1.4,
                                   ),
@@ -2078,464 +2584,6 @@ class _CreateReportDetailsScreenState
                           ),
                         ),
                       ],
-
-
-                      const SizedBox(
-                        height:
-                        26,
-                      ),
-
-                      // =================================================
-                      // CATEGORY
-                      // =================================================
-
-                      const Text(
-                        'ISSUE CATEGORY',
-                        style:
-                        _sectionTitle,
-                      ),
-
-                      const SizedBox(
-                        height: 12,
-                      ),
-
-                      GridView.builder(
-                        shrinkWrap: true,
-
-                        physics:
-                        const NeverScrollableScrollPhysics(),
-
-                        itemCount:
-                        categories.length,
-
-                        gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 3,
-                          childAspectRatio: 1.05,
-                          crossAxisSpacing: 10,
-                          mainAxisSpacing: 10,
-                        ),
-
-                        itemBuilder:
-                            (
-                            context,
-                            index,
-                            ) {
-                          final category =
-                          categories[index];
-
-                          final String name =
-                              category['name'] ??
-                                  '';
-
-                          final String icon =
-                              category['icon'] ??
-                                  '';
-
-                          final bool selected =
-                              selectedCategory ==
-                                  name;
-
-                          return GestureDetector(
-                            onTap:
-                            _isRestoringDraft
-                                ? null
-                                : () {
-                              setState(() {
-                                selectedCategory =
-                                    name;
-                              });
-
-                              unawaited(
-                                _saveDraftImmediately(
-                                  showFailureMessage:
-                                  false,
-                                ),
-                              );
-                            },
-
-                            child:
-                            AnimatedContainer(
-                              duration:
-                              const Duration(
-                                milliseconds: 160,
-                              ),
-
-                              decoration:
-                              BoxDecoration(
-                                color:
-                                selected
-                                    ? AppColors.primary
-                                    .withOpacity(
-                                  0.12,
-                                )
-                                    : AppColors.surface,
-
-                                borderRadius:
-                                BorderRadius.circular(
-                                  14,
-                                ),
-
-                                border:
-                                Border.all(
-                                  color:
-                                  selected
-                                      ? AppColors.primary
-                                      : AppColors.border,
-
-                                  width:
-                                  selected
-                                      ? 1.5
-                                      : 1,
-                                ),
-                              ),
-
-                              child:
-                              Column(
-                                mainAxisAlignment:
-                                MainAxisAlignment.center,
-
-                                children: [
-                                  Text(
-                                    icon,
-                                    style:
-                                    const TextStyle(
-                                      fontSize: 28,
-                                    ),
-                                  ),
-
-                                  const SizedBox(
-                                    height: 8,
-                                  ),
-
-                                  Padding(
-                                    padding:
-                                    const EdgeInsets.symmetric(
-                                      horizontal: 4,
-                                    ),
-
-                                    child:
-                                    Text(
-                                      name,
-
-                                      textAlign:
-                                      TextAlign.center,
-
-                                      style:
-                                      TextStyle(
-                                        color:
-                                        selected
-                                            ? AppColors.primary
-                                            : AppColors.textSecondary,
-
-                                        fontSize: 11,
-
-                                        fontWeight:
-                                        selected
-                                            ? FontWeight.w600
-                                            : FontWeight.normal,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-
-                      const SizedBox(
-                        height: 26,
-                      ),
-
-                      // =================================================
-                      // PRIORITY
-                      // =================================================
-
-                      const Text(
-                        'PRIORITY LEVEL',
-                        style:
-                        _sectionTitle,
-                      ),
-
-                      const SizedBox(
-                        height: 12,
-                      ),
-
-                      Row(
-                        children:
-                        priorities.map(
-                              (
-                              priority,
-                              ) {
-                            final bool selected =
-                                selectedPriority ==
-                                    priority;
-
-                            final Color color =
-                            getPriorityColor(
-                              priority,
-                            );
-
-                            return Expanded(
-                              child:
-                              Padding(
-                                padding:
-                                const EdgeInsets.only(
-                                  right: 7,
-                                ),
-
-                                child:
-                                GestureDetector(
-                                  onTap:
-                                  _isRestoringDraft
-                                      ? null
-                                      : () {
-                                    setState(() {
-                                      selectedPriority =
-                                          priority;
-                                    });
-
-                                    unawaited(
-                                      _saveDraftImmediately(
-                                        showFailureMessage:
-                                        false,
-                                      ),
-                                    );
-                                  },
-
-                                  child:
-                                  AnimatedContainer(
-                                    duration:
-                                    const Duration(
-                                      milliseconds: 160,
-                                    ),
-
-                                    height: 42,
-
-                                    alignment:
-                                    Alignment.center,
-
-                                    decoration:
-                                    BoxDecoration(
-                                      color:
-                                      color.withOpacity(
-                                        selected
-                                            ? 0.17
-                                            : 0.08,
-                                      ),
-
-                                      borderRadius:
-                                      BorderRadius.circular(
-                                        12,
-                                      ),
-
-                                      border:
-                                      Border.all(
-                                        color:
-                                        selected
-                                            ? color
-                                            : color.withOpacity(
-                                          0.4,
-                                        ),
-                                      ),
-                                    ),
-
-                                    child:
-                                    Text(
-                                      priority,
-
-                                      style:
-                                      TextStyle(
-                                        color: color,
-                                        fontSize: 11,
-                                        fontWeight:
-                                        FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ).toList(),
-                      ),
-
-                      const SizedBox(
-                        height: 24,
-                      ),
-
-                      // =================================================
-                      // REPORT TITLE
-                      // =================================================
-
-                      const Text(
-                        'REPORT TITLE',
-                        style:
-                        _sectionTitle,
-                      ),
-
-                      const SizedBox(
-                        height: 8,
-                      ),
-
-                      TextField(
-                        controller:
-                        titleController,
-
-                        enabled:
-                        !_isRestoringDraft,
-
-                        onChanged:
-                        onTitleChanged,
-
-                        maxLength: 100,
-
-                        textCapitalization:
-                        TextCapitalization.sentences,
-
-                        style:
-                        const TextStyle(
-                          color: Colors.white,
-                        ),
-
-                        textInputAction:
-                        TextInputAction.next,
-
-                        decoration:
-                        _inputDecoration(
-                          hint:
-                          'e.g., Large pothole on Jalan Ampang',
-                          errorText:
-                          titleError,
-                        ),
-                      ),
-
-                      const SizedBox(
-                        height: 22,
-                      ),
-
-                      // =================================================
-                      // DESCRIPTION
-                      // =================================================
-
-                      const Text(
-                        'DESCRIPTION',
-                        style:
-                        _sectionTitle,
-                      ),
-
-                      const SizedBox(
-                        height: 8,
-                      ),
-
-                      TextField(
-                        controller:
-                        descriptionController,
-
-                        enabled:
-                        !_isRestoringDraft,
-
-                        onChanged:
-                        onDescriptionChanged,
-
-                        maxLength: 500,
-
-                        minLines: 5,
-                        maxLines: 7,
-
-                        textCapitalization:
-                        TextCapitalization.sentences,
-
-                        style:
-                        const TextStyle(
-                          color: Colors.white,
-                        ),
-
-                        decoration:
-                        _inputDecoration(
-                          hint:
-                          'Describe the issue in detail. '
-                              'Include size, severity, and any '
-                              'safety concerns...',
-                          errorText:
-                          descriptionError,
-                        ),
-                      ),
-
-                      // =================================================
-                      // QUALITY GUIDANCE
-                      // =================================================
-
-                      Container(
-                        width:
-                        double.infinity,
-
-                        padding:
-                        const EdgeInsets.all(
-                          12,
-                        ),
-
-                        decoration:
-                        BoxDecoration(
-                          color:
-                          AppColors.primary
-                              .withOpacity(
-                            0.06,
-                          ),
-
-                          borderRadius:
-                          BorderRadius.circular(
-                            12,
-                          ),
-
-                          border:
-                          Border.all(
-                            color:
-                            AppColors.primary
-                                .withOpacity(
-                              0.25,
-                            ),
-                          ),
-                        ),
-
-                        child:
-                        const Row(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.start,
-
-                          children: [
-                            Icon(
-                              Icons.info_outline,
-                              color:
-                              AppColors.primary,
-                              size: 18,
-                            ),
-
-                            SizedBox(
-                              width: 9,
-                            ),
-
-                            Expanded(
-                              child:
-                              Text(
-                                'Both the title and description must '
-                                    'clearly describe the infrastructure '
-                                    'issue. Random characters, repeated '
-                                    'text, or unusable information cannot '
-                                    'be submitted.',
-                                style:
-                                TextStyle(
-                                  color:
-                                  AppColors.textSecondary,
-                                  fontSize: 10,
-                                  height: 1.4,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -2605,25 +2653,49 @@ class _CreateReportDetailsScreenState
                     _isRestoringDraft ||
                         _isNavigating
                         ? null
-                        : continueToEvidence,
+                        : _reportInputMode ==
+                        _ReportInputMode.manual
+                        ? continueToEvidence
+
+                    // ------------------------------------------------
+                    // VOICE MODE
+                    //
+                    // Phase 1C may validate the transcript, but the
+                    // report cannot go to Evidence until Phase 1D
+                    // creates and the citizen accepts Category,
+                    // Priority, Title and Description.
+                    // ------------------------------------------------
+                        : null,
 
                     child:
                     _isNavigating
                         ? const SizedBox(
-                      width: 22,
-                      height: 22,
+                      width:
+                      22,
+                      height:
+                      22,
+
                       child:
                       CircularProgressIndicator(
-                        strokeWidth: 2.3,
+                        strokeWidth:
+                        2.3,
                         color:
                         Colors.white,
                       ),
                     )
-                        : const Text(
-                      'Continue →',
+                        : Text(
+                      _reportInputMode ==
+                          _ReportInputMode.manual
+                          ? 'Continue →'
+                          : _voiceTranscriptValidated
+                          ? 'Ready for AI Analysis'
+                          : 'Complete Voice Review Above',
+
                       style:
-                      TextStyle(
-                        fontSize: 16,
+                      const TextStyle(
+                        fontSize:
+                        16,
+
                         fontWeight:
                         FontWeight.bold,
                       ),
@@ -2769,6 +2841,588 @@ InputDecoration _inputDecoration({
       ),
     ),
   );
+}
+
+// ================================================================
+// PHASE 1C — VOICE TRANSCRIPT REVIEW
+// ================================================================
+
+class _VoiceTranscriptReviewCard
+    extends StatelessWidget {
+  final String transcript;
+
+  final bool validated;
+
+  final VoidCallback
+  onRecordAgain;
+
+  final VoidCallback
+  onContinue;
+
+  const _VoiceTranscriptReviewCard({
+    required this.transcript,
+    required this.validated,
+    required this.onRecordAgain,
+    required this.onContinue,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    final List<String> words =
+    transcript
+        .trim()
+        .split(
+      RegExp(
+        r'\s+',
+      ),
+    )
+        .where(
+          (word) =>
+      word.isNotEmpty,
+    )
+        .toList();
+
+    final int wordCount =
+        words.length;
+
+    final Color statusColor =
+    validated
+        ? const Color(
+      0xFF2EE6A6,
+    )
+        : AppColors.primary;
+
+    return AnimatedContainer(
+      duration:
+      const Duration(
+        milliseconds:
+        220,
+      ),
+
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        16,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.surface,
+
+        borderRadius:
+        BorderRadius.circular(
+          16,
+        ),
+
+        border:
+        Border.all(
+          color:
+          statusColor
+              .withOpacity(
+            0.35,
+          ),
+        ),
+      ),
+
+      child:
+      Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          // =====================================================
+          // HEADER
+          // =====================================================
+
+          Row(
+            children: [
+              Icon(
+                validated
+                    ? Icons
+                    .verified_rounded
+                    : Icons
+                    .fact_check_outlined,
+
+                color:
+                statusColor,
+
+                size:
+                20,
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              Expanded(
+                child:
+                Text(
+                  validated
+                      ? 'VOICE REPORT READY'
+                      : 'REVIEW YOUR VOICE REPORT',
+
+                  style:
+                  TextStyle(
+                    color:
+                    statusColor,
+
+                    fontSize:
+                    11,
+
+                    fontWeight:
+                    FontWeight.bold,
+
+                    letterSpacing:
+                    0.5,
+                  ),
+                ),
+              ),
+
+              if (!validated)
+                const Icon(
+                  Icons
+                      .verified_user_outlined,
+
+                  color:
+                  AppColors.textSecondary,
+
+                  size:
+                  17,
+                ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            10,
+          ),
+
+          Text(
+            validated
+                ? 'The transcript passed the local quality check. '
+                'AI structuring will be added in the next Voice Intelligence phase.'
+                : 'Check that the transcript accurately represents what '
+                'you said before continuing.',
+
+            style:
+            const TextStyle(
+              color:
+              AppColors.textSecondary,
+
+              fontSize:
+              10,
+
+              height:
+              1.4,
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            14,
+          ),
+
+
+          // =====================================================
+          // TRANSCRIPT
+          // =====================================================
+
+          Container(
+            width:
+            double.infinity,
+
+            constraints:
+            const BoxConstraints(
+              minHeight:
+              105,
+            ),
+
+            padding:
+            const EdgeInsets.all(
+              13,
+            ),
+
+            decoration:
+            BoxDecoration(
+              color:
+              AppColors.background
+                  .withOpacity(
+                0.32,
+              ),
+
+              borderRadius:
+              BorderRadius.circular(
+                12,
+              ),
+
+              border:
+              Border.all(
+                color:
+                AppColors.border,
+              ),
+            ),
+
+            child:
+            SelectableText(
+              transcript,
+
+              style:
+              const TextStyle(
+                color:
+                Colors.white,
+
+                fontSize:
+                13,
+
+                height:
+                1.55,
+              ),
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            10,
+          ),
+
+
+          // =====================================================
+          // TRANSCRIPT METADATA
+          // =====================================================
+
+          Row(
+            children: [
+              const Icon(
+                Icons
+                    .text_fields_rounded,
+
+                color:
+                AppColors.textSecondary,
+
+                size:
+                14,
+              ),
+
+              const SizedBox(
+                width:
+                5,
+              ),
+
+              Text(
+                '$wordCount words',
+
+                style:
+                const TextStyle(
+                  color:
+                  AppColors.textSecondary,
+
+                  fontSize:
+                  9,
+                ),
+              ),
+
+              const Spacer(),
+
+              Icon(
+                validated
+                    ? Icons
+                    .check_circle_outline_rounded
+                    : Icons
+                    .lock_outline_rounded,
+
+                color:
+                validated
+                    ? const Color(
+                  0xFF2EE6A6,
+                )
+                    : AppColors
+                    .textSecondary,
+
+                size:
+                13,
+              ),
+
+              const SizedBox(
+                width:
+                4,
+              ),
+
+              Text(
+                validated
+                    ? 'Quality check passed'
+                    : 'Not submitted yet',
+
+                style:
+                TextStyle(
+                  color:
+                  validated
+                      ? const Color(
+                    0xFF2EE6A6,
+                  )
+                      : AppColors
+                      .textSecondary,
+
+                  fontSize:
+                  9,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(
+            height:
+            15,
+          ),
+
+
+          // =====================================================
+          // NEXT-STAGE EXPLANATION
+          // =====================================================
+
+          Container(
+            width:
+            double.infinity,
+
+            padding:
+            const EdgeInsets.all(
+              11,
+            ),
+
+            decoration:
+            BoxDecoration(
+              color:
+              statusColor
+                  .withOpacity(
+                0.055,
+              ),
+
+              borderRadius:
+              BorderRadius.circular(
+                10,
+              ),
+
+              border:
+              Border.all(
+                color:
+                statusColor
+                    .withOpacity(
+                  0.18,
+                ),
+              ),
+            ),
+
+            child:
+            Row(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                Icon(
+                  validated
+                      ? Icons
+                      .check_circle_outline_rounded
+                      : Icons
+                      .auto_awesome_outlined,
+
+                  color:
+                  statusColor,
+
+                  size:
+                  16,
+                ),
+
+                const SizedBox(
+                  width:
+                  7,
+                ),
+
+                Expanded(
+                  child:
+                  Text(
+                    validated
+                        ? 'Phase 1C is complete for this transcript. '
+                        'Phase 1D will securely send the approved transcript '
+                        'for AI structuring. AI will suggest the category, '
+                        'priority, title, description, location context and '
+                        'safety concern before you accept anything.'
+                        : 'The transcript will first pass a local quality check. '
+                        'No AI suggestion can silently overwrite your report.',
+
+                    style:
+                    const TextStyle(
+                      color:
+                      AppColors.textSecondary,
+
+                      fontSize:
+                      9,
+
+                      height:
+                      1.45,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(
+            height:
+            15,
+          ),
+
+
+          // =====================================================
+          // ACTIONS
+          // =====================================================
+
+          Row(
+            children: [
+              Expanded(
+                child:
+                SizedBox(
+                  height:
+                  47,
+
+                  child:
+                  OutlinedButton.icon(
+                    onPressed:
+                    onRecordAgain,
+
+                    style:
+                    OutlinedButton.styleFrom(
+                      foregroundColor:
+                      AppColors.textSecondary,
+
+                      side:
+                      const BorderSide(
+                        color:
+                        AppColors.border,
+                      ),
+
+                      shape:
+                      RoundedRectangleBorder(
+                        borderRadius:
+                        BorderRadius.circular(
+                          12,
+                        ),
+                      ),
+                    ),
+
+                    icon:
+                    const Icon(
+                      Icons
+                          .replay_rounded,
+
+                      size:
+                      17,
+                    ),
+
+                    label:
+                    const Text(
+                      'Record Again',
+
+                      style:
+                      TextStyle(
+                        fontSize:
+                        11,
+
+                        fontWeight:
+                        FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(
+                width:
+                9,
+              ),
+
+              Expanded(
+                child:
+                SizedBox(
+                  height:
+                  47,
+
+                  child:
+                  ElevatedButton.icon(
+                    onPressed:
+                    validated
+                        ? null
+                        : onContinue,
+
+                    style:
+                    ElevatedButton.styleFrom(
+                      backgroundColor:
+                      AppColors.primaryDark,
+
+                      foregroundColor:
+                      Colors.white,
+
+                      disabledBackgroundColor:
+                      const Color(
+                        0xFF2EE6A6,
+                      ).withOpacity(
+                        0.16,
+                      ),
+
+                      disabledForegroundColor:
+                      const Color(
+                        0xFF2EE6A6,
+                      ),
+
+                      shape:
+                      RoundedRectangleBorder(
+                        borderRadius:
+                        BorderRadius.circular(
+                          12,
+                        ),
+                      ),
+                    ),
+
+                    icon:
+                    Icon(
+                      validated
+                          ? Icons
+                          .check_rounded
+                          : Icons
+                          .arrow_forward_rounded,
+
+                      size:
+                      17,
+                    ),
+
+                    label:
+                    Text(
+                      validated
+                          ? 'Validated'
+                          : 'Validate',
+
+                      style:
+                      const TextStyle(
+                        fontSize:
+                        11,
+
+                        fontWeight:
+                        FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ================================================================
