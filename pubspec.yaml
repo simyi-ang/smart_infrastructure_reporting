@@ -45,6 +45,8 @@ dependencies:
   local_auth: ^3.0.2
   app_links: ^7.2.1
   speech_to_text: ^7.4.0
+  video_player: ^2.14.0
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:

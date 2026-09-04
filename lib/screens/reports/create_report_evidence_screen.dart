@@ -1,13 +1,21 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_player/video_player.dart';
 
+import '../../models/report_draft.dart';
 import '../../models/report_final_ai_analysis.dart';
 import '../../models/report_image_ai_analysis.dart';
+
 import '../../services/ai_evidence_service.dart';
 import '../../services/image_compression_service.dart';
+import '../../services/report_draft_service.dart';
+
 import '../../theme/app_colors.dart';
+
 import 'create_report_location_screen.dart';
 
 // ================================================================
@@ -49,8 +57,7 @@ import 'create_report_location_screen.dart';
 // are preserved.
 // ================================================================
 
-class CreateReportEvidenceScreen
-    extends StatefulWidget {
+class CreateReportEvidenceScreen extends StatefulWidget {
   final String category;
   final String priority;
   final String title;
@@ -65,68 +72,68 @@ class CreateReportEvidenceScreen
   });
 
   @override
-  State<CreateReportEvidenceScreen>
-  createState() =>
+  State<CreateReportEvidenceScreen> createState() =>
       _CreateReportEvidenceScreenState();
 }
 
 class _CreateReportEvidenceScreenState
-    extends State<CreateReportEvidenceScreen> {
+    extends State<CreateReportEvidenceScreen>
+    with WidgetsBindingObserver {
   // ============================================================
   // SERVICES
   // ============================================================
 
-  final ImagePicker picker =
-  ImagePicker();
+  final ImagePicker picker = ImagePicker();
 
-  final ImageCompressionService
-  compressionService =
+  final ImageCompressionService compressionService =
   const ImageCompressionService();
 
-  final AiEvidenceService
-  aiEvidenceService =
+  final AiEvidenceService aiEvidenceService =
   AiEvidenceService();
 
   // ============================================================
-  // LIMIT
-  //
-  // Same limit as AiEvidenceService.
+  // LIMITS
   // ============================================================
 
-  static const int maxAiImages =
-  5;
+  /// Maximum number of PHOTO + VIDEO evidence items combined.
+  static const int maxEvidenceItems = 5;
+
+  /// Image Smart Assist can still process up to 5 photos.
+  static const int maxAiImages = 5;
+
+  /// Videos are intentionally kept short so that:
+  /// - upload size stays reasonable
+  /// - future frame extraction is practical
+  /// - citizens do not accidentally attach long recordings
+  static const Duration maxVideoDuration =
+  Duration(seconds: 30);
 
   // ============================================================
   // EVIDENCE
   // ============================================================
 
-  final List<File> evidenceImages =
-  [];
+  final List<File> evidenceImages = <File>[];
+
+  final List<File> evidenceVideos = <File>[];
+
+  /// Duration is cached by persistent local video path.
+  final Map<String, Duration> videoDurations =
+  <String, Duration>{};
 
   // ============================================================
   // INDIVIDUAL IMAGE ANALYSES
-  //
-  // KEY:
-  // local image path
-  //
-  // VALUE:
-  // analysis belonging to that exact image
-  //
-  // Do NOT use list index for permanent mapping.
   // ============================================================
 
-  final Map<
-      String,
-      ReportImageAiAnalysis
-  > imageAnalyses = {};
+  final Map<String, ReportImageAiAnalysis>
+  imageAnalyses =
+  <String, ReportImageAiAnalysis>{};
 
   // ============================================================
   // EXPANDED IMAGE CARDS
   // ============================================================
 
-  final Set<String>
-  expandedImageAnalyses =
-  {};
+  final Set<String> expandedImageAnalyses =
+  <String>{};
 
   // ============================================================
   // IMAGE-SPECIFIC ERRORS
@@ -134,7 +141,7 @@ class _CreateReportEvidenceScreenState
 
   final Map<String, String>
   imageAnalysisErrors =
-  {};
+  <String, String>{};
 
   // ============================================================
   // IMAGE CURRENTLY BEING ANALYZED
@@ -143,14 +150,12 @@ class _CreateReportEvidenceScreenState
   String? analyzingImagePath;
 
   // ============================================================
-  // FINAL COMBINED RESULT
+  // FINAL COMBINED IMAGE RESULT
   // ============================================================
 
-  ReportFinalAiAnalysis?
-  finalAiAnalysis;
+  ReportFinalAiAnalysis? finalAiAnalysis;
 
-  bool combiningAnalyses =
-  false;
+  bool combiningAnalyses = false;
 
   String? finalAnalysisError;
 
@@ -158,34 +163,37 @@ class _CreateReportEvidenceScreenState
   // GENERAL STATE
   // ============================================================
 
-  bool loadingImage =
-  false;
+  bool loadingImage = false;
 
-  bool analyzingEvidence =
-  false;
+  bool loadingVideo = false;
 
-  bool aiSuggestionsApplied =
-  false;
+  bool analyzingEvidence = false;
+
+  bool aiSuggestionsApplied = false;
+
+  bool restoringDraft = true;
+
+  bool savingDraft = false;
+
+  bool draftSaveFailed = false;
+
+  bool isNavigating = false;
+
+  bool _allowPop = false;
 
   // ============================================================
   // IMAGE COMPRESSION
   // ============================================================
 
-  int totalCompressedBytes =
-  0;
+  int totalCompressedBytes = 0;
 
-  int compressedImageCount =
-  0;
+  int compressedImageCount = 0;
 
   String compressionMessage =
-      'Evidence images are optimized before upload.';
+      'Evidence photos are optimized before upload.';
 
   // ============================================================
   // EFFECTIVE REPORT VALUES
-  //
-  // These are the values that will eventually be submitted.
-  //
-  // They start with the citizen's original values.
   // ============================================================
 
   late String selectedCategory;
@@ -197,12 +205,72 @@ class _CreateReportEvidenceScreenState
   late String selectedDescription;
 
   // ============================================================
+  // SAVE QUEUE
+  //
+  // Prevents two draft writes racing each other when the citizen
+  // quickly adds/removes evidence or navigates away.
+  // ============================================================
+
+  Future<void> _saveQueue =
+  Future<void>.value();
+
+  // ============================================================
+  // CURRENT USER
+  // ============================================================
+
+  String? get _userId {
+    return Supabase
+        .instance
+        .client
+        .auth
+        .currentUser
+        ?.id;
+  }
+
+  // ============================================================
+  // EVIDENCE HELPERS
+  // ============================================================
+
+  int get totalEvidenceCount =>
+      evidenceImages.length +
+          evidenceVideos.length;
+
+  int get remainingEvidenceSlots =>
+      maxEvidenceItems -
+          totalEvidenceCount;
+
+  bool get hasEvidence =>
+      evidenceImages.isNotEmpty ||
+          evidenceVideos.isNotEmpty;
+
+  bool get evidenceLimitReached =>
+      totalEvidenceCount >=
+          maxEvidenceItems;
+
+  // ============================================================
+  // BUSY?
+  // ============================================================
+
+  bool get isBusy =>
+      restoringDraft ||
+          savingDraft ||
+          loadingImage ||
+          loadingVideo ||
+          analyzingEvidence ||
+          combiningAnalyses ||
+          isNavigating;
+
+  // ============================================================
   // INITIALIZATION
   // ============================================================
 
   @override
   void initState() {
     super.initState();
+
+    WidgetsBinding.instance.addObserver(
+      this,
+    );
 
     selectedCategory =
         widget.category;
@@ -215,16 +283,472 @@ class _CreateReportEvidenceScreenState
 
     selectedDescription =
         widget.description;
+
+    unawaited(
+      _restoreDraft(),
+    );
   }
 
   // ============================================================
-  // BUSY?
+  // DISPOSE
   // ============================================================
 
-  bool get isBusy =>
-      loadingImage ||
-          analyzingEvidence ||
-          combiningAnalyses;
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(
+      this,
+    );
+
+    super.dispose();
+  }
+
+  // ============================================================
+  // APP LIFECYCLE
+  //
+  // Save when app goes background/inactive.
+  // ============================================================
+
+  @override
+  void didChangeAppLifecycleState(
+      AppLifecycleState state,
+      ) {
+    if (state ==
+        AppLifecycleState.inactive ||
+        state ==
+            AppLifecycleState.paused ||
+        state ==
+            AppLifecycleState.detached) {
+      unawaited(
+        _saveDraft(
+          currentStep: 2,
+        ),
+      );
+    }
+  }
+
+  // ============================================================
+  // RESTORE DRAFT
+  // ============================================================
+
+  Future<void> _restoreDraft() async {
+    final String? userId =
+        _userId;
+
+    if (userId == null) {
+      if (mounted) {
+        setState(() {
+          restoringDraft = false;
+        });
+      }
+
+      return;
+    }
+
+    try {
+      final ReportDraft? draft =
+      await ReportDraftService
+          .loadDraft(
+        userId: userId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (draft == null) {
+        setState(() {
+          restoringDraft = false;
+        });
+
+        await _saveDraft(
+          currentStep: 2,
+        );
+
+        return;
+      }
+
+      final List<File> restoredImages =
+      <File>[];
+
+      for (final String path
+      in draft.evidenceImagePaths) {
+        final File file =
+        File(path);
+
+        if (await file.exists()) {
+          restoredImages.add(
+            file,
+          );
+        }
+      }
+
+      final List<File> restoredVideos =
+      <File>[];
+
+      for (final String path
+      in draft.evidenceVideoPaths) {
+        final File file =
+        File(path);
+
+        if (await file.exists()) {
+          restoredVideos.add(
+            file,
+          );
+        }
+      }
+
+      int restoredBytes = 0;
+
+      for (final File file
+      in restoredImages) {
+        try {
+          restoredBytes +=
+          await file.length();
+        } catch (_) {
+          // Ignore file-size failure.
+        }
+      }
+
+      if (draft.category.trim().isNotEmpty) {
+        selectedCategory =
+            draft.category;
+      }
+
+      if (draft.priority.trim().isNotEmpty) {
+        selectedPriority =
+            draft.priority;
+      }
+
+      if (draft.title.trim().isNotEmpty) {
+        selectedTitle =
+            draft.title;
+      }
+
+      if (draft.description
+          .trim()
+          .isNotEmpty) {
+        selectedDescription =
+            draft.description;
+      }
+
+      setState(() {
+        evidenceImages
+          ..clear()
+          ..addAll(
+            restoredImages,
+          );
+
+        evidenceVideos
+          ..clear()
+          ..addAll(
+            restoredVideos,
+          );
+
+        totalCompressedBytes =
+            restoredBytes;
+
+        compressionMessage =
+        restoredImages.isEmpty
+            ? 'Evidence photos are optimized before upload.'
+            : '${restoredImages.length} saved photo(s) restored from draft.';
+
+        restoringDraft =
+        false;
+      });
+
+      // Load video durations after restoring.
+      for (final File video
+      in restoredVideos) {
+        await _loadVideoDuration(
+          video,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      await _saveDraft(
+        currentStep: 2,
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        restoringDraft =
+        false;
+
+        draftSaveFailed =
+        true;
+      });
+    }
+  }
+
+  // ============================================================
+  // BUILD CURRENT DRAFT
+  // ============================================================
+
+  Future<ReportDraft> _buildCurrentDraft({
+    required int currentStep,
+  }) async {
+    final String? userId =
+        _userId;
+
+    ReportDraft base =
+    ReportDraft.empty();
+
+    if (userId != null) {
+      final ReportDraft? existing =
+      await ReportDraftService
+          .loadDraft(
+        userId: userId,
+      );
+
+      if (existing != null) {
+        base = existing;
+      }
+    }
+
+    return base.copyWith(
+      category:
+      selectedCategory,
+
+      priority:
+      selectedPriority,
+
+      title:
+      selectedTitle,
+
+      description:
+      selectedDescription,
+
+      currentStep:
+      currentStep,
+
+      evidenceImagePaths:
+      evidenceImages
+          .map(
+            (file) => file.path,
+      )
+          .toList(),
+
+      evidenceVideoPaths:
+      evidenceVideos
+          .map(
+            (file) => file.path,
+      )
+          .toList(),
+
+      updatedAt:
+      DateTime.now(),
+    );
+  }
+
+  // ============================================================
+  // SAVE DRAFT
+  // ============================================================
+
+  Future<bool> _saveDraft({
+    required int currentStep,
+  }) {
+    final Completer<bool> completer =
+    Completer<bool>();
+
+    _saveQueue =
+        _saveQueue.then(
+              (_) async {
+            final String? userId =
+                _userId;
+
+            if (userId == null) {
+              completer.complete(
+                false,
+              );
+
+              return;
+            }
+
+            if (mounted) {
+              setState(() {
+                savingDraft =
+                true;
+
+                draftSaveFailed =
+                false;
+              });
+            }
+
+            try {
+              final ReportDraft draft =
+              await _buildCurrentDraft(
+                currentStep:
+                currentStep,
+              );
+
+              await ReportDraftService
+                  .saveDraft(
+                userId:
+                userId,
+
+                draft:
+                draft,
+              );
+
+              if (mounted) {
+                setState(() {
+                  savingDraft =
+                  false;
+
+                  draftSaveFailed =
+                  false;
+                });
+              }
+
+              completer.complete(
+                true,
+              );
+            } catch (_) {
+              if (mounted) {
+                setState(() {
+                  savingDraft =
+                  false;
+
+                  draftSaveFailed =
+                  true;
+                });
+              }
+
+              completer.complete(
+                false,
+              );
+            }
+          },
+        );
+
+    return completer.future;
+  }
+
+  // ============================================================
+  // SAVE EFFECTIVE AI VALUES
+  // ============================================================
+
+  Future<void> _saveEffectiveReportValues() async {
+    await _saveDraft(
+      currentStep: 2,
+    );
+  }
+
+  // ============================================================
+  // VIDEO DURATION
+  // ============================================================
+
+  Future<Duration?> _loadVideoDuration(
+      File videoFile,
+      ) async {
+    VideoPlayerController?
+    controller;
+
+    try {
+      controller =
+          VideoPlayerController.file(
+            videoFile,
+          );
+
+      await controller.initialize();
+
+      final Duration duration =
+          controller.value.duration;
+
+      videoDurations[
+      videoFile.path] =
+          duration;
+
+      if (mounted) {
+        setState(() {});
+      }
+
+      return duration;
+    } catch (_) {
+      return null;
+    } finally {
+      await controller?.dispose();
+    }
+  }
+
+  // ============================================================
+  // FORMAT VIDEO DURATION
+  // ============================================================
+
+  String _formatVideoDuration(
+      Duration? duration,
+      ) {
+    if (duration == null) {
+      return '--:--';
+    }
+
+    final int minutes =
+        duration.inMinutes;
+
+    final int seconds =
+        duration.inSeconds %
+            60;
+
+    return '$minutes:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  // ============================================================
+  // DRAFT STATUS TEXT
+  // ============================================================
+
+  String get _draftStatusText {
+    if (restoringDraft) {
+      return 'Restoring saved draft...';
+    }
+
+    if (savingDraft) {
+      return 'Saving draft...';
+    }
+
+    if (draftSaveFailed) {
+      return 'Draft could not be saved';
+    }
+
+    return 'Draft protected';
+  }
+
+  // ============================================================
+  // DRAFT STATUS ICON
+  // ============================================================
+
+  IconData get _draftStatusIcon {
+    if (restoringDraft ||
+        savingDraft) {
+      return Icons.sync_rounded;
+    }
+
+    if (draftSaveFailed) {
+      return Icons
+          .cloud_off_outlined;
+    }
+
+    return Icons
+        .cloud_done_outlined;
+  }
+
+  // ============================================================
+  // DRAFT STATUS COLOR
+  // ============================================================
+
+  Color get _draftStatusColor {
+    if (draftSaveFailed) {
+      return Colors.amber;
+    }
+
+    return AppColors.success;
+  }
 
   // ============================================================
   // LOCAL REPORT VALIDATION
@@ -886,6 +1410,8 @@ class _CreateReportEvidenceScreenState
 
     showMessage(
       'Your original report information is selected.',
+    ); unawaited(
+      _saveEffectiveReportValues(),
     );
   }
 
@@ -1025,6 +1551,8 @@ class _CreateReportEvidenceScreenState
 
     showMessage(
       'Final Smart Assist suggestions applied.',
+    ); unawaited(
+      _saveEffectiveReportValues(),
     );
   }
 
@@ -1032,10 +1560,21 @@ class _CreateReportEvidenceScreenState
   // EDIT REPORT
   // ============================================================
 
-  void editReport() {
+  Future<void> editReport() async {
     if (isBusy) {
       return;
     }
+
+    await _saveDraft(
+      currentStep: 1,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    _allowPop =
+    true;
 
     Navigator.pop(
       context,
@@ -1051,13 +1590,21 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    if (
-    evidenceImages.length >=
-        maxAiImages
-    ) {
+    if (evidenceLimitReached) {
       showMessage(
-        'A maximum of $maxAiImages evidence images '
-            'can be analyzed by Smart Assist.',
+        'You can add up to '
+            '$maxEvidenceItems evidence items '
+            'in total.',
+      );
+
+      return;
+    }
+
+    if (evidenceImages.length >=
+        maxAiImages) {
+      showMessage(
+        'Smart Assist supports up to '
+            '$maxAiImages photos.',
       );
 
       return;
@@ -1094,14 +1641,15 @@ class _CreateReportEvidenceScreenState
 
       if (preparedFile != null) {
         await analyzeImageBatch(
-          [
+          <File>[
             preparedFile,
           ],
         );
       }
     } catch (e) {
       showMessage(
-        'Unable to open camera: $e',
+        'Unable to open camera: '
+            '${_cleanException(e)}',
       );
     } finally {
       if (mounted) {
@@ -1122,14 +1670,27 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    final int remaining =
+    final int availableTotal =
+        remainingEvidenceSlots;
+
+    final int availableForAi =
         maxAiImages -
             evidenceImages.length;
 
+    final int remaining =
+    availableTotal <
+        availableForAi
+        ? availableTotal
+        : availableForAi;
+
     if (remaining <= 0) {
       showMessage(
-        'A maximum of $maxAiImages evidence images '
-            'can be analyzed by Smart Assist.',
+        evidenceLimitReached
+            ? 'You can add up to '
+            '$maxEvidenceItems evidence items '
+            'in total.'
+            : 'Smart Assist already has '
+            '$maxAiImages photos.',
       );
 
       return;
@@ -1141,7 +1702,7 @@ class _CreateReportEvidenceScreenState
         true;
 
         compressionMessage =
-        'Preparing selected images...';
+        'Preparing selected photos...';
       });
 
       final List<XFile> selected =
@@ -1159,38 +1720,37 @@ class _CreateReportEvidenceScreenState
         remaining,
       ).toList();
 
-      if (
-      selected.length >
-          remaining
-      ) {
+      if (selected.length >
+          remaining) {
         showMessage(
-          'Only the first $remaining image(s) were added. '
-              'Smart Assist supports up to $maxAiImages images.',
+          'Only the first $remaining '
+              'photo(s) were added because '
+              'the report supports up to '
+              '$maxEvidenceItems total '
+              'evidence items.',
         );
       }
 
       final List<File>
       preparedFiles =
-      [];
+      <File>[];
 
-      for (
-      int index = 0;
+      for (int index = 0;
       index < images.length;
-      index++
-      ) {
+      index++) {
         if (mounted) {
           setState(() {
             compressionMessage =
-            'Optimizing image '
-                '${index + 1} of ${images.length}...';
+            'Optimizing photo '
+                '${index + 1} of '
+                '${images.length}...';
           });
         }
 
         final File? preparedFile =
         await _addAndCompressFile(
           File(
-            images[index]
-                .path,
+            images[index].path,
           ),
         );
 
@@ -1201,16 +1761,6 @@ class _CreateReportEvidenceScreenState
         }
       }
 
-      // ========================================================
-      // IMPORTANT
-      //
-      // OLD:
-      // only firstPreparedFile analyzed
-      //
-      // NEW:
-      // every prepared image analyzed
-      // ========================================================
-
       if (preparedFiles.isNotEmpty) {
         await analyzeImageBatch(
           preparedFiles,
@@ -1218,7 +1768,8 @@ class _CreateReportEvidenceScreenState
       }
     } catch (e) {
       showMessage(
-        'Unable to open gallery: $e',
+        'Unable to open gallery: '
+            '${_cleanException(e)}',
       );
     } finally {
       if (mounted) {
@@ -1226,12 +1777,11 @@ class _CreateReportEvidenceScreenState
           loadingImage =
           false;
 
-          if (
-          evidenceImages
-              .isNotEmpty
-          ) {
+          if (evidenceImages
+              .isNotEmpty) {
             compressionMessage =
-            '$compressedImageCount image(s) compressed '
+            '$compressedImageCount '
+                'photo(s) optimized '
                 'before upload.';
           }
         });
@@ -1240,12 +1790,295 @@ class _CreateReportEvidenceScreenState
   }
 
   // ============================================================
-  // ADD + COMPRESS IMAGE
+// RECORD VIDEO
+// ============================================================
+
+  Future<void> recordVideo() async {
+    if (isBusy) {
+      return;
+    }
+
+    if (evidenceLimitReached) {
+      showMessage(
+        'You can add up to '
+            '$maxEvidenceItems evidence items '
+            'in total.',
+      );
+
+      return;
+    }
+
+    try {
+      setState(() {
+        loadingVideo =
+        true;
+      });
+
+      final XFile? video =
+      await picker.pickVideo(
+        source:
+        ImageSource.camera,
+
+        maxDuration:
+        maxVideoDuration,
+      );
+
+      if (video == null) {
+        return;
+      }
+
+      await _prepareVideo(
+        File(
+          video.path,
+        ),
+      );
+    } catch (e) {
+      showMessage(
+        'Unable to record video: '
+            '${_cleanException(e)}',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          loadingVideo =
+          false;
+        });
+      }
+    }
+  }
+
+// ============================================================
+// PICK VIDEO FROM GALLERY
+// ============================================================
+
+  Future<void> pickGalleryVideo() async {
+    if (isBusy) {
+      return;
+    }
+
+    if (evidenceLimitReached) {
+      showMessage(
+        'You can add up to '
+            '$maxEvidenceItems evidence items '
+            'in total.',
+      );
+
+      return;
+    }
+
+    try {
+      setState(() {
+        loadingVideo =
+        true;
+      });
+
+      final XFile? video =
+      await picker.pickVideo(
+        source:
+        ImageSource.gallery,
+
+        maxDuration:
+        maxVideoDuration,
+      );
+
+      if (video == null) {
+        return;
+      }
+
+      await _prepareVideo(
+        File(
+          video.path,
+        ),
+      );
+    } catch (e) {
+      showMessage(
+        'Unable to select video: '
+            '${_cleanException(e)}',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          loadingVideo =
+          false;
+        });
+      }
+    }
+  }
+
+// ============================================================
+// PREPARE VIDEO
+// ============================================================
+
+  Future<void> _prepareVideo(
+      File sourceFile,
+      ) async {
+    final String? userId =
+        _userId;
+
+    if (userId == null) {
+      showMessage(
+        'Your session is unavailable. '
+            'Please sign in again.',
+      );
+
+      return;
+    }
+
+    if (!await sourceFile.exists()) {
+      showMessage(
+        'The selected video '
+            'is no longer available.',
+      );
+
+      return;
+    }
+
+    VideoPlayerController?
+    controller;
+
+    try {
+      controller =
+          VideoPlayerController.file(
+            sourceFile,
+          );
+
+      await controller.initialize();
+
+      final Duration duration =
+          controller.value.duration;
+
+      if (duration >
+          maxVideoDuration) {
+        showMessage(
+          'Please choose a video '
+              'that is 30 seconds or shorter.',
+        );
+
+        return;
+      }
+
+      final String persistentPath =
+      await ReportDraftService
+          .persistEvidenceVideo(
+        userId:
+        userId,
+
+        sourceFile:
+        sourceFile,
+      );
+
+      final File persistentFile =
+      File(
+        persistentPath,
+      );
+
+      if (!await persistentFile
+          .exists()) {
+        throw Exception(
+          'Unable to preserve video.',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        evidenceVideos.add(
+          persistentFile,
+        );
+
+        videoDurations[
+        persistentFile.path] =
+            duration;
+      });
+
+      await _saveDraft(
+        currentStep:
+        2,
+      );
+
+      showMessage(
+        'Video added to your draft.',
+      );
+    } catch (e) {
+      showMessage(
+        'Unable to prepare video: '
+            '${_cleanException(e)}',
+      );
+    } finally {
+      await controller?.dispose();
+    }
+  }
+
   // ============================================================
+// VIDEO PREVIEW
+// ============================================================
+
+  Future<void> previewVideo(
+      File videoFile,
+      ) async {
+    if (!await videoFile.exists()) {
+      showMessage(
+        'This video is no longer '
+            'available.',
+      );
+
+      return;
+    }
+
+    final VideoPlayerController
+    controller =
+    VideoPlayerController.file(
+      videoFile,
+    );
+
+    try {
+      await controller.initialize();
+
+      if (!mounted) {
+        return;
+      }
+
+      await showDialog<void>(
+        context:
+        context,
+
+        builder:
+            (
+            dialogContext,
+            ) {
+          return _VideoPreviewDialog(
+            controller:
+            controller,
+          );
+        },
+      );
+    } catch (e) {
+      showMessage(
+        'Unable to preview video: '
+            '${_cleanException(e)}',
+      );
+    } finally {
+      await controller.dispose();
+    }
+  }
 
   Future<File?> _addAndCompressFile(
       File originalFile,
       ) async {
+    final String? userId =
+        _userId;
+
+    if (userId == null) {
+      showMessage(
+        'Your session is unavailable. '
+            'Please sign in again.',
+      );
+
+      return null;
+    }
+
     try {
       final ImageCompressionResult
       result =
@@ -1254,13 +2087,40 @@ class _CreateReportEvidenceScreenState
         originalFile,
       );
 
+      // ==========================================================
+      // COPY THE COMPRESSED IMAGE TO PERMANENT DRAFT STORAGE
+      // ==========================================================
+
+      final String persistentPath =
+      await ReportDraftService
+          .persistEvidenceImage(
+        userId:
+        userId,
+
+        sourceFile:
+        result.file,
+      );
+
+      final File persistentFile =
+      File(
+        persistentPath,
+      );
+
+      if (!await persistentFile
+          .exists()) {
+        throw Exception(
+          'Persistent evidence file '
+              'could not be created.',
+        );
+      }
+
       if (!mounted) {
         return null;
       }
 
       setState(() {
         evidenceImages.add(
-          result.file,
+          persistentFile,
         );
 
         totalCompressedBytes +=
@@ -1272,17 +2132,32 @@ class _CreateReportEvidenceScreenState
 
         compressionMessage =
         result.compressed
-            ? 'Image optimized: '
+            ? 'Photo optimized: '
             '${compressionService.formatBytes(result.originalBytes)} → '
             '${compressionService.formatBytes(result.compressedBytes)} '
             '(${result.savedPercentage.toStringAsFixed(0)}% smaller)'
-            : 'Image ready for upload.';
+            : 'Photo ready for upload.';
       });
 
-      return result.file;
+      // The temporary compression file is no longer needed
+      // because the permanent draft copy has been created.
+      if (result.file.path !=
+          persistentFile.path) {
+        await compressionService
+            .deleteTemporaryCompressedFile(
+          result.file,
+        );
+      }
+
+      await _saveDraft(
+        currentStep: 2,
+      );
+
+      return persistentFile;
     } catch (e) {
       showMessage(
-        'Unable to prepare image: $e',
+        'Unable to prepare photo: '
+            '${_cleanException(e)}',
       );
 
       return null;
@@ -1296,12 +2171,17 @@ class _CreateReportEvidenceScreenState
   Future<void> removeImage(
       int index,
       ) async {
-    if (
-    index < 0 ||
+    if (index < 0 ||
         index >=
             evidenceImages.length ||
-        isBusy
-    ) {
+        isBusy) {
+      return;
+    }
+
+    final String? userId =
+        _userId;
+
+    if (userId == null) {
       return;
     }
 
@@ -1311,8 +2191,14 @@ class _CreateReportEvidenceScreenState
     final String path =
         file.path;
 
-    final int currentBytes =
-    await file.length();
+    int currentBytes = 0;
+
+    try {
+      currentBytes =
+      await file.length();
+    } catch (_) {
+      currentBytes = 0;
+    }
 
     setState(() {
       evidenceImages.removeAt(
@@ -1349,8 +2235,8 @@ class _CreateReportEvidenceScreenState
             1 << 62,
           );
 
-      // Always restore original report values because the
-      // evidence set has changed.
+      // Evidence changed, so an old final AI result
+      // must not remain authoritative.
       selectedCategory =
           widget.category;
 
@@ -1364,18 +2250,69 @@ class _CreateReportEvidenceScreenState
           widget.description;
     });
 
-    await compressionService
-        .deleteTemporaryCompressedFile(
-      file,
+    await ReportDraftService
+        .removeEvidenceImage(
+      userId:
+      userId,
+
+      imagePath:
+      path,
     );
 
-    // ==========================================================
-    // REBUILD FINAL RESULT FROM REMAINING IMAGES
-    // ==========================================================
+    await _saveDraft(
+      currentStep: 2,
+    );
 
     if (imageAnalyses.isNotEmpty) {
       await combineAllAnalyses();
     }
+  }
+
+  Future<void> removeVideo(
+      int index,
+      ) async {
+    if (index < 0 ||
+        index >=
+            evidenceVideos.length ||
+        isBusy) {
+      return;
+    }
+
+    final String? userId =
+        _userId;
+
+    if (userId == null) {
+      return;
+    }
+
+    final File file =
+    evidenceVideos[index];
+
+    final String path =
+        file.path;
+
+    setState(() {
+      evidenceVideos.removeAt(
+        index,
+      );
+
+      videoDurations.remove(
+        path,
+      );
+    });
+
+    await ReportDraftService
+        .removeEvidenceVideo(
+      userId:
+      userId,
+
+      videoPath:
+      path,
+    );
+
+    await _saveDraft(
+      currentStep: 2,
+    );
   }
 
   // ============================================================
@@ -1409,9 +2346,10 @@ class _CreateReportEvidenceScreenState
   // ============================================================
 
   Future<void> continueToLocation() async {
-    if (evidenceImages.isEmpty) {
+    if (!hasEvidence) {
       showMessage(
-        'Please add at least one evidence image.',
+        'Please add at least one '
+            'photo or video.',
       );
 
       return;
@@ -1419,15 +2357,12 @@ class _CreateReportEvidenceScreenState
 
     if (isBusy) {
       showMessage(
-        'Please wait for Smart Assist to finish.',
+        'Please wait for the current '
+            'operation to finish.',
       );
 
       return;
     }
-
-    // ==========================================================
-    // LOCAL QUALITY CHECK
-    // ==========================================================
 
     final String? localProblem =
     validateReportLocally(
@@ -1446,22 +2381,14 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    // ==========================================================
-    // FINAL AI REPORT QUALITY
-    //
-    // Use FINAL combined analysis, not one arbitrary image.
-    // ==========================================================
-
     final ReportFinalAiAnalysis?
     result =
         finalAiAnalysis;
 
-    if (
-    result != null &&
+    if (result != null &&
         result.reportSufficient ==
             false &&
-        !aiSuggestionsApplied
-    ) {
+        !aiSuggestionsApplied) {
       await showPoorReportDialog();
 
       return;
@@ -1471,19 +2398,32 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    // ==========================================================
-    // TEMPORARY BACKWARD COMPATIBILITY
-    //
-    // LocationScreen currently still expects:
-    //
-    // ReportImageAiAnalysis? aiAnalysis
-    //
-    // Until the next step updates Location + Preview, pass the
-    // first available individual analysis.
-    //
-    // The actual final report values below already use the
-    // combined Smart Assist decision.
-    // ==========================================================
+    setState(() {
+      isNavigating =
+      true;
+    });
+
+    final bool saved =
+    await _saveDraft(
+      currentStep:
+      3,
+    );
+
+    if (!saved) {
+      if (mounted) {
+        setState(() {
+          isNavigating =
+          false;
+        });
+      }
+
+      showMessage(
+        'Unable to save your draft. '
+            'Please try again before continuing.',
+      );
+
+      return;
+    }
 
     ReportImageAiAnalysis?
     legacyAnalysis;
@@ -1493,31 +2433,48 @@ class _CreateReportEvidenceScreenState
           imageAnalyses.values.first;
     }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            CreateReportLocationScreen(
-              category:
-              selectedCategory,
+    try {
+      if (!mounted) {
+        return;
+      }
 
-              priority:
-              selectedPriority,
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) =>
+              CreateReportLocationScreen(
+                category:
+                selectedCategory,
 
-              title:
-              selectedTitle,
+                priority:
+                selectedPriority,
 
-              description:
-              selectedDescription,
+                title:
+                selectedTitle,
 
-              evidenceImages:
-              evidenceImages,
+                description:
+                selectedDescription,
 
-              aiAnalysis:
-              legacyAnalysis,
-            ),
-      ),
-    );
+                evidenceImages:
+                List<File>.from(
+                  evidenceImages,
+                ),
+
+                aiAnalysis:
+                legacyAnalysis,
+              ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isNavigating =
+          false;
+        });
+
+        await _restoreDraft();
+      }
+    }
   }
 
   // ============================================================
@@ -1813,652 +2770,1111 @@ class _CreateReportEvidenceScreenState
         .trim();
   }
 
+  Widget _buildDraftStatusCard() {
+    final Color color =
+        _draftStatusColor;
+
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.symmetric(
+        horizontal:
+        14,
+
+        vertical:
+        11,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        color.withOpacity(
+          0.07,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          13,
+        ),
+
+        border:
+        Border.all(
+          color:
+          color.withOpacity(
+            0.30,
+          ),
+        ),
+      ),
+
+      child:
+      Row(
+        children: [
+          if (savingDraft ||
+              restoringDraft)
+            SizedBox(
+              width:
+              17,
+              height:
+              17,
+              child:
+              CircularProgressIndicator(
+                strokeWidth:
+                2,
+                color:
+                color,
+              ),
+            )
+          else
+            Icon(
+              _draftStatusIcon,
+              color:
+              color,
+              size:
+              18,
+            ),
+
+          const SizedBox(
+            width:
+            10,
+          ),
+
+          Expanded(
+            child:
+            Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _draftStatusText,
+                  style:
+                  TextStyle(
+                    color:
+                    color,
+                    fontSize:
+                    11,
+                    fontWeight:
+                    FontWeight.w700,
+                  ),
+                ),
+
+                const SizedBox(
+                  height:
+                  2,
+                ),
+
+                const Text(
+                  'Photos and videos are kept locally '
+                      'until this report is submitted or discarded.',
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors.textSecondary,
+                    fontSize:
+                    9,
+                    height:
+                    1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ============================================================
   // BUILD
   // ============================================================
 
   @override
-  Widget build(
-      BuildContext context,
-      ) {
-    return Scaffold(
-      backgroundColor:
-      AppColors.background,
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: _allowPop,
 
-      body:
-      SafeArea(
-        child:
-        Column(
-          children: [
-            Expanded(
-              child:
-              SingleChildScrollView(
-                padding:
-                const EdgeInsets.all(
-                  20,
-                ),
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) {
+          return;
+        }
 
-                child:
-                Column(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
+        // Do not leave while restoring/saving/analyzing/navigating.
+        if (isBusy) {
+          return;
+        }
 
-                  children: [
-                    // =================================================
-                    // HEADER
-                    // =================================================
+        final bool saved = await _saveDraft(
+          currentStep: 2,
+        );
 
-                    Row(
-                      children: [
-                        Container(
-                          decoration:
-                          BoxDecoration(
-                            color:
-                            AppColors.surface,
+        if (!saved || !mounted) {
+          return;
+        }
 
-                            borderRadius:
-                            BorderRadius.circular(
-                              12,
-                            ),
+        _allowPop = true;
 
-                            border:
-                            Border.all(
-                              color:
-                              AppColors.border,
-                            ),
-                          ),
+        Navigator.pop(context);
+      },
 
-                          child:
-                          IconButton(
-                            onPressed:
-                            isBusy
-                                ? null
-                                : () {
-                              Navigator.pop(
-                                context,
-                              );
-                            },
+      child: Scaffold(
+        backgroundColor: AppColors.background,
 
-                            icon:
-                            const Icon(
-                              Icons.arrow_back,
-                            ),
-                          ),
-                        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(20),
 
-                        const SizedBox(
-                          width:
-                          14,
-                        ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
 
-                        const Column(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                    children: [
+                      // =================================================
+                      // HEADER
+                      // =================================================
 
-                          children: [
-                            Text(
-                              'Report Issue',
-                              style:
-                              TextStyle(
-                                fontSize:
-                                22,
-                                fontWeight:
-                                FontWeight.bold,
+                      Row(
+                        children: [
+                          Container(
+                            decoration: BoxDecoration(
+                              color: AppColors.surface,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: AppColors.border,
                               ),
                             ),
 
-                            Text(
-                              'Help improve your community',
-                              style:
-                              TextStyle(
-                                color:
-                                AppColors.textSecondary,
-                                fontSize:
-                                12,
+                            child: IconButton(
+                              onPressed: isBusy
+                                  ? null
+                                  : () async {
+                                final bool saved = await _saveDraft(
+                                  currentStep: 2,
+                                );
+
+                                if (!saved || !mounted) {
+                                  return;
+                                }
+
+                                _allowPop = true;
+
+                                Navigator.pop(context);
+                              },
+
+                              icon: const Icon(
+                                Icons.arrow_back,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            width: 14,
+                          ),
+
+                          const Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Report Issue',
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                'Help improve your community',
+                                style: TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 18,
+                      ),
+
+                      // =================================================
+                      // PROGRESS
+                      // =================================================
+
+                      const _EvidenceProgress(),
+
+                      const SizedBox(
+                        height: 14,
+                      ),
+
+                      // =================================================
+                      // DRAFT STATUS
+                      // =================================================
+
+                      _buildDraftStatusCard(),
+
+                      const SizedBox(
+                        height: 22,
+                      ),
+
+                      // =================================================
+                      // SMART ASSIST
+                      // =================================================
+
+                      _buildSmartAssistCard(),
+
+                      const SizedBox(
+                        height: 20,
+                      ),
+
+                      // =================================================
+                      // IMAGE OPTIMIZATION
+                      // =================================================
+
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+
+                        decoration: BoxDecoration(
+                          color: const Color(
+                            0xFF10253E,
+                          ),
+                          borderRadius: BorderRadius.circular(
+                            15,
+                          ),
+                          border: Border.all(
+                            color: const Color(
+                              0xFF375B91,
+                            ),
+                          ),
+                        ),
+
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+
+                          children: [
+                            const Icon(
+                              Icons.compress_outlined,
+                              color: AppColors.primary,
+                              size: 25,
+                            ),
+
+                            const SizedBox(
+                              width: 12,
+                            ),
+
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+
+                                children: [
+                                  const Text(
+                                    'Evidence Optimization',
+                                    style: TextStyle(
+                                      color: AppColors.primary,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+
+                                  const SizedBox(
+                                    height: 4,
+                                  ),
+
+                                  Text(
+                                    loadingImage
+                                        ? compressionMessage
+                                        : evidenceImages.isEmpty
+                                        ? 'Evidence photos are optimized before upload.'
+                                        : '$compressionMessage\n'
+                                        'Prepared photo size: '
+                                        '${compressionService.formatBytes(totalCompressedBytes)}',
+                                    style: const TextStyle(
+                                      color: AppColors.textSecondary,
+                                      fontSize: 10,
+                                      height: 1.4,
+                                    ),
+                                  ),
+
+                                  const SizedBox(
+                                    height: 5,
+                                  ),
+
+                                  Text(
+                                    'Maximum $maxEvidenceItems total evidence items. '
+                                        'Smart Assist analyzes photos individually.',
+                                    style: const TextStyle(
+                                      color: AppColors.textSecondary,
+                                      fontSize: 9,
+                                      height: 1.35,
+                                    ),
+                                  ),
+
+                                  if (evidenceVideos.isNotEmpty) ...[
+                                    const SizedBox(
+                                      height: 4,
+                                    ),
+                                    Text(
+                                      '${evidenceVideos.length} short video'
+                                          '${evidenceVideos.length == 1 ? '' : 's'} '
+                                          'saved as supporting evidence.',
+                                      style: const TextStyle(
+                                        color: AppColors.textSecondary,
+                                        fontSize: 9,
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                           ],
                         ),
-                      ],
-                    ),
-
-                    const SizedBox(
-                      height:
-                      18,
-                    ),
-
-                    const _EvidenceProgress(),
-
-                    const SizedBox(
-                      height:
-                      22,
-                    ),
-
-                    // =================================================
-                    // SMART ASSIST
-                    // =================================================
-
-                    _buildSmartAssistCard(),
-
-                    const SizedBox(
-                      height:
-                      20,
-                    ),
-
-                    // =================================================
-                    // IMAGE OPTIMIZATION
-                    // =================================================
-
-                    Container(
-                      width:
-                      double.infinity,
-
-                      padding:
-                      const EdgeInsets.all(
-                        16,
                       ),
 
-                      decoration:
-                      BoxDecoration(
-                        color:
-                        const Color(
-                          0xFF10253E,
-                        ),
-
-                        borderRadius:
-                        BorderRadius.circular(
-                          15,
-                        ),
-
-                        border:
-                        Border.all(
-                          color:
-                          const Color(
-                            0xFF375B91,
-                          ),
-                        ),
+                      const SizedBox(
+                        height: 20,
                       ),
 
-                      child:
-                      Row(
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                      // =================================================
+                      // UPLOAD BOX
+                      // =================================================
 
-                        children: [
-                          const Icon(
-                            Icons
-                                .compress_outlined,
-                            color:
-                            AppColors.primary,
-                            size:
-                            25,
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(18),
+
+                        decoration: BoxDecoration(
+                          color: AppColors.surface,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: AppColors.primaryDark,
+                            width: 1.5,
                           ),
-
-                          const SizedBox(
-                            width:
-                            12,
-                          ),
-
-                          Expanded(
-                            child:
-                            Column(
-                              crossAxisAlignment:
-                              CrossAxisAlignment.start,
-
-                              children: [
-                                const Text(
-                                  'Image Optimization',
-                                  style:
-                                  TextStyle(
-                                    color:
-                                    AppColors.primary,
-                                    fontWeight:
-                                    FontWeight.bold,
-                                  ),
-                                ),
-
-                                const SizedBox(
-                                  height:
-                                  4,
-                                ),
-
-                                Text(
-                                  loadingImage
-                                      ? compressionMessage
-                                      : evidenceImages.isEmpty
-                                      ? 'Evidence images are compressed before upload.'
-                                      : '$compressionMessage\n'
-                                      'Prepared size: '
-                                      '${compressionService.formatBytes(totalCompressedBytes)}',
-
-                                  style:
-                                  const TextStyle(
-                                    color:
-                                    AppColors.textSecondary,
-                                    fontSize:
-                                    10,
-                                    height:
-                                    1.4,
-                                  ),
-                                ),
-
-                                const SizedBox(
-                                  height:
-                                  4,
-                                ),
-
-                                Text(
-                                  'Smart Assist supports up to '
-                                      '$maxAiImages evidence images.',
-
-                                  style:
-                                  const TextStyle(
-                                    color:
-                                    AppColors.textSecondary,
-                                    fontSize:
-                                    9,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(
-                      height:
-                      20,
-                    ),
-
-                    // =================================================
-                    // UPLOAD BOX
-                    // =================================================
-
-                    Container(
-                      width:
-                      double.infinity,
-
-                      height:
-                      190,
-
-                      decoration:
-                      BoxDecoration(
-                        color:
-                        AppColors.surface,
-
-                        borderRadius:
-                        BorderRadius.circular(
-                          18,
                         ),
 
-                        border:
-                        Border.all(
-                          color:
-                          AppColors.primaryDark,
-                          width:
-                          1.5,
-                        ),
-                      ),
+                        child: Column(
+                          children: [
+                            Container(
+                              width: 58,
+                              height: 58,
 
-                      child:
-                      const Column(
-                        mainAxisAlignment:
-                        MainAxisAlignment.center,
+                              decoration: BoxDecoration(
+                                color: AppColors.primary.withOpacity(
+                                  0.10,
+                                ),
+                                shape: BoxShape.circle,
+                              ),
 
-                        children: [
-                          Icon(
-                            Icons
-                                .cloud_upload_outlined,
-                            size:
-                            48,
-                            color:
-                            AppColors.primary,
-                          ),
-
-                          SizedBox(
-                            height:
-                            10,
-                          ),
-
-                          Text(
-                            'Upload Evidence',
-                            style:
-                            TextStyle(
-                              fontSize:
-                              16,
-                              fontWeight:
-                              FontWeight.bold,
-                            ),
-                          ),
-
-                          SizedBox(
-                            height:
-                            6,
-                          ),
-
-                          Text(
-                            'Each image will be analyzed separately',
-                            style:
-                            TextStyle(
-                              color:
-                              AppColors.textSecondary,
-                              fontSize:
-                              11,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(
-                      height:
-                      16,
-                    ),
-
-                    // =================================================
-                    // CAMERA / GALLERY
-                    // =================================================
-
-                    Row(
-                      children: [
-                        Expanded(
-                          child:
-                          OutlinedButton.icon(
-                            onPressed:
-                            isBusy
-                                ? null
-                                : takePhoto,
-
-                            icon:
-                            const Icon(
-                              Icons
-                                  .camera_alt_outlined,
+                              child: const Icon(
+                                Icons.add_photo_alternate_outlined,
+                                size: 30,
+                                color: AppColors.primary,
+                              ),
                             ),
 
-                            label:
+                            const SizedBox(
+                              height: 12,
+                            ),
+
                             const Text(
-                              'Take Photo',
-                            ),
-                          ),
-                        ),
-
-                        const SizedBox(
-                          width:
-                          10,
-                        ),
-
-                        Expanded(
-                          child:
-                          OutlinedButton.icon(
-                            onPressed:
-                            isBusy
-                                ? null
-                                : pickGalleryImages,
-
-                            icon:
-                            const Icon(
-                              Icons
-                                  .photo_library_outlined,
+                              'Add Evidence',
+                              style: TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
 
-                            label:
+                            const SizedBox(
+                              height: 6,
+                            ),
+
                             const Text(
-                              'Gallery',
+                              'Add a clear close-up or wider context photo. '
+                                  'A short video can help show movement, flickering, '
+                                  'water flow or other changing conditions.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 11,
+                                height: 1.45,
+                              ),
                             ),
-                          ),
+
+                            const SizedBox(
+                              height: 14,
+                            ),
+
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+
+                              decoration: BoxDecoration(
+                                color: AppColors.primary.withOpacity(
+                                  0.08,
+                                ),
+                                borderRadius: BorderRadius.circular(
+                                  20,
+                                ),
+                              ),
+
+                              child: Text(
+                                '$totalEvidenceCount / '
+                                    '$maxEvidenceItems evidence items',
+                                style: const TextStyle(
+                                  color: AppColors.primary,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
 
-                    const SizedBox(
-                      height:
-                      20,
-                    ),
+                      const SizedBox(
+                        height: 14,
+                      ),
 
-                    // =================================================
-                    // IMAGE PREVIEW GRID
-                    // =================================================
+                      // =================================================
+                      // CAMERA / VIDEO BUTTONS
+                      // =================================================
 
-                    if (
-                    evidenceImages
-                        .isNotEmpty
-                    )
-                      GridView.builder(
-                        shrinkWrap:
-                        true,
-
-                        physics:
-                        const NeverScrollableScrollPhysics(),
-
-                        itemCount:
-                        evidenceImages.length,
-
-                        gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount:
-                          3,
-
-                          crossAxisSpacing:
-                          9,
-
-                          mainAxisSpacing:
-                          9,
-                        ),
-
-                        itemBuilder:
-                            (
-                            context,
-                            index,
-                            ) {
-                          final File file =
-                          evidenceImages[
-                          index];
-
-                          final bool
-                          complete =
-                          imageAnalyses
-                              .containsKey(
-                            file.path,
-                          );
-
-                          final bool
-                          analyzing =
-                              analyzingImagePath ==
-                                  file.path;
-
-                          return Stack(
+                      Column(
+                        children: [
+                          Row(
                             children: [
-                              Positioned.fill(
-                                child:
-                                ClipRRect(
-                                  borderRadius:
-                                  BorderRadius.circular(
-                                    12,
-                                  ),
-
-                                  child:
-                                  Image.file(
-                                    file,
-
-                                    fit:
-                                    BoxFit.cover,
-                                  ),
-                                ),
-                              ),
-
-                              Positioned(
-                                left:
-                                4,
-                                bottom:
-                                4,
-
-                                child:
-                                Container(
-                                  padding:
-                                  const EdgeInsets.symmetric(
-                                    horizontal:
-                                    6,
-                                    vertical:
-                                    3,
-                                  ),
-
-                                  decoration:
-                                  BoxDecoration(
-                                    color:
-                                    Colors.black54,
-
-                                    borderRadius:
-                                    BorderRadius.circular(
-                                      8,
-                                    ),
-                                  ),
-
-                                  child:
-                                  Text(
-                                    analyzing
-                                        ? 'Analyzing...'
-                                        : complete
-                                        ? 'AI ✓'
-                                        : 'Pending',
-
-                                    style:
-                                    const TextStyle(
-                                      color:
-                                      Colors.white,
-                                      fontSize:
-                                      8,
-                                    ),
-                                  ),
-                                ),
-                              ),
-
-                              Positioned(
-                                right:
-                                4,
-                                top:
-                                4,
-
-                                child:
-                                GestureDetector(
-                                  onTap:
-                                  isBusy
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: isBusy || evidenceLimitReached
                                       ? null
-                                      : () {
-                                    removeImage(
-                                      index,
-                                    );
-                                  },
+                                      : takePhoto,
+                                  icon: const Icon(
+                                    Icons.camera_alt_outlined,
+                                  ),
+                                  label: const Text(
+                                    'Photo',
+                                  ),
+                                ),
+                              ),
 
-                                  child:
-                                  Container(
-                                    padding:
-                                    const EdgeInsets.all(
-                                      4,
-                                    ),
+                              const SizedBox(
+                                width: 10,
+                              ),
 
-                                    decoration:
-                                    const BoxDecoration(
-                                      color:
-                                      Colors.black54,
-                                      shape:
-                                      BoxShape.circle,
-                                    ),
-
-                                    child:
-                                    const Icon(
-                                      Icons.close,
-                                      size:
-                                      15,
-                                    ),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: isBusy || evidenceLimitReached
+                                      ? null
+                                      : recordVideo,
+                                  icon: const Icon(
+                                    Icons.videocam_outlined,
+                                  ),
+                                  label: const Text(
+                                    'Record Video',
                                   ),
                                 ),
                               ),
                             ],
-                          );
-                        },
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: isBusy || evidenceLimitReached
+                                      ? null
+                                      : pickGalleryImages,
+                                  icon: const Icon(
+                                    Icons.photo_library_outlined,
+                                  ),
+                                  label: const Text(
+                                    'Gallery Photos',
+                                  ),
+                                ),
+                              ),
+
+                              const SizedBox(
+                                width: 10,
+                              ),
+
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: isBusy || evidenceLimitReached
+                                      ? null
+                                      : pickGalleryVideo,
+                                  icon: const Icon(
+                                    Icons.video_library_outlined,
+                                  ),
+                                  label: const Text(
+                                    'Gallery Video',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
-                  ],
+
+                      // =================================================
+                      // VIDEO EVIDENCE
+                      // =================================================
+
+                      if (evidenceVideos.isNotEmpty) ...[
+                        const SizedBox(
+                          height: 18,
+                        ),
+
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Video Evidence',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+
+                            Text(
+                              '${evidenceVideos.length} video'
+                                  '${evidenceVideos.length == 1 ? '' : 's'}',
+                              style: const TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+
+                        ...List.generate(
+                          evidenceVideos.length,
+                              (index) {
+                            final File video = evidenceVideos[index];
+
+                            final Duration? duration =
+                            videoDurations[video.path];
+
+                            return Padding(
+                              padding: const EdgeInsets.only(
+                                bottom: 10,
+                              ),
+
+                              child: Container(
+                                padding: const EdgeInsets.all(
+                                  12,
+                                ),
+
+                                decoration: BoxDecoration(
+                                  color: AppColors.surface,
+                                  borderRadius: BorderRadius.circular(
+                                    14,
+                                  ),
+                                  border: Border.all(
+                                    color: AppColors.border,
+                                  ),
+                                ),
+
+                                child: Row(
+                                  children: [
+                                    GestureDetector(
+                                      onTap: isBusy
+                                          ? null
+                                          : () {
+                                        previewVideo(
+                                          video,
+                                        );
+                                      },
+
+                                      child: Container(
+                                        width: 70,
+                                        height: 58,
+
+                                        decoration: BoxDecoration(
+                                          color: const Color(
+                                            0xFF10253E,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
+                                        ),
+
+                                        child: Stack(
+                                          alignment: Alignment.center,
+                                          children: [
+                                            const Icon(
+                                              Icons.videocam_outlined,
+                                              color: AppColors.primary,
+                                              size: 27,
+                                            ),
+
+                                            Positioned(
+                                              right: 5,
+                                              bottom: 5,
+
+                                              child: Container(
+                                                padding:
+                                                const EdgeInsets.symmetric(
+                                                  horizontal: 5,
+                                                  vertical: 2,
+                                                ),
+
+                                                decoration: BoxDecoration(
+                                                  color: Colors.black54,
+                                                  borderRadius:
+                                                  BorderRadius.circular(
+                                                    5,
+                                                  ),
+                                                ),
+
+                                                child: Text(
+                                                  _formatVideoDuration(
+                                                    duration,
+                                                  ),
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 8,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+
+                                    const SizedBox(
+                                      width: 12,
+                                    ),
+
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+
+                                        children: [
+                                          Text(
+                                            'Video ${index + 1}',
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+
+                                          const SizedBox(
+                                            height: 4,
+                                          ),
+
+                                          const Text(
+                                            'Supporting evidence • '
+                                                'Kept safely in your local draft.',
+                                            style: TextStyle(
+                                              color: AppColors.textSecondary,
+                                              fontSize: 9,
+                                              height: 1.35,
+                                            ),
+                                          ),
+
+                                          const SizedBox(
+                                            height: 6,
+                                          ),
+
+                                          InkWell(
+                                            onTap: isBusy
+                                                ? null
+                                                : () {
+                                              previewVideo(
+                                                video,
+                                              );
+                                            },
+
+                                            child: const Text(
+                                              'Preview video',
+                                              style: TextStyle(
+                                                color: AppColors.primary,
+                                                fontSize: 9,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+
+                                    IconButton(
+                                      tooltip: 'Remove video',
+                                      onPressed: isBusy
+                                          ? null
+                                          : () {
+                                        removeVideo(
+                                          index,
+                                        );
+                                      },
+                                      icon: const Icon(
+                                        Icons.delete_outline_rounded,
+                                        color: Colors.redAccent,
+                                        size: 20,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+
+                      // =================================================
+                      // IMAGE PREVIEW HEADER
+                      // =================================================
+
+                      if (evidenceImages.isNotEmpty) ...[
+                        const SizedBox(
+                          height: 18,
+                        ),
+
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Photo Evidence',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+
+                            Text(
+                              '${evidenceImages.length} photo'
+                                  '${evidenceImages.length == 1 ? '' : 's'}',
+                              style: const TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+                      ],
+
+                      // =================================================
+                      // IMAGE PREVIEW GRID
+                      // =================================================
+
+                      if (evidenceImages.isNotEmpty)
+                        GridView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: evidenceImages.length,
+
+                          gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 9,
+                            mainAxisSpacing: 9,
+                          ),
+
+                          itemBuilder: (
+                              context,
+                              index,
+                              ) {
+                            final File file = evidenceImages[index];
+
+                            final bool complete =
+                            imageAnalyses.containsKey(
+                              file.path,
+                            );
+
+                            final bool hasError =
+                            imageAnalysisErrors.containsKey(
+                              file.path,
+                            );
+
+                            final bool analyzing =
+                                analyzingImagePath == file.path;
+
+                            return Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(
+                                      12,
+                                    ),
+
+                                    child: Image.file(
+                                      file,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                ),
+
+                                // =================================================
+                                // STATUS BADGE
+                                // =================================================
+
+                                Positioned(
+                                  left: 4,
+                                  bottom: 4,
+
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 3,
+                                    ),
+
+                                    decoration: BoxDecoration(
+                                      color: Colors.black54,
+                                      borderRadius: BorderRadius.circular(
+                                        8,
+                                      ),
+                                    ),
+
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (analyzing) ...[
+                                          const SizedBox(
+                                            width: 8,
+                                            height: 8,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 1.3,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          const SizedBox(
+                                            width: 4,
+                                          ),
+                                        ],
+
+                                        Text(
+                                          analyzing
+                                              ? 'Analyzing'
+                                              : hasError
+                                              ? 'Failed'
+                                              : complete
+                                              ? 'Verified'
+                                              : 'Ready',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 8,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+
+                                // =================================================
+                                // REMOVE PHOTO
+                                // =================================================
+
+                                Positioned(
+                                  right: 4,
+                                  top: 4,
+
+                                  child: GestureDetector(
+                                    onTap: isBusy
+                                        ? null
+                                        : () {
+                                      removeImage(
+                                        index,
+                                      );
+                                    },
+
+                                    child: Container(
+                                      padding: const EdgeInsets.all(
+                                        4,
+                                      ),
+                                      decoration: const BoxDecoration(
+                                        color: Colors.black54,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(
+                                        Icons.close,
+                                        size: 15,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+
+                      // =================================================
+                      // HELPFUL EMPTY STATE
+                      // =================================================
+
+                      if (!hasEvidence) ...[
+                        const SizedBox(
+                          height: 18,
+                        ),
+
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(
+                            16,
+                          ),
+
+                          decoration: BoxDecoration(
+                            color: AppColors.surface,
+                            borderRadius: BorderRadius.circular(
+                              14,
+                            ),
+                            border: Border.all(
+                              color: AppColors.border,
+                            ),
+                          ),
+
+                          child: const Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.info_outline_rounded,
+                                color: AppColors.primary,
+                                size: 20,
+                              ),
+                              SizedBox(
+                                width: 10,
+                              ),
+                              Expanded(
+                                child: Text(
+                                  'Add at least one photo or short video '
+                                      'before continuing to the location step.',
+                                  style: TextStyle(
+                                    color: AppColors.textSecondary,
+                                    fontSize: 10,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
 
-            // =====================================================
-            // BOTTOM BUTTONS
-            // =====================================================
+              // =====================================================
+              // BOTTOM BUTTONS
+              // =====================================================
 
-            Padding(
-              padding:
-              const EdgeInsets.all(
-                18,
-              ),
-
-              child:
-              Row(
-                children: [
-                  OutlinedButton(
-                    onPressed:
-                    isBusy
-                        ? null
-                        : () {
-                      Navigator.pop(
-                        context,
-                      );
-                    },
-
-                    child:
-                    const Text(
-                      'Back',
-                    ),
-                  ),
-
-                  const SizedBox(
-                    width:
-                    10,
-                  ),
-
-                  Expanded(
-                    child:
-                    ElevatedButton(
-                      style:
-                      ElevatedButton
-                          .styleFrom(
-                        backgroundColor:
-                        AppColors.primaryDark,
-
-                        minimumSize:
-                        const Size.fromHeight(
-                          54,
-                        ),
-                      ),
-
-                      onPressed:
-                      isBusy
-                          ? null
-                          : continueToLocation,
-
-                      child:
-                      isBusy
-                          ? const SizedBox(
-                        width:
-                        20,
-                        height:
-                        20,
-                        child:
-                        CircularProgressIndicator(
-                          strokeWidth:
-                          2,
-                        ),
-                      )
-                          : const Text(
-                        'Continue →',
+              Container(
+                decoration: BoxDecoration(
+                  color: AppColors.background,
+                  border: Border(
+                    top: BorderSide(
+                      color: AppColors.border.withOpacity(
+                        0.6,
                       ),
                     ),
                   ),
-                ],
+                ),
+
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    18,
+                    12,
+                    18,
+                    18,
+                  ),
+
+                  child: Row(
+                    children: [
+                      OutlinedButton(
+                        onPressed: isBusy
+                            ? null
+                            : () async {
+                          final bool saved = await _saveDraft(
+                            currentStep: 2,
+                          );
+
+                          if (!saved || !mounted) {
+                            return;
+                          }
+
+                          _allowPop = true;
+
+                          Navigator.pop(context);
+                        },
+
+                        child: const Text(
+                          'Back',
+                        ),
+                      ),
+
+                      const SizedBox(
+                        width: 10,
+                      ),
+
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.primaryDark,
+                            minimumSize: const Size.fromHeight(
+                              54,
+                            ),
+                          ),
+
+                          onPressed: isBusy
+                              ? null
+                              : continueToLocation,
+
+                          child: isBusy
+                              ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                              : Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                hasEvidence
+                                    ? 'Continue to Location'
+                                    : 'Add Evidence First',
+                              ),
+                              const SizedBox(
+                                width: 6,
+                              ),
+                              const Icon(
+                                Icons.arrow_forward_rounded,
+                                size: 18,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -4276,6 +5692,205 @@ class _EvidenceProgress
           ),
         ),
       ],
+    );
+  }
+}
+
+class _VideoPreviewDialog
+    extends StatefulWidget {
+  final VideoPlayerController
+  controller;
+
+  const _VideoPreviewDialog({
+    required this.controller,
+  });
+
+  @override
+  State<_VideoPreviewDialog>
+  createState() =>
+      _VideoPreviewDialogState();
+}
+
+class _VideoPreviewDialogState
+    extends State<_VideoPreviewDialog> {
+  @override
+  void initState() {
+    super.initState();
+
+    widget.controller.addListener(
+      _refresh,
+    );
+  }
+
+  void _refresh() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(
+      _refresh,
+    );
+
+    super.dispose();
+  }
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    final VideoPlayerValue value =
+        widget.controller.value;
+
+    return Dialog(
+      backgroundColor:
+      AppColors.surface,
+
+      shape:
+      RoundedRectangleBorder(
+        borderRadius:
+        BorderRadius.circular(
+          18,
+        ),
+      ),
+
+      child:
+      Padding(
+        padding:
+        const EdgeInsets.all(
+          16,
+        ),
+
+        child:
+        Column(
+          mainAxisSize:
+          MainAxisSize.min,
+
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child:
+                  Text(
+                    'Video Preview',
+
+                    style:
+                    TextStyle(
+                      fontSize:
+                      16,
+
+                      fontWeight:
+                      FontWeight.bold,
+                    ),
+                  ),
+                ),
+
+                IconButton(
+                  onPressed: () {
+                    Navigator.pop(
+                      context,
+                    );
+                  },
+
+                  icon:
+                  const Icon(
+                    Icons.close,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height:
+              10,
+            ),
+
+            AspectRatio(
+              aspectRatio:
+              value.aspectRatio >
+                  0
+                  ? value.aspectRatio
+                  : 16 / 9,
+
+              child:
+              ClipRRect(
+                borderRadius:
+                BorderRadius.circular(
+                  12,
+                ),
+
+                child:
+                VideoPlayer(
+                  widget.controller,
+                ),
+              ),
+            ),
+
+            const SizedBox(
+              height:
+              12,
+            ),
+
+            VideoProgressIndicator(
+              widget.controller,
+              allowScrubbing:
+              true,
+
+              padding:
+              const EdgeInsets.symmetric(
+                vertical:
+                6,
+              ),
+            ),
+
+            const SizedBox(
+              height:
+              6,
+            ),
+
+            SizedBox(
+              width:
+              double.infinity,
+
+              child:
+              ElevatedButton.icon(
+                onPressed: () async {
+                  if (value.isPlaying) {
+                    await widget
+                        .controller
+                        .pause();
+                  } else {
+                    await widget
+                        .controller
+                        .play();
+                  }
+
+                  if (mounted) {
+                    setState(() {});
+                  }
+                },
+
+                icon:
+                Icon(
+                  value.isPlaying
+                      ? Icons.pause
+                      : Icons
+                      .play_arrow,
+                ),
+
+                label:
+                Text(
+                  value.isPlaying
+                      ? 'Pause'
+                      : 'Play',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/report_draft.dart';
@@ -7,42 +9,89 @@ import '../models/report_draft.dart';
 class ReportDraftService {
   ReportDraftService._();
 
+  // ============================================================
+  // SHARED PREFERENCES KEY
+  // ============================================================
+
   static const String _draftKeyPrefix =
       'smartcity_active_report_draft';
 
-  /// Creates a different storage key for each logged-in citizen.
-  ///
-  /// This is important because Citizen A's unfinished report must
-  /// never appear when Citizen B logs into the same device.
-  static String _keyForUser(String userId) {
+  // ============================================================
+  // LOCAL EVIDENCE DIRECTORY
+  // ============================================================
+
+  static const String _draftMediaFolder =
+      'smartcity_report_drafts';
+
+  static const String _imagesFolder =
+      'images';
+
+  static const String _videosFolder =
+      'videos';
+
+  // ============================================================
+  // USER-SCOPED KEY
+  // ============================================================
+
+  static String _keyForUser(
+      String userId,
+      ) {
     return '${_draftKeyPrefix}_$userId';
   }
 
-  /// Returns true when this citizen has an unfinished report.
+  // ============================================================
+  // SAFE USER FOLDER NAME
+  // ============================================================
+
+  static String _safeUserId(
+      String userId,
+      ) {
+    return userId.replaceAll(
+      RegExp(
+        r'[^A-Za-z0-9_-]',
+      ),
+      '_',
+    );
+  }
+
+  // ============================================================
+  // HAS DRAFT
+  // ============================================================
+
   static Future<bool> hasDraft({
     required String userId,
   }) async {
-    final prefs =
-    await SharedPreferences.getInstance();
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
 
-    final raw =
-    prefs.getString(_keyForUser(userId));
+    final String? raw =
+    prefs.getString(
+      _keyForUser(
+        userId,
+      ),
+    );
 
-    if (raw == null || raw.trim().isEmpty) {
+    if (raw == null ||
+        raw.trim().isEmpty) {
       return false;
     }
 
     try {
-      final decoded =
-      jsonDecode(raw);
+      final dynamic decoded =
+      jsonDecode(
+        raw,
+      );
 
       if (decoded is! Map) {
         return false;
       }
 
-      final draft =
+      final ReportDraft draft =
       ReportDraft.fromJson(
-        Map<String, dynamic>.from(decoded),
+        Map<String, dynamic>.from(
+          decoded,
+        ),
       );
 
       return draft.hasData;
@@ -51,35 +100,58 @@ class ReportDraftService {
     }
   }
 
-  /// Loads this citizen's unfinished report.
-  ///
-  /// Returns null when:
-  /// - no draft exists
-  /// - the saved data is invalid/corrupted
+  // ============================================================
+  // LOAD DRAFT
+  // ============================================================
+
   static Future<ReportDraft?> loadDraft({
     required String userId,
   }) async {
-    final prefs =
-    await SharedPreferences.getInstance();
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
 
-    final raw =
-    prefs.getString(_keyForUser(userId));
+    final String? raw =
+    prefs.getString(
+      _keyForUser(
+        userId,
+      ),
+    );
 
-    if (raw == null || raw.trim().isEmpty) {
+    if (raw == null ||
+        raw.trim().isEmpty) {
       return null;
     }
 
     try {
-      final decoded =
-      jsonDecode(raw);
+      final dynamic decoded =
+      jsonDecode(
+        raw,
+      );
 
       if (decoded is! Map) {
         return null;
       }
 
-      final draft =
+      ReportDraft draft =
       ReportDraft.fromJson(
-        Map<String, dynamic>.from(decoded),
+        Map<String, dynamic>.from(
+          decoded,
+        ),
+      );
+
+      // ========================================================
+      // CLEAN MISSING MEDIA PATHS
+      //
+      // For example:
+      // - file manually removed
+      // - old temporary picker path expired
+      // - application cache was cleared
+      // ========================================================
+
+      draft =
+      await _removeMissingMediaPaths(
+        draft,
       );
 
       if (!draft.hasData) {
@@ -88,36 +160,39 @@ class ReportDraftService {
 
       return draft;
     } catch (_) {
-      // Do not crash Create Report if the local
-      // draft somehow becomes corrupted.
+      // Never crash Create Report because of a corrupted
+      // local draft.
       return null;
     }
   }
 
-  /// Saves/overwrites the citizen's active draft.
-  ///
-  /// There is intentionally one active Create Report draft
-  /// per citizen for now.
+  // ============================================================
+  // SAVE DRAFT
+  // ============================================================
+
   static Future<void> saveDraft({
     required String userId,
     required ReportDraft draft,
   }) async {
-    final prefs =
-    await SharedPreferences.getInstance();
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
 
-    final updatedDraft =
+    final ReportDraft updatedDraft =
     draft.copyWith(
       updatedAt: DateTime.now(),
     );
 
-    final encoded =
+    final String encoded =
     jsonEncode(
       updatedDraft.toJson(),
     );
 
-    final success =
+    final bool success =
     await prefs.setString(
-      _keyForUser(userId),
+      _keyForUser(
+        userId,
+      ),
       encoded,
     );
 
@@ -128,9 +203,12 @@ class ReportDraftService {
     }
   }
 
-  /// Updates only the fields supplied by the caller.
-  ///
-  /// If no draft exists, a new empty draft is created first.
+  // ============================================================
+  // UPDATE DRAFT
+  //
+  // Keeps backward compatibility with your existing screens.
+  // ============================================================
+
   static Future<ReportDraft> updateDraft({
     required String userId,
     String? category,
@@ -152,49 +230,81 @@ class ReportDraftService {
     bool? hasCloseUpEvidence,
     bool? hasContextEvidence,
     List<String>? evidenceImagePaths,
+    List<String>? evidenceVideoPaths,
   }) async {
-    final existing =
+    final ReportDraft? existing =
     await loadDraft(
       userId: userId,
     );
 
-    final base =
+    final ReportDraft base =
         existing ??
             ReportDraft.empty();
 
-    final updated =
+    final ReportDraft updated =
     base.copyWith(
-      category: category,
-      priority: priority,
-      title: title,
-      description: description,
-      landmark: landmark,
-      manualAddress: manualAddress,
-      latitude: latitude,
-      longitude: longitude,
+      category:
+      category,
+
+      priority:
+      priority,
+
+      title:
+      title,
+
+      description:
+      description,
+
+      landmark:
+      landmark,
+
+      manualAddress:
+      manualAddress,
+
+      latitude:
+      latitude,
+
+      longitude:
+      longitude,
+
       locationAccuracy:
       locationAccuracy,
+
       detectedAddress:
       detectedAddress,
+
       locationVerificationStatus:
       locationVerificationStatus,
+
       addressDistanceMeters:
       addressDistanceMeters,
+
       voiceTranscript:
       voiceTranscript,
+
       voiceLocationContext:
       voiceLocationContext,
+
       voiceSafetyConcern:
       voiceSafetyConcern,
+
       currentStep:
       currentStep,
+
       hasCloseUpEvidence:
       hasCloseUpEvidence,
+
       hasContextEvidence:
       hasContextEvidence,
+
       evidenceImagePaths:
       evidenceImagePaths,
-      updatedAt: DateTime.now(),
+
+      evidenceVideoPaths:
+      evidenceVideoPaths,
+
+      updatedAt:
+      DateTime.now(),
     );
 
     await saveDraft(
@@ -205,34 +315,170 @@ class ReportDraftService {
     return updated;
   }
 
-  /// Adds an evidence path without removing previously
-  /// saved evidence.
+  // ============================================================
+  // PERSIST IMAGE
+  //
+  // Takes an image_picker/compressed temporary File and copies it
+  // into application documents storage.
+  //
+  // RETURN:
+  // Permanent local path.
+  // ============================================================
+
+  static Future<String> persistEvidenceImage({
+    required String userId,
+    required File sourceFile,
+  }) async {
+    if (!await sourceFile.exists()) {
+      throw Exception(
+        'The selected evidence image is no longer available.',
+      );
+    }
+
+    final Directory directory =
+    await _getEvidenceDirectory(
+      userId: userId,
+      evidenceType:
+      _imagesFolder,
+    );
+
+    final String extension =
+    _fileExtension(
+      sourceFile.path,
+      fallback: '.jpg',
+    );
+
+    final String fileName =
+        'image_'
+        '${DateTime.now().microsecondsSinceEpoch}'
+        '$extension';
+
+    final String destinationPath =
+        '${directory.path}'
+        '${Platform.pathSeparator}'
+        '$fileName';
+
+    final File copiedFile =
+    await sourceFile.copy(
+      destinationPath,
+    );
+
+    if (!await copiedFile.exists()) {
+      throw Exception(
+        'Unable to preserve evidence image.',
+      );
+    }
+
+    await addEvidenceImage(
+      userId: userId,
+      imagePath:
+      copiedFile.path,
+    );
+
+    return copiedFile.path;
+  }
+
+  // ============================================================
+  // PERSIST VIDEO
+  //
+  // Copies image_picker video into application documents storage.
+  //
+  // RETURN:
+  // Permanent local path.
+  // ============================================================
+
+  static Future<String> persistEvidenceVideo({
+    required String userId,
+    required File sourceFile,
+  }) async {
+    if (!await sourceFile.exists()) {
+      throw Exception(
+        'The selected evidence video is no longer available.',
+      );
+    }
+
+    final Directory directory =
+    await _getEvidenceDirectory(
+      userId: userId,
+      evidenceType:
+      _videosFolder,
+    );
+
+    final String extension =
+    _fileExtension(
+      sourceFile.path,
+      fallback: '.mp4',
+    );
+
+    final String fileName =
+        'video_'
+        '${DateTime.now().microsecondsSinceEpoch}'
+        '$extension';
+
+    final String destinationPath =
+        '${directory.path}'
+        '${Platform.pathSeparator}'
+        '$fileName';
+
+    final File copiedFile =
+    await sourceFile.copy(
+      destinationPath,
+    );
+
+    if (!await copiedFile.exists()) {
+      throw Exception(
+        'Unable to preserve evidence video.',
+      );
+    }
+
+    await addEvidenceVideo(
+      userId: userId,
+      videoPath:
+      copiedFile.path,
+    );
+
+    return copiedFile.path;
+  }
+
+  // ============================================================
+  // ADD IMAGE PATH
+  //
+  // This method is retained for compatibility with existing code.
+  // Prefer persistEvidenceImage() for newly selected files.
+  // ============================================================
+
   static Future<ReportDraft> addEvidenceImage({
     required String userId,
     required String imagePath,
   }) async {
-    final existing =
+    final ReportDraft? existing =
     await loadDraft(
       userId: userId,
     );
 
-    final base =
+    final ReportDraft base =
         existing ??
             ReportDraft.empty();
 
-    final paths =
+    final List<String> paths =
     List<String>.from(
       base.evidenceImagePaths,
     );
 
-    if (!paths.contains(imagePath)) {
-      paths.add(imagePath);
+    if (!paths.contains(
+      imagePath,
+    )) {
+      paths.add(
+        imagePath,
+      );
     }
 
-    final updated =
+    final ReportDraft updated =
     base.copyWith(
-      evidenceImagePaths: paths,
-      updatedAt: DateTime.now(),
+      evidenceImagePaths:
+      paths,
+      updatedAt:
+      DateTime.now(),
     );
 
     await saveDraft(
@@ -243,31 +489,181 @@ class ReportDraftService {
     return updated;
   }
 
-  /// Removes one evidence image from the draft.
+  // ============================================================
+  // ADD VIDEO PATH
+  // ============================================================
+
+  static Future<ReportDraft> addEvidenceVideo({
+    required String userId,
+    required String videoPath,
+  }) async {
+    final ReportDraft? existing =
+    await loadDraft(
+      userId: userId,
+    );
+
+    final ReportDraft base =
+        existing ??
+            ReportDraft.empty();
+
+    final List<String> paths =
+    List<String>.from(
+      base.evidenceVideoPaths,
+    );
+
+    if (!paths.contains(
+      videoPath,
+    )) {
+      paths.add(
+        videoPath,
+      );
+    }
+
+    final ReportDraft updated =
+    base.copyWith(
+      evidenceVideoPaths:
+      paths,
+      updatedAt:
+      DateTime.now(),
+    );
+
+    await saveDraft(
+      userId: userId,
+      draft: updated,
+    );
+
+    return updated;
+  }
+
+  // ============================================================
+  // REMOVE IMAGE
+  //
+  // Removes:
+  // 1. path from draft JSON
+  // 2. persistent local draft file
+  // ============================================================
+
   static Future<ReportDraft> removeEvidenceImage({
     required String userId,
     required String imagePath,
+    bool deleteLocalFile = true,
   }) async {
-    final existing =
+    final ReportDraft? existing =
     await loadDraft(
       userId: userId,
     );
 
-    final base =
+    final ReportDraft base =
         existing ??
             ReportDraft.empty();
 
-    final paths =
+    final List<String> paths =
     List<String>.from(
       base.evidenceImagePaths,
     );
 
-    paths.remove(imagePath);
+    paths.remove(
+      imagePath,
+    );
 
-    final updated =
+    final ReportDraft updated =
     base.copyWith(
-      evidenceImagePaths: paths,
-      updatedAt: DateTime.now(),
+      evidenceImagePaths:
+      paths,
+      updatedAt:
+      DateTime.now(),
+    );
+
+    await saveDraft(
+      userId: userId,
+      draft: updated,
+    );
+
+    if (deleteLocalFile) {
+      await _deleteDraftMediaFile(
+        path: imagePath,
+        userId: userId,
+      );
+    }
+
+    return updated;
+  }
+
+  // ============================================================
+  // REMOVE VIDEO
+  // ============================================================
+
+  static Future<ReportDraft> removeEvidenceVideo({
+    required String userId,
+    required String videoPath,
+    bool deleteLocalFile = true,
+  }) async {
+    final ReportDraft? existing =
+    await loadDraft(
+      userId: userId,
+    );
+
+    final ReportDraft base =
+        existing ??
+            ReportDraft.empty();
+
+    final List<String> paths =
+    List<String>.from(
+      base.evidenceVideoPaths,
+    );
+
+    paths.remove(
+      videoPath,
+    );
+
+    final ReportDraft updated =
+    base.copyWith(
+      evidenceVideoPaths:
+      paths,
+      updatedAt:
+      DateTime.now(),
+    );
+
+    await saveDraft(
+      userId: userId,
+      draft: updated,
+    );
+
+    if (deleteLocalFile) {
+      await _deleteDraftMediaFile(
+        path: videoPath,
+        userId: userId,
+      );
+    }
+
+    return updated;
+  }
+
+  // ============================================================
+  // REPLACE ALL IMAGE PATHS
+  // ============================================================
+
+  static Future<ReportDraft> replaceEvidenceImages({
+    required String userId,
+    required List<String> imagePaths,
+  }) async {
+    final ReportDraft? existing =
+    await loadDraft(
+      userId: userId,
+    );
+
+    final ReportDraft base =
+        existing ??
+            ReportDraft.empty();
+
+    final ReportDraft updated =
+    base.copyWith(
+      evidenceImagePaths:
+      List<String>.from(
+        imagePaths,
+      ),
+      updatedAt:
+      DateTime.now(),
     );
 
     await saveDraft(
@@ -278,32 +674,402 @@ class ReportDraftService {
     return updated;
   }
 
-  /// Completely removes the unfinished report.
-  ///
-  /// ONLY call this when:
-  /// 1. Citizen explicitly chooses "Discard Report", or
-  /// 2. Report submission has completed successfully.
+  // ============================================================
+  // REPLACE ALL VIDEO PATHS
+  // ============================================================
+
+  static Future<ReportDraft> replaceEvidenceVideos({
+    required String userId,
+    required List<String> videoPaths,
+  }) async {
+    final ReportDraft? existing =
+    await loadDraft(
+      userId: userId,
+    );
+
+    final ReportDraft base =
+        existing ??
+            ReportDraft.empty();
+
+    final ReportDraft updated =
+    base.copyWith(
+      evidenceVideoPaths:
+      List<String>.from(
+        videoPaths,
+      ),
+      updatedAt:
+      DateTime.now(),
+    );
+
+    await saveDraft(
+      userId: userId,
+      draft: updated,
+    );
+
+    return updated;
+  }
+
+  // ============================================================
+  // CLEAR EVIDENCE ONLY
+  //
+  // Useful if user wants to replace evidence but keep Details.
+  // ============================================================
+
+  static Future<ReportDraft> clearEvidence({
+    required String userId,
+  }) async {
+    final ReportDraft? existing =
+    await loadDraft(
+      userId: userId,
+    );
+
+    final ReportDraft base =
+        existing ??
+            ReportDraft.empty();
+
+    await _deleteUserDraftMediaDirectory(
+      userId,
+    );
+
+    final ReportDraft updated =
+    base.copyWith(
+      evidenceImagePaths:
+      <String>[],
+      evidenceVideoPaths:
+      <String>[],
+      hasCloseUpEvidence:
+      false,
+      hasContextEvidence:
+      false,
+      updatedAt:
+      DateTime.now(),
+    );
+
+    await saveDraft(
+      userId: userId,
+      draft: updated,
+    );
+
+    return updated;
+  }
+
+  // ============================================================
+  // CLEAR COMPLETE DRAFT
+  //
+  // ONLY USE WHEN:
+  //
+  // 1. Citizen explicitly discards report
+  // OR
+  // 2. Report submission succeeds
+  //
+  // It also deletes persistent local draft evidence.
+  // ============================================================
+
   static Future<void> clearDraft({
     required String userId,
   }) async {
-    final prefs =
-    await SharedPreferences.getInstance();
+    final SharedPreferences prefs =
+    await SharedPreferences
+        .getInstance();
 
     await prefs.remove(
-      _keyForUser(userId),
+      _keyForUser(
+        userId,
+      ),
+    );
+
+    await _deleteUserDraftMediaDirectory(
+      userId,
     );
   }
 
-  /// Useful for displaying:
-  /// "Draft last updated 5 minutes ago".
+  // ============================================================
+  // LAST UPDATED
+  // ============================================================
+
   static Future<DateTime?> getLastUpdated({
     required String userId,
   }) async {
-    final draft =
+    final ReportDraft? draft =
     await loadDraft(
       userId: userId,
     );
 
     return draft?.updatedAt;
+  }
+
+  // ============================================================
+  // TOTAL EVIDENCE COUNT
+  // ============================================================
+
+  static Future<int> getEvidenceCount({
+    required String userId,
+  }) async {
+    final ReportDraft? draft =
+    await loadDraft(
+      userId: userId,
+    );
+
+    if (draft == null) {
+      return 0;
+    }
+
+    return draft.totalEvidenceCount;
+  }
+
+  // ============================================================
+  // GET DRAFT ROOT DIRECTORY
+  // ============================================================
+
+  static Future<Directory> _getUserDraftDirectory(
+      String userId,
+      ) async {
+    final Directory documents =
+    await getApplicationDocumentsDirectory();
+
+    final String safeUser =
+    _safeUserId(
+      userId,
+    );
+
+    final String path =
+        '${documents.path}'
+        '${Platform.pathSeparator}'
+        '$_draftMediaFolder'
+        '${Platform.pathSeparator}'
+        '$safeUser';
+
+    final Directory directory =
+    Directory(
+      path,
+    );
+
+    if (!await directory.exists()) {
+      await directory.create(
+        recursive: true,
+      );
+    }
+
+    return directory;
+  }
+
+  // ============================================================
+  // GET IMAGE / VIDEO DIRECTORY
+  // ============================================================
+
+  static Future<Directory> _getEvidenceDirectory({
+    required String userId,
+    required String evidenceType,
+  }) async {
+    final Directory userDirectory =
+    await _getUserDraftDirectory(
+      userId,
+    );
+
+    final String path =
+        '${userDirectory.path}'
+        '${Platform.pathSeparator}'
+        '$evidenceType';
+
+    final Directory directory =
+    Directory(
+      path,
+    );
+
+    if (!await directory.exists()) {
+      await directory.create(
+        recursive: true,
+      );
+    }
+
+    return directory;
+  }
+
+  // ============================================================
+  // REMOVE MISSING MEDIA PATHS
+  // ============================================================
+
+  static Future<ReportDraft>
+  _removeMissingMediaPaths(
+      ReportDraft draft,
+      ) async {
+    final List<String> validImages =
+    <String>[];
+
+    for (final String path
+    in draft.evidenceImagePaths) {
+      try {
+        if (await File(path).exists()) {
+          validImages.add(
+            path,
+          );
+        }
+      } catch (_) {
+        // Ignore invalid path.
+      }
+    }
+
+    final List<String> validVideos =
+    <String>[];
+
+    for (final String path
+    in draft.evidenceVideoPaths) {
+      try {
+        if (await File(path).exists()) {
+          validVideos.add(
+            path,
+          );
+        }
+      } catch (_) {
+        // Ignore invalid path.
+      }
+    }
+
+    if (validImages.length ==
+        draft
+            .evidenceImagePaths.length &&
+        validVideos.length ==
+            draft
+                .evidenceVideoPaths.length) {
+      return draft;
+    }
+
+    return draft.copyWith(
+      evidenceImagePaths:
+      validImages,
+      evidenceVideoPaths:
+      validVideos,
+      updatedAt:
+      DateTime.now(),
+    );
+  }
+
+  // ============================================================
+  // DELETE ONE DRAFT MEDIA FILE SAFELY
+  //
+  // Only files inside SmartCity's draft media directory
+  // are deleted.
+  //
+  // This prevents accidentally deleting a user's original
+  // gallery file.
+  // ============================================================
+
+  static Future<void> _deleteDraftMediaFile({
+    required String path,
+    required String userId,
+  }) async {
+    try {
+      final Directory userDirectory =
+      await _getUserDraftDirectory(
+        userId,
+      );
+
+      final String userRoot =
+          userDirectory.absolute.path;
+
+      final File file =
+      File(
+        path,
+      );
+
+      final String filePath =
+          file.absolute.path;
+
+      if (!filePath.startsWith(
+        userRoot,
+      )) {
+        // Never delete files outside the SmartCity
+        // draft directory.
+        return;
+      }
+
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {
+      // File cleanup should never crash report creation.
+    }
+  }
+
+  // ============================================================
+  // DELETE ALL DRAFT MEDIA FOR USER
+  // ============================================================
+
+  static Future<void>
+  _deleteUserDraftMediaDirectory(
+      String userId,
+      ) async {
+    try {
+      final Directory documents =
+      await getApplicationDocumentsDirectory();
+
+      final String safeUser =
+      _safeUserId(
+        userId,
+      );
+
+      final String path =
+          '${documents.path}'
+          '${Platform.pathSeparator}'
+          '$_draftMediaFolder'
+          '${Platform.pathSeparator}'
+          '$safeUser';
+
+      final Directory directory =
+      Directory(
+        path,
+      );
+
+      if (await directory.exists()) {
+        await directory.delete(
+          recursive: true,
+        );
+      }
+    } catch (_) {
+      // Draft cleanup should never crash logout/discard/submit.
+    }
+  }
+
+  // ============================================================
+  // FILE EXTENSION
+  // ============================================================
+
+  static String _fileExtension(
+      String path, {
+        required String fallback,
+      }) {
+    final String fileName =
+        path
+            .replaceAll(
+          '\\',
+          '/',
+        )
+            .split('/')
+            .last;
+
+    final int dotIndex =
+    fileName.lastIndexOf(
+      '.',
+    );
+
+    if (dotIndex <= 0 ||
+        dotIndex ==
+            fileName.length - 1) {
+      return fallback;
+    }
+
+    final String extension =
+    fileName
+        .substring(
+      dotIndex,
+    )
+        .toLowerCase();
+
+    // Avoid unreasonable / corrupted extensions.
+    if (extension.length > 10) {
+      return fallback;
+    }
+
+    return extension;
   }
 }
