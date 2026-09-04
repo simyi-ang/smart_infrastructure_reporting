@@ -2948,9 +2948,9 @@ class _CreateReportEvidenceScreenState
     });
   }
 
-  // ============================================================
-  // CONTINUE
-  // ============================================================
+// ============================================================
+// CONTINUE
+// ============================================================
 
   Future<void> continueToLocation() async {
     if (!hasEvidence) {
@@ -2975,7 +2975,6 @@ class _CreateReportEvidenceScreenState
     validateReportLocally(
       title:
       selectedTitle,
-
       description:
       selectedDescription,
     );
@@ -2988,13 +2987,11 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    final ReportFinalAiAnalysis?
-    result =
+    final ReportFinalAiAnalysis? result =
         finalAiAnalysis;
 
     if (result != null &&
-        result.reportSufficient ==
-            false &&
+        result.reportSufficient == false &&
         !aiSuggestionsApplied) {
       await showPoorReportDialog();
 
@@ -3040,12 +3037,23 @@ class _CreateReportEvidenceScreenState
           imageAnalyses.values.first;
     }
 
+    bool submitted =
+    false;
+
     try {
       if (!mounted) {
         return;
       }
 
-      await Navigator.push(
+      // ========================================================
+      // OPEN LOCATION
+      //
+      // TRUE means:
+      // Preview successfully submitted the report.
+      // ========================================================
+
+      final bool? result =
+      await Navigator.push<bool>(
         context,
         MaterialPageRoute(
           builder: (_) =>
@@ -3073,7 +3081,8 @@ class _CreateReportEvidenceScreenState
                 ),
 
                 imageAnalyses:
-                Map<String, ReportImageAiAnalysis>.from(
+                Map<String,
+                    ReportImageAiAnalysis>.from(
                   imageAnalyses,
                 ),
 
@@ -3085,8 +3094,41 @@ class _CreateReportEvidenceScreenState
               ),
         ),
       );
+
+      submitted =
+          result == true;
+
+      // ========================================================
+      // SUCCESSFUL SUBMISSION
+      //
+      // Do NOT restore the draft.
+      // Forward TRUE back to Details.
+      // ========================================================
+
+      if (submitted) {
+        if (!mounted) {
+          return;
+        }
+
+        Navigator.pop(
+          context,
+          true,
+        );
+
+        return;
+      }
     } finally {
-      if (mounted) {
+      // ========================================================
+      // NORMAL BACK NAVIGATION ONLY
+      //
+      // If the citizen simply returned from Location,
+      // restore the unfinished draft.
+      //
+      // If submission succeeded, NEVER restore it.
+      // ========================================================
+
+      if (!submitted &&
+          mounted) {
         setState(() {
           isNavigating =
           false;

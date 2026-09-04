@@ -1178,14 +1178,14 @@ class _CreateReportLocationScreenState
     // The next update will migrate ReportPreviewScreen itself.
     // ==========================================================
 
-    Navigator.push(
+    final bool? submitted =
+    await Navigator.push<bool>(
       context,
-
       MaterialPageRoute(
         builder: (_) =>
             ReportPreviewScreen(
               // ====================================================
-              // FINAL EFFECTIVE REPORT INFORMATION
+              // REPORT
               // ====================================================
 
               category:
@@ -1227,11 +1227,10 @@ class _CreateReportLocationScreenState
               // ====================================================
 
               address:
-              address,
+              addressController.text.trim(),
 
               landmark:
-              landmarkController.text
-                  .trim(),
+              landmarkController.text.trim(),
 
               latitude:
               latitude,
@@ -1250,9 +1249,6 @@ class _CreateReportLocationScreenState
 
               // ====================================================
               // LEGACY AI
-              //
-              // This keeps current Preview compiling until the next
-              // screen is upgraded.
               // ====================================================
 
               aiAnalysis:
@@ -1260,6 +1256,28 @@ class _CreateReportLocationScreenState
             ),
       ),
     );
+
+  // ==========================================================
+  // PREVIEW REPORTED SUCCESS
+  //
+  // Forward TRUE back to Evidence.
+  // Do NOT save the Location draft again.
+  // ==========================================================
+
+    if (submitted == true) {
+      if (!mounted) {
+        return;
+      }
+
+      _allowPop = true;
+
+      Navigator.pop(
+        context,
+        true,
+      );
+
+      return;
+    }
   }
 
   // ============================================================

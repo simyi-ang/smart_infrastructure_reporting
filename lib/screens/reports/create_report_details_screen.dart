@@ -83,6 +83,8 @@ class _CreateReportDetailsScreenState
 
   bool _isNavigating = false;
 
+  bool _reportSubmitted = false;
+
   /// Required because PopScope(canPop: false) would also block
   /// our own intentional Navigator.pop().
   bool _allowPop = false;
@@ -200,6 +202,7 @@ class _CreateReportDetailsScreenState
   // ============================================================
 
   @override
+  @override
   void didChangeAppLifecycleState(
       AppLifecycleState state,
       ) {
@@ -207,7 +210,12 @@ class _CreateReportDetailsScreenState
       state,
     );
 
-    if (_isRestoringDraft) {
+    // ==========================================================
+    // DO NOT SAVE AFTER SUCCESSFUL SUBMISSION
+    // ==========================================================
+
+    if (_isRestoringDraft ||
+        _reportSubmitted) {
       return;
     }
 
@@ -478,7 +486,12 @@ class _CreateReportDetailsScreenState
   // ============================================================
 
   void _scheduleDraftSave() {
-    if (_isRestoringDraft) {
+    // ==========================================================
+    // NEVER SCHEDULE A SAVE FOR A SUBMITTED REPORT
+    // ==========================================================
+
+    if (_isRestoringDraft ||
+        _reportSubmitted) {
       return;
     }
 
@@ -495,6 +508,15 @@ class _CreateReportDetailsScreenState
         Timer(
           _draftSaveDelay,
               () {
+            // --------------------------------------------------------
+            // Check again when timer actually fires.
+            // Submission may have happened during the 650ms delay.
+            // --------------------------------------------------------
+
+            if (_reportSubmitted) {
+              return;
+            }
+
             unawaited(
               _saveDraftImmediately(
                 showFailureMessage: false,
@@ -511,12 +533,41 @@ class _CreateReportDetailsScreenState
   Future<bool> _saveDraftImmediately({
     required bool showFailureMessage,
   }) {
+    // ==========================================================
+    // REPORT ALREADY SUBMITTED
+    //
+    // Do not place another save into the serialized queue.
+    // ==========================================================
+
+    if (_reportSubmitted) {
+      return Future<bool>.value(
+        true,
+      );
+    }
+
     final Completer<bool> completer =
     Completer<bool>();
 
     _saveQueue =
         _saveQueue.then(
               (_) async {
+            // --------------------------------------------------------
+            // IMPORTANT:
+            // This save may have been queued BEFORE submission.
+            //
+            // Check the submitted flag again when it actually starts.
+            // --------------------------------------------------------
+
+            if (_reportSubmitted) {
+              if (!completer.isCompleted) {
+                completer.complete(
+                  true,
+                );
+              }
+
+              return;
+            }
+
             final bool result =
             await _performDraftSave(
               showFailureMessage:
@@ -541,7 +592,6 @@ class _CreateReportDetailsScreenState
 
     return completer.future;
   }
-
   // ============================================================
   // ACTUAL SAVE OPERATION
   // ============================================================
@@ -549,8 +599,13 @@ class _CreateReportDetailsScreenState
   Future<bool> _performDraftSave({
     required bool showFailureMessage,
   }) async {
-    if (_isRestoringDraft) {
-      return false;
+    // ==========================================================
+    // NEVER SAVE AFTER SUCCESSFUL SUBMISSION
+    // ==========================================================
+
+    if (_isRestoringDraft ||
+        _reportSubmitted) {
+      return true;
     }
 
     final String? userId =
@@ -562,7 +617,8 @@ class _CreateReportDetailsScreenState
 
     _draftDebounce?.cancel();
 
-    if (mounted) {
+    if (mounted &&
+        !_reportSubmitted) {
       setState(() {
         _isSavingDraft = true;
         _draftSaveFailed = false;
@@ -570,24 +626,38 @@ class _CreateReportDetailsScreenState
     }
 
     try {
+      // ========================================================
+      // FIRST CHECK
+      // ========================================================
+
+      if (_reportSubmitted) {
+        return true;
+      }
+
       final ReportDraft? existing =
       await ReportDraftService.loadDraft(
         userId: userId,
       );
+
+      // ========================================================
+      // SECOND CHECK
+      //
+      // Submission might have completed while loadDraft()
+      // was waiting.
+      // ========================================================
+
+      if (_reportSubmitted) {
+        return true;
+      }
 
       final ReportDraft updatedDraft =
       _buildCurrentDraft(
         existing: existing,
       );
 
-      /*
-       * Avoid storing a completely empty report.
-       *
-       * Existing later-stage data is still preserved because
-       * updatedDraft.hasData will remain true.
-       */
       if (!updatedDraft.hasData) {
-        if (mounted) {
+        if (mounted &&
+            !_reportSubmitted) {
           setState(() {
             _isSavingDraft = false;
             _draftSaveFailed = false;
@@ -597,10 +667,39 @@ class _CreateReportDetailsScreenState
         return true;
       }
 
+      // ========================================================
+      // THIRD CHECK
+      //
+      // This is the most important check:
+      // never write after clearDraft().
+      // ========================================================
+
+      if (_reportSubmitted) {
+        return true;
+      }
+
       await ReportDraftService.saveDraft(
         userId: userId,
         draft: updatedDraft,
       );
+
+      // ========================================================
+      // SUBMISSION MAY HAVE HAPPENED DURING saveDraft()
+      //
+      // If so, remove the late save immediately.
+      // ========================================================
+
+      if (_reportSubmitted) {
+        try {
+          await ReportDraftService.clearDraft(
+            userId: userId,
+          );
+        } catch (_) {
+          // Preview / success cleanup will also attempt removal.
+        }
+
+        return true;
+      }
 
       if (!mounted) {
         return true;
@@ -610,12 +709,22 @@ class _CreateReportDetailsScreenState
         _isSavingDraft = false;
         _draftSaveFailed = false;
         _draftWasRestored = true;
+
         _lastDraftSavedAt =
             DateTime.now();
       });
 
       return true;
     } catch (_) {
+      // --------------------------------------------------------
+      // If submission already succeeded, a draft save failure
+      // is irrelevant and must not show a draft error.
+      // --------------------------------------------------------
+
+      if (_reportSubmitted) {
+        return true;
+      }
+
       if (!mounted) {
         return false;
       }
@@ -927,11 +1036,13 @@ class _CreateReportDetailsScreenState
     // SAVE BEFORE NAVIGATION
     // ----------------------------------------------------------
 
-    _isNavigating = true;
+    _isNavigating =
+    true;
 
     final bool saved =
     await _saveDraftImmediately(
-      showFailureMessage: true,
+      showFailureMessage:
+      true,
     );
 
     if (!mounted) {
@@ -939,7 +1050,9 @@ class _CreateReportDetailsScreenState
     }
 
     if (!saved) {
-      _isNavigating = false;
+      _isNavigating =
+      false;
+
       return;
     }
 
@@ -947,10 +1060,12 @@ class _CreateReportDetailsScreenState
         _currentUserId;
 
     if (userId == null) {
-      _isNavigating = false;
+      _isNavigating =
+      false;
 
       showMessage(
-        'Your login session is unavailable. Please sign in again.',
+        'Your login session is unavailable. '
+            'Please sign in again.',
       );
 
       return;
@@ -962,15 +1077,21 @@ class _CreateReportDetailsScreenState
       // --------------------------------------------------------
 
       await ReportDraftService.updateDraft(
-        userId: userId,
+        userId:
+        userId,
+
         category:
         selectedCategory!,
+
         priority:
         selectedPriority!,
+
         title:
         title,
+
         description:
         description,
+
         currentStep:
         2,
       );
@@ -979,10 +1100,12 @@ class _CreateReportDetailsScreenState
         return;
       }
 
-      _isNavigating = false;
+      _isNavigating =
+      false;
 
       showMessage(
-        'Unable to prepare the saved report for the next step.',
+        'Unable to prepare the saved report '
+            'for the next step.',
       );
 
       return;
@@ -992,17 +1115,25 @@ class _CreateReportDetailsScreenState
       return;
     }
 
-    await Navigator.push(
+    // ==========================================================
+    // OPEN EVIDENCE AND WAIT FOR SUBMISSION RESULT
+    // ==========================================================
+
+    final bool? submitted =
+    await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) =>
             CreateReportEvidenceScreen(
               category:
               selectedCategory!,
+
               priority:
               selectedPriority!,
+
               title:
               title,
+
               description:
               description,
             ),
@@ -1013,18 +1144,118 @@ class _CreateReportDetailsScreenState
       return;
     }
 
-    _isNavigating = false;
+    // ==========================================================
+    // REPORT SUCCESSFULLY SUBMITTED
+    //
+    // IMPORTANT:
+    // Do not restore the old Details draft.
+    // ==========================================================
 
-    /*
-     * Evidence may later update:
-     * - evidence paths
-     * - AI results
-     * - currentStep
-     *
-     * Reload when returning to Details.
-     */
+    if (submitted == true) {
+      // ==========================================================
+      // MARK SUBMITTED FIRST
+      //
+      // This MUST happen before clearDraft().
+      //
+      // From this exact moment:
+      // - lifecycle save stops
+      // - debounce save stops
+      // - queued save stops
+      // - actual save operation stops
+      // ==========================================================
+
+      _reportSubmitted = true;
+
+      // ----------------------------------------------------------
+      // Cancel any save timer that has not fired yet.
+      // ----------------------------------------------------------
+
+      _draftDebounce?.cancel();
+
+      // ----------------------------------------------------------
+      // Update local UI state.
+      // ----------------------------------------------------------
+
+      if (mounted) {
+        setState(() {
+          _isSavingDraft = false;
+          _draftSaveFailed = false;
+          _draftWasRestored = false;
+          _lastDraftSavedAt = null;
+        });
+      }
+
+      // ==========================================================
+      // WAIT FOR OLD QUEUED SAVE OPERATIONS
+      //
+      // They now see _reportSubmitted == true and exit without
+      // writing.
+      // ==========================================================
+
+      try {
+        await _saveQueue;
+      } catch (_) {
+        // Ignore an old draft-save failure after submission.
+      }
+
+      // ==========================================================
+      // FINAL DELETE
+      // ==========================================================
+
+      try {
+        await ReportDraftService.clearDraft(
+          userId: userId,
+        );
+
+        debugPrint(
+          '[REPORT DRAFT] '
+              'Submitted Details draft cleared.',
+        );
+      } catch (e) {
+        debugPrint(
+          '[REPORT DRAFT] '
+              'Unable to clear submitted Details draft: $e',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      // ==========================================================
+      // IMPORTANT
+      //
+      // Allow PopScope to close this screen directly.
+      // Otherwise PopScope can invoke _leaveScreenSafely(), which
+      // is designed to save drafts before leaving.
+      // ==========================================================
+
+      setState(() {
+        _allowPop = true;
+        _isNavigating = false;
+      });
+
+      Navigator.pop(
+        context,
+        true,
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // NORMAL RETURN FROM EVIDENCE
+    //
+    // Report was NOT submitted.
+    // Keep and restore the unfinished draft.
+    // ==========================================================
+
+    _isNavigating =
+    false;
+
     await _restoreDraft(
-      showRestoreNotice: false,
+      showRestoreNotice:
+      false,
     );
   }
 

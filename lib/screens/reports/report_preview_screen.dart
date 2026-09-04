@@ -587,9 +587,12 @@ class _ReportPreviewScreenState
 
     setState(() {
       submitting = true;
+
       uploadProgress = 0.02;
+
       uploadMessage =
       'Checking internet connection...';
+
       submissionError = null;
     });
 
@@ -607,6 +610,7 @@ class _ReportPreviewScreenState
 
       setState(() {
         uploadProgress = 0.05;
+
         uploadMessage =
         'Preparing submission...';
       });
@@ -614,13 +618,15 @@ class _ReportPreviewScreenState
       // ========================================================
       // SUBMIT REPORT
       //
-      // ReportService now supports:
-      // - photo only
-      // - video only
-      // - photo + video
+      // Supports:
+      // - Photo only
+      // - Video only
+      // - Photo + Video
+      // - Image AI analysis
+      // - Final combined AI analysis
       // ========================================================
 
-      final result =
+      final ReportSubmissionResult result =
       await reportService.submitReport(
         title:
         widget.title,
@@ -686,7 +692,10 @@ class _ReportPreviewScreenState
       // ========================================================
       // REMOTE SUBMISSION SUCCEEDED
       //
-      // ONLY NOW CLEAR LOCAL DRAFT
+      // IMPORTANT:
+      // Only after the report, photos/videos and database rows
+      // have been created successfully should the local draft
+      // be removed.
       // ========================================================
 
       final String? userId =
@@ -698,11 +707,47 @@ class _ReportPreviewScreenState
             userId:
             userId,
           );
-        } catch (_) {
-          // Remote submission succeeded.
-          // Local cleanup failure must not change that success.
+
+          debugPrint(
+            '[REPORT SUBMIT] '
+                'Submitted draft cleared successfully.',
+          );
+        } catch (e) {
+          // ====================================================
+          // DO NOT FAIL THE REPORT HERE
+          //
+          // The remote submission already succeeded.
+          //
+          // Local cleanup failure should not show the user that
+          // their successfully submitted report failed.
+          // ====================================================
+
+          debugPrint(
+            '[REPORT SUBMIT] '
+                'Unable to clear local draft after successful '
+                'submission: $e',
+          );
         }
       }
+
+      if (!mounted) {
+        return;
+      }
+
+      // ========================================================
+      // SUCCESS STATE
+      // ========================================================
+
+      setState(() {
+        uploadProgress =
+        1.0;
+
+        uploadMessage =
+        'Report submitted successfully.';
+
+        submissionError =
+        null;
+      });
 
       // ========================================================
       // SUCCESS DIALOG
@@ -717,132 +762,269 @@ class _ReportPreviewScreenState
 
         builder:
             (
-            dialogContext,
+            BuildContext dialogContext,
             ) {
-          return AlertDialog(
-            backgroundColor:
-            AppColors.surface,
+          return PopScope(
+            canPop:
+            false,
 
-            title:
-            const Row(
-              children: [
-                Icon(
-                  Icons.check_circle_outline,
-                  color:
-                  AppColors.success,
-                ),
+            child:
+            AlertDialog(
+              backgroundColor:
+              AppColors.surface,
 
-                SizedBox(
-                  width:
-                  10,
-                ),
-
-                Text(
-                  'Report Submitted',
-                ),
-              ],
-            ),
-
-            content:
-            Column(
-              mainAxisSize:
-              MainAxisSize.min,
-
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
-
-              children: [
-                const Text(
-                  'Your infrastructure report was submitted successfully.',
-                ),
-
-                const SizedBox(
-                  height:
-                  18,
-                ),
-
-                const Text(
-                  'REFERENCE NUMBER',
-                  style:
-                  TextStyle(
+              title:
+              const Row(
+                children: [
+                  Icon(
+                    Icons.check_circle_outline,
                     color:
-                    AppColors.textSecondary,
-                    fontSize:
+                    AppColors.success,
+                  ),
+
+                  SizedBox(
+                    width:
                     10,
                   ),
-                ),
 
-                const SizedBox(
-                  height:
-                  5,
-                ),
-
-                SelectableText(
-                  result.referenceNumber,
-                  style:
-                  const TextStyle(
-                    color:
-                    AppColors.primary,
-                    fontSize:
-                    18,
-                    fontWeight:
-                    FontWeight.bold,
-                  ),
-                ),
-
-                if (widget.latitude != null &&
-                    widget.longitude != null) ...[
-                  const SizedBox(
-                    height:
-                    16,
-                  ),
-
-                  const Text(
-                    'GPS LOCATION',
-                    style:
-                    TextStyle(
-                      color:
-                      AppColors.textSecondary,
-                      fontSize:
-                      10,
-                    ),
-                  ),
-
-                  const SizedBox(
-                    height:
-                    4,
-                  ),
-
-                  Text(
-                    '${widget.latitude!.toStringAsFixed(6)}, '
-                        '${widget.longitude!.toStringAsFixed(6)}',
-                    style:
-                    const TextStyle(
-                      color:
-                      AppColors.success,
-                      fontSize:
-                      10,
+                  Expanded(
+                    child:
+                    Text(
+                      'Report Submitted',
                     ),
                   ),
                 ],
-              ],
-            ),
+              ),
 
-            actions: [
-              ElevatedButton(
-                onPressed:
-                    () {
-                  Navigator.pop(
-                    dialogContext,
-                  );
-                },
-
+              content:
+              SingleChildScrollView(
                 child:
-                const Text(
-                  'Done',
+                Column(
+                  mainAxisSize:
+                  MainAxisSize.min,
+
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
+                  children: [
+                    const Text(
+                      'Your infrastructure report was submitted successfully.',
+                    ),
+
+                    const SizedBox(
+                      height:
+                      18,
+                    ),
+
+                    const Text(
+                      'REFERENCE NUMBER',
+                      style:
+                      TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        10,
+
+                        fontWeight:
+                        FontWeight.w600,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      5,
+                    ),
+
+                    SelectableText(
+                      result.referenceNumber,
+
+                      style:
+                      const TextStyle(
+                        color:
+                        AppColors.primary,
+
+                        fontSize:
+                        18,
+
+                        fontWeight:
+                        FontWeight.bold,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      14,
+                    ),
+
+                    Container(
+                      width:
+                      double.infinity,
+
+                      padding:
+                      const EdgeInsets.all(
+                        12,
+                      ),
+
+                      decoration:
+                      BoxDecoration(
+                        color:
+                        AppColors.success
+                            .withOpacity(
+                          0.07,
+                        ),
+
+                        borderRadius:
+                        BorderRadius.circular(
+                          12,
+                        ),
+
+                        border:
+                        Border.all(
+                          color:
+                          AppColors.success
+                              .withOpacity(
+                            0.35,
+                          ),
+                        ),
+                      ),
+
+                      child:
+                      const Row(
+                        crossAxisAlignment:
+                        CrossAxisAlignment.start,
+
+                        children: [
+                          Icon(
+                            Icons
+                                .check_circle_outline_rounded,
+
+                            color:
+                            AppColors.success,
+
+                            size:
+                            18,
+                          ),
+
+                          SizedBox(
+                            width:
+                            8,
+                          ),
+
+                          Expanded(
+                            child:
+                            Text(
+                              'Your saved draft has been removed because this report is now submitted.',
+                              style:
+                              TextStyle(
+                                color:
+                                AppColors.textSecondary,
+
+                                fontSize:
+                                10,
+
+                                height:
+                                1.4,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    if (
+                    widget.latitude !=
+                        null &&
+                        widget.longitude !=
+                            null
+                    ) ...[
+                      const SizedBox(
+                        height:
+                        16,
+                      ),
+
+                      const Text(
+                        'GPS LOCATION',
+                        style:
+                        TextStyle(
+                          color:
+                          AppColors.textSecondary,
+
+                          fontSize:
+                          10,
+
+                          fontWeight:
+                          FontWeight.w600,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height:
+                        4,
+                      ),
+
+                      Text(
+                        '${widget.latitude!.toStringAsFixed(6)}, '
+                            '${widget.longitude!.toStringAsFixed(6)}',
+
+                        style:
+                        const TextStyle(
+                          color:
+                          AppColors.success,
+
+                          fontSize:
+                          10,
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(
+                      height:
+                      12,
+                    ),
+
+                    Text(
+                      widget.evidenceImages.isEmpty
+                          ? '${widget.evidenceVideos.length} video evidence file(s) submitted.'
+                          : widget.evidenceVideos.isEmpty
+                          ? '${widget.evidenceImages.length} photo evidence file(s) submitted.'
+                          : '${widget.evidenceImages.length} photo(s) and '
+                          '${widget.evidenceVideos.length} video(s) submitted.',
+
+                      style:
+                      const TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        10,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
+
+              actions: [
+                ElevatedButton.icon(
+                  onPressed:
+                      () {
+                    Navigator.pop(
+                      dialogContext,
+                    );
+                  },
+
+                  icon:
+                  const Icon(
+                    Icons.done_rounded,
+                  ),
+
+                  label:
+                  const Text(
+                    'Done',
+                  ),
+                ),
+              ],
+            ),
           );
         },
       );
@@ -851,13 +1033,22 @@ class _ReportPreviewScreenState
         return;
       }
 
-      Navigator.of(
+      // ========================================================
+      // RETURN TO ROOT / HOME
+      //
+      // The active draft has already been cleared.
+      //
+      // Opening Create Report again should therefore start a
+      // completely new report instead of showing the old report.
+      // ========================================================
+
+      // ========================================================
+      // TELL LOCATION SCREEN THAT SUBMISSION SUCCEEDED
+      // ========================================================
+
+      Navigator.pop(
         context,
-      ).popUntil(
-            (
-            route,
-            ) =>
-        route.isFirst,
+        true,
       );
     } catch (e) {
       if (!mounted) {
@@ -873,7 +1064,14 @@ class _ReportPreviewScreenState
       );
 
       // ========================================================
-      // FAILURE — KEEP THE DRAFT
+      // SUBMISSION FAILED
+      //
+      // IMPORTANT:
+      //
+      // DO NOT CLEAR DRAFT.
+      //
+      // Details + photos + videos + location remain available
+      // for the citizen to retry.
       // ========================================================
 
       setState(() {
@@ -898,6 +1096,12 @@ class _ReportPreviewScreenState
           content:
           Text(
             message,
+          ),
+
+          duration:
+          const Duration(
+            seconds:
+            6,
           ),
         ),
       );
