@@ -7,6 +7,7 @@ import '../../models/report_draft.dart';
 import '../../services/report_draft_service.dart';
 import '../../theme/app_colors.dart';
 import 'create_report_evidence_screen.dart';
+import 'voice_speech_test_screen.dart';
 
 // ================================================================
 // CREATE REPORT DETAILS SCREEN
@@ -1157,7 +1158,7 @@ class _CreateReportDetailsScreenState
       //
       // This MUST happen before clearDraft().
       //
-      // From this exact moment:
+      // From this exact moment:flutt
       // - lifecycle save stops
       // - debounce save stops
       // - queued save stops
@@ -1734,6 +1735,28 @@ class _CreateReportDetailsScreenState
                                 (
                                 value,
                                 ) {
+                              // ============================================================
+                              // PHASE 1A — VOICE TEST
+                              // ============================================================
+
+                              if (value ==
+                                  'voice_test') {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder:
+                                        (_) =>
+                                    const VoiceSpeechTestScreen(),
+                                  ),
+                                );
+
+                                return;
+                              }
+
+                              // ============================================================
+                              // DISCARD REPORT
+                              // ============================================================
+
                               if (value ==
                                   'discard') {
                                 _confirmDiscardDraft();
@@ -1745,23 +1768,77 @@ class _CreateReportDetailsScreenState
                                 context,
                                 ) {
                               return const [
+                                // =========================================================
+                                // VOICE TEST
+                                // =========================================================
+
+                                PopupMenuItem<String>(
+                                  value:
+                                  'voice_test',
+
+                                  child:
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.mic_none_rounded,
+
+                                        color:
+                                        AppColors.primary,
+
+                                        size:
+                                        20,
+                                      ),
+
+                                      SizedBox(
+                                        width:
+                                        10,
+                                      ),
+
+                                      Text(
+                                        'Voice Test',
+
+                                        style:
+                                        TextStyle(
+                                          color:
+                                          AppColors.primary,
+
+                                          fontWeight:
+                                          FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // =========================================================
+                                // DISCARD REPORT
+                                // =========================================================
+
                                 PopupMenuItem<String>(
                                   value:
                                   'discard',
+
                                   child:
                                   Row(
                                     children: [
                                       Icon(
                                         Icons.delete_outline,
+
                                         color:
                                         Colors.orangeAccent,
-                                        size: 20,
+
+                                        size:
+                                        20,
                                       ),
+
                                       SizedBox(
-                                        width: 10,
+                                        width:
+                                        10,
                                       ),
+
                                       Text(
                                         'Discard Report',
+
                                         style:
                                         TextStyle(
                                           color:

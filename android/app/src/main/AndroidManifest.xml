@@ -45,6 +45,26 @@
     <uses-permission
         android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- ===================================================== -->
+    <!-- MICROPHONE / BLUETOOTH AUDIO                          -->
+    <!-- Used by Voice Intelligence for phone microphone and   -->
+    <!-- supported Bluetooth headset microphone input.         -->
+    <!-- ===================================================== -->
+
+    <uses-permission
+        android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Android 11 and below -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH" />
+
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN" />
+
+    <!-- Android 12+ -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT" />
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
@@ -189,11 +209,23 @@
 
 
     <!-- ===================================================== -->
-    <!-- PROCESS TEXT                                          -->
-    <!-- Used by Flutter for Android text-processing intents.  -->
+    <!-- ANDROID INTENT QUERIES                                -->
+    <!-- ===================================================== -->
+    <!--                                                       -->
+    <!-- PROCESS_TEXT                                          -->
+    <!-- Required by Flutter text-processing features.         -->
+    <!--                                                       -->
+    <!-- RecognitionService                                    -->
+    <!-- Required by Phase 1A Voice Intelligence so Android    -->
+    <!-- can discover the installed speech recognition service.-->
     <!-- ===================================================== -->
 
     <queries>
+
+        <!-- ================================================= -->
+        <!-- FLUTTER PROCESS TEXT                              -->
+        <!-- ================================================= -->
+
         <intent>
             <action
                 android:name="android.intent.action.PROCESS_TEXT" />
@@ -201,6 +233,17 @@
             <data
                 android:mimeType="text/plain" />
         </intent>
+
+
+        <!-- ================================================= -->
+        <!-- PHASE 1A — SPEECH RECOGNITION                    -->
+        <!-- ================================================= -->
+
+        <intent>
+            <action
+                android:name="android.speech.RecognitionService" />
+        </intent>
+
     </queries>
 
 </manifest>
