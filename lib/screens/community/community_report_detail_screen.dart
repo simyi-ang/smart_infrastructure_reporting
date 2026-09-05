@@ -430,6 +430,367 @@ class _CommunityReportDetailScreenState
   }
 
   // ==========================================================================
+// COMMUNITY MEANINGFUL TEXT VALIDATION
+//
+// Used for:
+// - community evidence descriptions
+// - community observations
+// - future community comments
+//
+// Goals:
+// 1. Reject empty / very short text.
+// 2. Reject only numbers or symbols.
+// 3. Reject repeated-character nonsense.
+// 4. Reject obvious placeholder/test text.
+// 5. Require reasonable language content.
+// 6. Check basic relevance to the infrastructure report.
+//
+// This is a client-side safety/quality gate.
+// It does NOT claim full semantic understanding.
+// ==========================================================================
+
+  String? _validateCommunityText(
+      String? value, {
+        required String fieldName,
+        bool requireReportRelevance = true,
+      }) {
+    final String text =
+        value?.trim() ?? '';
+
+    if (text.isEmpty) {
+      return 'Please enter a meaningful $fieldName.';
+    }
+
+    if (text.length < 8) {
+      return 'Please provide more detail about what you observed.';
+    }
+
+    if (text.length > 250) {
+      return '$fieldName must be 250 characters or fewer.';
+    }
+
+    // ----------------------------------------------------------
+    // Must contain real language characters.
+    // Supports Latin + Chinese + Japanese + Korean.
+    // ----------------------------------------------------------
+
+    final bool hasLanguageCharacter =
+    RegExp(
+      r'[A-Za-zÀ-ÖØ-öø-ÿĀ-ž'
+      r'\u3040-\u30FF'
+      r'\u3400-\u4DBF'
+      r'\u4E00-\u9FFF'
+      r'\uAC00-\uD7AF]',
+      unicode: true,
+    ).hasMatch(
+      text,
+    );
+
+    if (!hasLanguageCharacter) {
+      return '$fieldName must contain meaningful words.';
+    }
+
+    // ----------------------------------------------------------
+    // Reject only numbers / punctuation.
+    // ----------------------------------------------------------
+
+    if (RegExp(
+      r'^[0-9\s.,!?@#$%^&*()_+\-=/\\]+$',
+      unicode: true,
+    ).hasMatch(
+      text,
+    )) {
+      return '$fieldName cannot contain only numbers or symbols.';
+    }
+
+    // ----------------------------------------------------------
+    // Repeated character nonsense:
+    //
+    // aaaaaaa
+    // !!!!!!!
+    // xxxxxxxx
+    // ----------------------------------------------------------
+
+    final String compact =
+    text.replaceAll(
+      RegExp(r'\s+'),
+      '',
+    );
+
+    if (compact.length >= 5 &&
+        RegExp(
+          r'^(.)\1+$',
+          caseSensitive: false,
+          unicode: true,
+        ).hasMatch(
+          compact,
+        )) {
+      return 'Please enter a meaningful observation.';
+    }
+
+    if (RegExp(
+      r'(.)\1{5,}',
+      caseSensitive: false,
+      unicode: true,
+    ).hasMatch(
+      text,
+    )) {
+      return 'The text contains too many repeated characters.';
+    }
+
+    // ----------------------------------------------------------
+    // Common meaningless / testing phrases.
+    // ----------------------------------------------------------
+
+    final String normalized =
+    text
+        .toLowerCase()
+        .replaceAll(
+      RegExp(
+        r'[^a-z0-9\s]',
+      ),
+      ' ',
+    )
+        .replaceAll(
+      RegExp(r'\s+'),
+      ' ',
+    )
+        .trim();
+
+    const Set<String> blockedExact =
+    <String>{
+      'test',
+      'testing',
+      'hello',
+      'hello world',
+      'hi',
+      'good',
+      'nice',
+      'ok',
+      'okay',
+      'yes',
+      'no',
+      'nothing',
+      'same',
+      'abc',
+      'abcd',
+      'asdf',
+      'asdfgh',
+      'qwerty',
+      'good by to you all',
+    };
+
+    if (blockedExact.contains(
+      normalized,
+    )) {
+      return 'Please describe the infrastructure condition, '
+          'not a general or test message.';
+    }
+
+    // ----------------------------------------------------------
+    // Excessive duplicate words:
+    //
+    // broken broken broken broken
+    // road road road road
+    // ----------------------------------------------------------
+
+    final List<String> words =
+    normalized
+        .split(' ')
+        .where(
+          (word) =>
+      word.isNotEmpty,
+    )
+        .toList();
+
+    if (words.length >= 4) {
+      final Set<String> unique =
+      words.toSet();
+
+      if (unique.length == 1) {
+        return 'Please provide a clearer and more detailed observation.';
+      }
+    }
+
+    // ----------------------------------------------------------
+    // CJK languages do not require normal whitespace word count.
+    // ----------------------------------------------------------
+
+    final bool containsCjk =
+    RegExp(
+      r'[\u3040-\u30FF'
+      r'\u3400-\u4DBF'
+      r'\u4E00-\u9FFF'
+      r'\uAC00-\uD7AF]',
+      unicode: true,
+    ).hasMatch(
+      text,
+    );
+
+    if (!containsCjk &&
+        words.length < 3) {
+      return 'Please describe what you can actually observe '
+          'using at least a few meaningful words.';
+    }
+
+    // ----------------------------------------------------------
+    // BASIC REPORT RELEVANCE
+    //
+    // Prevent comments completely unrelated to the issue.
+    //
+    // This is deliberately conservative:
+    // if uncertain, it allows the text rather than incorrectly
+    // rejecting multilingual or uncommon descriptions.
+    // ----------------------------------------------------------
+
+    if (requireReportRelevance &&
+        !_appearsRelevantToCurrentReport(
+          text,
+        )) {
+      return 'This description does not appear related to the '
+          'infrastructure issue. Please describe what the evidence shows.';
+    }
+
+    return null;
+  }
+
+  bool _appearsRelevantToCurrentReport(
+      String text,
+      ) {
+    final CommunityReport? current =
+        report;
+
+    if (current == null) {
+      return true;
+    }
+
+    final String input =
+    _normalizeCommunityText(
+      text,
+    );
+
+    final String reportContext =
+    _normalizeCommunityText(
+      '${current.title} '
+          '${current.category} '
+          '${current.description ?? ''} '
+          '${current.address}',
+    );
+
+    final Set<String> inputWords =
+    input
+        .split(' ')
+        .where(
+          (word) =>
+      word.length >= 3,
+    )
+        .toSet();
+
+    final Set<String> contextWords =
+    reportContext
+        .split(' ')
+        .where(
+          (word) =>
+      word.length >= 3,
+    )
+        .toSet();
+
+    // Direct report-context overlap.
+    if (inputWords
+        .intersection(
+      contextWords,
+    )
+        .isNotEmpty) {
+      return true;
+    }
+
+    // Infrastructure observation vocabulary.
+    const Set<String> observationWords =
+    <String>{
+      'road',
+      'pothole',
+      'hole',
+      'crack',
+      'damaged',
+      'damage',
+      'broken',
+      'street',
+      'light',
+      'lamp',
+      'pole',
+      'wire',
+      'wires',
+      'exposed',
+      'spark',
+      'sparking',
+      'dark',
+      'drain',
+      'drainage',
+      'blocked',
+      'clogged',
+      'water',
+      'flood',
+      'flooding',
+      'leak',
+      'facility',
+      'sign',
+      'barrier',
+      'danger',
+      'unsafe',
+      'hazard',
+      'worse',
+      'improved',
+      'fixed',
+      'repair',
+      'still',
+      'condition',
+    };
+
+    if (inputWords
+        .intersection(
+      observationWords,
+    )
+        .isNotEmpty) {
+      return true;
+    }
+
+    // Do not aggressively reject multilingual CJK text.
+    if (RegExp(
+      r'[\u3040-\u30FF'
+      r'\u3400-\u4DBF'
+      r'\u4E00-\u9FFF'
+      r'\uAC00-\uD7AF]',
+      unicode: true,
+    ).hasMatch(
+      text,
+    )) {
+      return true;
+    }
+
+    return false;
+  }
+
+  String _normalizeCommunityText(
+      String value,
+      ) {
+    return value
+        .toLowerCase()
+        .replaceAll(
+      RegExp(
+        r'[^a-z0-9\s]',
+      ),
+      ' ',
+    )
+        .replaceAll(
+      RegExp(
+        r'\s+',
+      ),
+      ' ',
+    )
+        .trim();
+  }
+
+  // ==========================================================================
   // ADD COMMUNITY EVIDENCE
   // ==========================================================================
 
@@ -694,94 +1055,237 @@ class _CommunityReportDetailScreenState
   }
 
   // ==========================================================================
-  // SAFE NOTE DIALOG
+  // MEANINGFUL COMMUNITY EVIDENCE DESCRIPTION
+  //
+  // Description is required because community evidence should explain:
+  //
+  // - what is visible,
+  // - whether the issue still exists,
+  // - whether it became worse/better,
+  // - or what safety concern is visible.
+  //
+  // Submission is blocked until the text passes quality validation.
   // ==========================================================================
 
   Future<String?> _askNote() async {
     String note =
         '';
 
+    String? validationError;
+
     final String? result =
     await showDialog<String>(
       context:
       context,
+
       barrierDismissible:
       false,
+
       builder:
           (
           dialogContext,
           ) {
-        return AlertDialog(
-          backgroundColor:
-          AppColors.surface,
-          title:
-          const Text(
-            'Evidence Description',
-          ),
-          content:
-          TextFormField(
-            initialValue:
-            '',
-            autofocus:
-            true,
-            maxLength:
-            250,
-            minLines:
-            3,
-            maxLines:
-            5,
-            textCapitalization:
-            TextCapitalization.sentences,
-            textInputAction:
-            TextInputAction.newline,
-            onChanged:
-                (
-                value,
-                ) {
-              note =
-                  value;
-            },
-            decoration:
-            const InputDecoration(
-              hintText:
-              'Optional: describe what this photo or video shows now.',
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed:
-                  () {
-                FocusScope.of(
-                  dialogContext,
-                ).unfocus();
+        return StatefulBuilder(
+          builder:
+              (
+              context,
+              setDialogState,
+              ) {
+            return AlertDialog(
+              backgroundColor:
+              AppColors.surface,
 
-                Navigator.pop(
-                  dialogContext,
-                );
-              },
-              child:
-              const Text(
-                'Cancel',
-              ),
-            ),
-            ElevatedButton(
-              onPressed:
-                  () {
-                FocusScope.of(
-                  dialogContext,
-                ).unfocus();
+              title:
+              const Row(
+                children: [
+                  Icon(
+                    Icons.rate_review_outlined,
+                    color:
+                    AppColors.primary,
+                  ),
 
-                Navigator.pop(
-                  dialogContext,
-                  note.trim(),
-                );
-              },
-              child:
-              const Text(
-                'Add Evidence',
+                  SizedBox(
+                    width:
+                    9,
+                  ),
+
+                  Expanded(
+                    child:
+                    Text(
+                      'Describe Your Evidence',
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
+
+              content:
+              SingleChildScrollView(
+                child:
+                Column(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.start,
+
+                  children: [
+                    const Text(
+                      'Explain what the photo or video shows about '
+                          'this infrastructure issue.',
+
+                      style:
+                      TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        10,
+
+                        height:
+                        1.4,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      12,
+                    ),
+
+                    TextFormField(
+                      autofocus:
+                      true,
+
+                      maxLength:
+                      250,
+
+                      minLines:
+                      3,
+
+                      maxLines:
+                      5,
+
+                      textCapitalization:
+                      TextCapitalization.sentences,
+
+                      textInputAction:
+                      TextInputAction.newline,
+
+                      onChanged:
+                          (
+                          value,
+                          ) {
+                        note =
+                            value;
+
+                        if (validationError !=
+                            null) {
+                          setDialogState(
+                                () {
+                              validationError =
+                              null;
+                            },
+                          );
+                        }
+                      },
+
+                      decoration:
+                      InputDecoration(
+                        hintText:
+                        'Example: The street light is still broken '
+                            'and exposed wires are visible near the pole.',
+
+                        errorText:
+                        validationError,
+
+                        errorMaxLines:
+                        3,
+
+                        helperText:
+                        'Describe the current condition, change, '
+                            'or visible safety concern.',
+
+                        helperMaxLines:
+                        2,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      6,
+                    ),
+
+                    const _MeaningfulTextGuide(),
+                  ],
+                ),
+              ),
+
+              actions: [
+                TextButton(
+                  onPressed:
+                      () {
+                    FocusScope.of(
+                      dialogContext,
+                    ).unfocus();
+
+                    Navigator.pop(
+                      dialogContext,
+                    );
+                  },
+
+                  child:
+                  const Text(
+                    'Cancel',
+                  ),
+                ),
+
+                ElevatedButton.icon(
+                  onPressed:
+                      () {
+                    final String? error =
+                    _validateCommunityText(
+                      note,
+
+                      fieldName:
+                      'evidence description',
+
+                      requireReportRelevance:
+                      true,
+                    );
+
+                    if (error !=
+                        null) {
+                      setDialogState(
+                            () {
+                          validationError =
+                              error;
+                        },
+                      );
+
+                      return;
+                    }
+
+                    FocusScope.of(
+                      dialogContext,
+                    ).unfocus();
+
+                    Navigator.pop(
+                      dialogContext,
+                      note.trim(),
+                    );
+                  },
+
+                  icon:
+                  const Icon(
+                    Icons.check_circle_outline,
+                    size:
+                    17,
+                  ),
+
+                  label:
+                  const Text(
+                    'Use Description',
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -3584,6 +4088,108 @@ class _FriendlyErrorState
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _MeaningfulTextGuide
+    extends StatelessWidget {
+  const _MeaningfulTextGuide();
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return Container(
+      width:
+      double.infinity,
+
+      padding:
+      const EdgeInsets.all(
+        10,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        AppColors.primary.withOpacity(
+          0.055,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          10,
+        ),
+
+        border:
+        Border.all(
+          color:
+          AppColors.primary.withOpacity(
+            0.20,
+          ),
+        ),
+      ),
+
+      child:
+      const Column(
+        crossAxisAlignment:
+        CrossAxisAlignment.start,
+
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.lightbulb_outline,
+                color:
+                AppColors.primary,
+                size:
+                15,
+              ),
+
+              SizedBox(
+                width:
+                6,
+              ),
+
+              Text(
+                'Useful descriptions include:',
+
+                style:
+                TextStyle(
+                  color:
+                  Colors.white,
+                  fontSize:
+                  9,
+                  fontWeight:
+                  FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+
+          SizedBox(
+            height:
+            6,
+          ),
+
+          Text(
+            '• What is visibly damaged\n'
+                '• Whether the issue became worse or improved\n'
+                '• A visible safety concern\n'
+                '• What changed since the earlier report',
+
+            style:
+            TextStyle(
+              color:
+              AppColors.textSecondary,
+              fontSize:
+              8,
+              height:
+              1.45,
+            ),
+          ),
+        ],
       ),
     );
   }
