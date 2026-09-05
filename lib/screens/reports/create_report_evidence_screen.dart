@@ -3103,37 +3103,995 @@ class _CreateReportEvidenceScreenState
   }
 
 // ============================================================
-// CONTINUE
+// SEMANTIC QUALITY GATE
+//
+// PURPOSE:
+//
+// The citizen must NOT reach Location when the available
+// evidence intelligence indicates that:
+//
+// - title is semantically unclear
+// - description is semantically unclear
+// - category strongly conflicts with evidence
+// - report is insufficient
+// - combined AI recommends editing
+// - video AI indicates a category mismatch / poor report
+//
+// IMPORTANT:
+//
+// AI NEVER silently changes citizen information.
+//
+// If a mandatory issue exists, citizen must explicitly:
+// 1. Re-edit Report
+// OR
+// 2. Apply AI
+//
+// After correction, citizen presses Continue again.
+// ============================================================
+
+// ============================================================
+// NORMALIZE CATEGORY
+//
+// Makes category comparison safe against:
+// Road Damage
+// road damage
+// road_damage
+// ROAD-DAMAGE
+// ============================================================
+
+  String _normalizeCategoryForComparison(
+      String? value,
+      ) {
+    return (value ?? '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(
+      RegExp(
+        r'[\s_-]+',
+      ),
+      '',
+    );
+  }
+
+// ============================================================
+// SAME CATEGORY?
+// ============================================================
+
+  bool _sameCategory(
+      String? first,
+      String? second,
+      ) {
+    final String a =
+    _normalizeCategoryForComparison(
+      first,
+    );
+
+    final String b =
+    _normalizeCategoryForComparison(
+      second,
+    );
+
+    if (a.isEmpty ||
+        b.isEmpty) {
+      return true;
+    }
+
+    return a == b;
+  }
+
+// ============================================================
+// FINAL IMAGE / COMBINED AI CATEGORY MISMATCH
+// ============================================================
+
+  bool _hasFinalCategoryMismatch(
+      ReportFinalAiAnalysis result,
+      ) {
+    if (result.issueDetected !=
+        true) {
+      return false;
+    }
+
+    final String aiCategory =
+        result.category
+            ?.trim() ??
+            '';
+
+    if (aiCategory.isEmpty) {
+      return false;
+    }
+
+    return !_sameCategory(
+      selectedCategory,
+      aiCategory,
+    );
+  }
+
+// ============================================================
+// VIDEO CATEGORY MISMATCH
+// ============================================================
+
+  bool _hasVideoCategoryMismatch(
+      ReportVideoAiAnalysis result,
+      ) {
+    // Prefer explicit AI consistency result.
+    if (result.categoryMatchesUser ==
+        false) {
+      return true;
+    }
+
+    if (result.issueDetected !=
+        true) {
+      return false;
+    }
+
+    final String aiCategory =
+        result.category
+            ?.trim() ??
+            '';
+
+    if (aiCategory.isEmpty) {
+      return false;
+    }
+
+    return !_sameCategory(
+      selectedCategory,
+      aiCategory,
+    );
+  }
+
+// ============================================================
+// DOES FINAL AI REQUIRE MANDATORY CORRECTION?
+// ============================================================
+
+  bool _finalAiRequiresCorrection(
+      ReportFinalAiAnalysis result,
+      ) {
+    // Citizen already explicitly accepted the AI correction.
+    //
+    // Local validation still runs before this method, so applying
+    // AI does not bypass basic quality rules.
+    if (aiSuggestionsApplied) {
+      return false;
+    }
+
+    if (result.titleMeaningful ==
+        false) {
+      return true;
+    }
+
+    if (result.descriptionMeaningful ==
+        false) {
+      return true;
+    }
+
+    if (result.reportSufficient ==
+        false) {
+      return true;
+    }
+
+    if (_hasFinalCategoryMismatch(
+      result,
+    )) {
+      return true;
+    }
+
+    if (result.shouldSuggestReportEdit) {
+      return true;
+    }
+
+    return false;
+  }
+
+// ============================================================
+// DOES VIDEO AI REQUIRE MANDATORY CORRECTION?
+// ============================================================
+
+  bool _videoAiRequiresCorrection(
+      ReportVideoAiAnalysis result,
+      ) {
+    if (aiSuggestionsApplied) {
+      return false;
+    }
+
+    if (result.reportSufficient ==
+        false) {
+      return true;
+    }
+
+    if (_hasVideoCategoryMismatch(
+      result,
+    )) {
+      return true;
+    }
+
+    return false;
+  }
+
+// ============================================================
+// BUILD HUMAN-READABLE QUALITY PROBLEMS
+// ============================================================
+
+  List<String> _buildMandatoryQualityProblems() {
+    final Set<String> problems =
+    <String>{};
+
+    final ReportFinalAiAnalysis?
+    combined =
+        finalAiAnalysis;
+
+    // ----------------------------------------------------------
+    // FINAL COMBINED IMAGE INTELLIGENCE
+    // ----------------------------------------------------------
+
+    if (combined != null &&
+        !aiSuggestionsApplied) {
+      if (combined.titleMeaningful ==
+          false) {
+        problems.add(
+          'The report title does not clearly describe the '
+              'infrastructure issue shown in the evidence.',
+        );
+      }
+
+      if (combined.descriptionMeaningful ==
+          false) {
+        problems.add(
+          'The report description is unclear or does not provide '
+              'a meaningful explanation of the issue.',
+        );
+      }
+
+      if (_hasFinalCategoryMismatch(
+        combined,
+      )) {
+        final String aiCategory =
+            combined.category
+                ?.trim() ??
+                '';
+
+        if (aiCategory.isNotEmpty) {
+          problems.add(
+            'The selected category "$selectedCategory" does not '
+                'match the evidence analysis. Smart Assist identifies '
+                'the issue as "$aiCategory".',
+          );
+        } else {
+          problems.add(
+            'The selected report category does not appear to match '
+                'the submitted evidence.',
+          );
+        }
+      }
+
+      if (combined.reportSufficient ==
+          false) {
+        problems.add(
+          combined.reportIssue
+              ?.trim()
+              .isNotEmpty ==
+              true
+              ? combined.reportIssue!.trim()
+              : 'The current report information is not sufficient '
+              'for a responding worker to understand the issue.',
+        );
+      }
+
+      if (combined.shouldSuggestReportEdit &&
+          problems.isEmpty) {
+        problems.add(
+          combined.reportIssue
+              ?.trim()
+              .isNotEmpty ==
+              true
+              ? combined.reportIssue!.trim()
+              : 'Smart Assist recommends reviewing the report '
+              'information before continuing.',
+        );
+      }
+
+      for (final String item
+      in combined.missingInformation) {
+        final String clean =
+        item.trim();
+
+        if (clean.isNotEmpty) {
+          problems.add(
+            'Missing or unclear: $clean',
+          );
+        }
+      }
+    }
+
+    // ----------------------------------------------------------
+    // VIDEO INTELLIGENCE
+    // ----------------------------------------------------------
+
+    final ReportVideoAiAnalysis?
+    video =
+        videoAiAnalysis;
+
+    if (video != null &&
+        !aiSuggestionsApplied) {
+      if (_hasVideoCategoryMismatch(
+        video,
+      )) {
+        final String aiCategory =
+            video.category
+                ?.trim() ??
+                '';
+
+        if (aiCategory.isNotEmpty) {
+          problems.add(
+            'Video evidence suggests "$aiCategory", which does not '
+                'match the selected category "$selectedCategory".',
+          );
+        } else {
+          problems.add(
+            'Video evidence does not appear to match the selected '
+                'report category.',
+          );
+        }
+      }
+
+      if (video.reportSufficient ==
+          false) {
+        problems.add(
+          'The video evidence analysis indicates that the report '
+              'details need improvement before continuing.',
+        );
+      }
+
+      for (final String item
+      in video.missingInformation) {
+        final String clean =
+        item.trim();
+
+        if (clean.isNotEmpty) {
+          problems.add(
+            'Missing or unclear: $clean',
+          );
+        }
+      }
+    }
+
+    return problems.toList();
+  }
+
+// ============================================================
+// ENSURE CURRENT EVIDENCE HAS AI REVIEW
+//
+// This solves an important Draft Recovery case:
+//
+// User:
+// Details
+//   ↓
+// Evidence analysed
+//   ↓
+// Re-edit
+//   ↓
+// Details
+//   ↓
+// Evidence restored
+//
+// The evidence files are restored from draft, but in-memory AI
+// objects may no longer exist.
+//
+// Before Location, we therefore rebuild available AI analysis.
+//
+// AI network failure does NOT destroy evidence or the draft.
+// Local validation remains available.
+// ============================================================
+
+  Future<void> _ensureCurrentAiReviewBeforeLocation() async {
+    if (isBusy) {
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // PHOTO / MULTI-IMAGE ANALYSIS
+    // ----------------------------------------------------------
+
+    if (evidenceImages.isNotEmpty &&
+        finalAiAnalysis == null &&
+        finalAnalysisError == null) {
+      await analyzeImageBatch(
+        List<File>.from(
+          evidenceImages,
+        ),
+      );
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // VIDEO ANALYSIS
+    //
+    // Existing architecture currently exposes one video-level
+    // aggregate result. If it is absent after draft restoration,
+    // analyse one available current video before navigation.
+    // ----------------------------------------------------------
+
+    if (evidenceVideos.isNotEmpty &&
+        videoAiAnalysis == null &&
+        videoAiError == null &&
+        !analyzingVideo) {
+      final File video =
+          evidenceVideos.first;
+
+      try {
+        await analyzeVideoEvidence(
+          video,
+        );
+      } catch (_) {
+        // analyzeVideoEvidence already owns its UI error state.
+        //
+        // Do not destroy or remove evidence merely because an
+        // external AI service is temporarily unavailable.
+      }
+    }
+  }
+
+// ============================================================
+// DOES ANY AI RESULT REQUIRE CORRECTION?
+// ============================================================
+
+  bool _requiresMandatoryAiCorrection() {
+    final ReportFinalAiAnalysis?
+    combined =
+        finalAiAnalysis;
+
+    if (combined != null &&
+        _finalAiRequiresCorrection(
+          combined,
+        )) {
+      return true;
+    }
+
+    final ReportVideoAiAnalysis?
+    video =
+        videoAiAnalysis;
+
+    if (video != null &&
+        _videoAiRequiresCorrection(
+          video,
+        )) {
+      return true;
+    }
+
+    return false;
+  }
+
+// ============================================================
+// HAS USABLE AI CORRECTION?
+// ============================================================
+
+  bool _hasUsableAiCorrection() {
+    final ReportFinalAiAnalysis?
+    combined =
+        finalAiAnalysis;
+
+    if (combined != null &&
+        combined.issueDetected ==
+            true) {
+      final bool hasCategory =
+          combined.category
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      final bool hasTitle =
+          combined.suggestedTitle
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      final bool hasDescription =
+          (combined.suggestedDescription ??
+              combined.description)
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      final bool hasPriority =
+          (combined.recommendedPriority ??
+              combined.severity)
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      if (combined.hasSuggestedReportText ||
+          hasCategory ||
+          hasTitle ||
+          hasDescription ||
+          hasPriority) {
+        return true;
+      }
+    }
+
+    final ReportVideoAiAnalysis?
+    video =
+        videoAiAnalysis;
+
+    if (video != null &&
+        video.issueDetected ==
+            true) {
+      final bool hasCategory =
+          (video.category?.trim() ?? '').isNotEmpty;
+
+      final bool hasTitle =
+          video.suggestedTitle
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      final bool hasDescription =
+          video.suggestedDescription
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      final bool hasPriority =
+          video.recommendedPriority
+              ?.trim()
+              .isNotEmpty ==
+              true;
+
+      return hasCategory ||
+          hasTitle ||
+          hasDescription ||
+          hasPriority;
+    }
+
+    return false;
+  }
+
+// ============================================================
+// APPLY BEST AVAILABLE AI CORRECTION
+//
+// Priority:
+// 1. Final combined image analysis
+// 2. Video-level analysis
+//
+// This is ALWAYS explicit citizen action.
+// ============================================================
+
+  Future<void> _applyBestAvailableAiCorrection() async {
+    final ReportFinalAiAnalysis?
+    combined =
+        finalAiAnalysis;
+
+    if (combined != null &&
+        combined.issueDetected ==
+            true) {
+      applyAiSuggestions();
+
+      return;
+    }
+
+    final ReportVideoAiAnalysis?
+    video =
+        videoAiAnalysis;
+
+    if (video == null ||
+        video.issueDetected !=
+            true) {
+      showMessage(
+        'Smart Assist does not currently have a usable correction. '
+            'Please re-edit the report.',
+      );
+
+      return;
+    }
+
+    setState(() {
+      // ----------------------------------------------------------
+      // CATEGORY
+      // ----------------------------------------------------------
+
+      final String aiCategory =
+          video.category?.trim() ?? '';
+
+      if (aiCategory.isNotEmpty) {
+        selectedCategory =
+            aiCategory;
+      }
+
+      // ----------------------------------------------------------
+      // PRIORITY
+      // ----------------------------------------------------------
+
+      final String? priority =
+      video.recommendedPriority
+          ?.trim();
+
+      if (priority != null &&
+          priority.isNotEmpty) {
+        selectedPriority =
+            priority;
+      }
+
+      // ----------------------------------------------------------
+      // TITLE
+      // ----------------------------------------------------------
+
+      final String? title =
+      video.suggestedTitle
+          ?.trim();
+
+      if (title != null &&
+          title.isNotEmpty) {
+        selectedTitle =
+            title;
+      }
+
+      // ----------------------------------------------------------
+      // DESCRIPTION
+      // ----------------------------------------------------------
+
+      final String? description =
+      video.suggestedDescription
+          ?.trim();
+
+      if (description != null &&
+          description.isNotEmpty) {
+        selectedDescription =
+            description;
+      }
+
+      aiSuggestionsApplied =
+      true;
+    });
+
+    await _saveEffectiveReportValues();
+
+    if (!mounted) {
+      return;
+    }
+
+    showMessage(
+      'Smart Assist corrections applied. '
+          'Please review the updated report and tap Continue again.',
+    );
+  }
+
+// ============================================================
+// MANDATORY SEMANTIC CORRECTION DIALOG
+//
+// barrierDismissible = false
+//
+// A detected semantic problem cannot be bypassed using the
+// outside area / Android back gesture.
+//
+// Citizen must:
+// - re-edit
+// OR
+// - explicitly apply AI when a usable suggestion exists.
+// ============================================================
+
+  Future<void> showMandatoryAiCorrectionDialog() async {
+    if (!mounted) {
+      return;
+    }
+
+    final List<String> problems =
+    _buildMandatoryQualityProblems();
+
+    final bool canApplyAi =
+    _hasUsableAiCorrection();
+
+    final String? action =
+    await showDialog<String>(
+      context: context,
+
+      barrierDismissible:
+      false,
+
+      builder: (
+          BuildContext dialogContext,
+          ) {
+        return PopScope(
+          canPop: false,
+
+          child: AlertDialog(
+            title:
+            const Row(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+
+              children: [
+                Icon(
+                  Icons
+                      .report_problem_outlined,
+
+                  color:
+                  Colors.orange,
+                ),
+
+                SizedBox(
+                  width:
+                  10,
+                ),
+
+                Expanded(
+                  child: Text(
+                    'Report Must Be Corrected',
+                  ),
+                ),
+              ],
+            ),
+
+            content:
+            SingleChildScrollView(
+              child: Column(
+                mainAxisSize:
+                MainAxisSize.min,
+
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+
+                children: [
+                  const Text(
+                    'Smart Assist found a significant mismatch or '
+                        'meaningfulness problem in the report details.',
+                  ),
+
+                  const SizedBox(
+                    height:
+                    10,
+                  ),
+
+                  const Text(
+                    'You cannot continue to Report Location until '
+                        'the report information is corrected.',
+                    style:
+                    TextStyle(
+                      fontWeight:
+                      FontWeight.bold,
+                    ),
+                  ),
+
+                  if (problems.isNotEmpty) ...[
+                    const SizedBox(
+                      height:
+                      14,
+                    ),
+
+                    const Text(
+                      'Why correction is required:',
+                      style:
+                      TextStyle(
+                        fontWeight:
+                        FontWeight.bold,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                      7,
+                    ),
+
+                    ...problems.map(
+                          (
+                          String problem,
+                          ) {
+                        return Padding(
+                          padding:
+                          const EdgeInsets.only(
+                            bottom:
+                            6,
+                          ),
+
+                          child: Row(
+                            crossAxisAlignment:
+                            CrossAxisAlignment.start,
+
+                            children: [
+                              const Padding(
+                                padding:
+                                EdgeInsets.only(
+                                  top:
+                                  2,
+                                ),
+
+                                child: Icon(
+                                  Icons.close_rounded,
+
+                                  color:
+                                  Colors.orange,
+
+                                  size:
+                                  15,
+                                ),
+                              ),
+
+                              const SizedBox(
+                                width:
+                                6,
+                              ),
+
+                              Expanded(
+                                child: Text(
+                                  problem,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+
+                  const SizedBox(
+                    height:
+                    10,
+                  ),
+
+                  Container(
+                    width:
+                    double.infinity,
+
+                    padding:
+                    const EdgeInsets.all(
+                      11,
+                    ),
+
+                    decoration:
+                    BoxDecoration(
+                      color:
+                      AppColors.primary
+                          .withOpacity(
+                        0.06,
+                      ),
+
+                      borderRadius:
+                      BorderRadius.circular(
+                        12,
+                      ),
+
+                      border:
+                      Border.all(
+                        color:
+                        AppColors.primary
+                            .withOpacity(
+                          0.20,
+                        ),
+                      ),
+                    ),
+
+                    child:
+                    const Text(
+                      'Smart Assist is advisory and will never silently '
+                          'overwrite your report. Choose Re-edit to write your '
+                          'own correction, or Apply AI to explicitly accept the '
+                          'suggested correction.',
+                      style:
+                      TextStyle(
+                        color:
+                        AppColors.textSecondary,
+
+                        fontSize:
+                        10,
+
+                        height:
+                        1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            actions: [
+              OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.pop(
+                    dialogContext,
+                    'edit',
+                  );
+                },
+
+                icon:
+                const Icon(
+                  Icons.edit_outlined,
+                ),
+
+                label:
+                const Text(
+                  'Re-edit Report',
+                ),
+              ),
+
+              if (canApplyAi)
+                ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(
+                      dialogContext,
+                      'apply_ai',
+                    );
+                  },
+
+                  icon:
+                  const Icon(
+                    Icons.auto_awesome,
+                  ),
+
+                  label:
+                  const Text(
+                    'Apply AI',
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (!mounted ||
+        action == null) {
+      return;
+    }
+
+    if (action ==
+        'edit') {
+      await editReport();
+
+      return;
+    }
+
+    if (action ==
+        'apply_ai') {
+      await _applyBestAvailableAiCorrection();
+    }
+  }
+
+// ============================================================
+// CONTINUE TO LOCATION — FINAL VERSION
 // ============================================================
 
   Future<void> continueToLocation() async {
+    // ==========================================================
+    // 1. EVIDENCE REQUIRED
+    // ==========================================================
+
     if (!hasEvidence) {
       showMessage(
-        'Please add at least one '
-            'photo or video.',
+        'Please add at least one photo or video.',
       );
 
       return;
     }
+
+    // ==========================================================
+    // 2. CURRENT OPERATION MUST FINISH
+    // ==========================================================
 
     if (isBusy) {
       showMessage(
-        'Please wait for the current '
-            'operation to finish.',
+        'Please wait for the current operation to finish.',
       );
 
       return;
     }
+
+    // ==========================================================
+    // 3. LOCAL QUALITY VALIDATION
+    //
+    // Fast/offline layer.
+    // ==========================================================
 
     final String? localProblem =
     validateReportLocally(
       title:
       selectedTitle,
+
       description:
       selectedDescription,
     );
 
-    if (localProblem != null) {
+    if (localProblem !=
+        null) {
       await showInvalidReportDialog(
         localProblem,
       );
@@ -3141,16 +4099,69 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
-    final ReportFinalAiAnalysis? result =
-        finalAiAnalysis;
+    // ==========================================================
+    // 4. RESTORED DRAFT AI REFRESH
+    //
+    // If evidence was restored but its in-memory AI result was
+    // lost, rebuild available analysis before deciding whether
+    // Location may be opened.
+    // ==========================================================
 
-    if (result != null &&
-        result.reportSufficient == false &&
-        !aiSuggestionsApplied) {
-      await showPoorReportDialog();
+    await _ensureCurrentAiReviewBeforeLocation();
+
+    if (!mounted) {
+      return;
+    }
+
+    // ==========================================================
+    // 5. MANDATORY SEMANTIC AI GATE
+    //
+    // BLOCK when AI has established:
+    //
+    // ✕ meaningless title
+    // ✕ meaningless description
+    // ✕ category mismatch
+    // ✕ insufficient report
+    // ✕ strong edit recommendation
+    // ✕ video/report mismatch
+    //
+    // Citizen MUST explicitly Re-edit or Apply AI.
+    // ==========================================================
+
+    if (_requiresMandatoryAiCorrection()) {
+      await showMandatoryAiCorrectionDialog();
 
       return;
     }
+
+    // ==========================================================
+    // 6. FINAL LOCAL CHECK AGAIN
+    //
+    // This matters because an AI suggestion may have been applied
+    // during an earlier interaction.
+    // ==========================================================
+
+    final String? finalLocalProblem =
+    validateReportLocally(
+      title:
+      selectedTitle,
+
+      description:
+      selectedDescription,
+    );
+
+    if (finalLocalProblem !=
+        null) {
+      await showInvalidReportDialog(
+        finalLocalProblem,
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // 7. START NAVIGATION
+    // ==========================================================
 
     if (!mounted) {
       return;
@@ -3160,6 +4171,10 @@ class _CreateReportEvidenceScreenState
       isNavigating =
       true;
     });
+
+    // ==========================================================
+    // 8. SAVE CURRENT EFFECTIVE VALUES
+    // ==========================================================
 
     final bool saved =
     await _saveDraft(
@@ -3183,6 +4198,10 @@ class _CreateReportEvidenceScreenState
       return;
     }
 
+    // ==========================================================
+    // 9. LEGACY IMAGE ANALYSIS COMPATIBILITY
+    // ==========================================================
+
     ReportImageAiAnalysis?
     legacyAnalysis;
 
@@ -3200,63 +4219,65 @@ class _CreateReportEvidenceScreenState
       }
 
       // ========================================================
-      // OPEN LOCATION
+      // 10. OPEN LOCATION
       //
-      // TRUE means:
-      // Preview successfully submitted the report.
+      // Only reached after the semantic quality gate passes.
       // ========================================================
 
-      final bool? result =
+      final bool? navigationResult =
       await Navigator.push<bool>(
         context,
-        MaterialPageRoute(
-          builder: (_) =>
-              CreateReportLocationScreen(
-                category:
-                selectedCategory,
 
-                priority:
-                selectedPriority,
+        MaterialPageRoute<bool>(
+          builder: (
+              BuildContext context,
+              ) {
+            return CreateReportLocationScreen(
+              category:
+              selectedCategory,
 
-                title:
-                selectedTitle,
+              priority:
+              selectedPriority,
 
-                description:
-                selectedDescription,
+              title:
+              selectedTitle,
 
-                evidenceImages:
-                List<File>.from(
-                  evidenceImages,
-                ),
+              description:
+              selectedDescription,
 
-                evidenceVideos:
-                List<File>.from(
-                  evidenceVideos,
-                ),
-
-                imageAnalyses:
-                Map<String,
-                    ReportImageAiAnalysis>.from(
-                  imageAnalyses,
-                ),
-
-                finalAiAnalysis:
-                finalAiAnalysis,
-
-                aiAnalysis:
-                legacyAnalysis,
+              evidenceImages:
+              List<File>.from(
+                evidenceImages,
               ),
+
+              evidenceVideos:
+              List<File>.from(
+                evidenceVideos,
+              ),
+
+              imageAnalyses:
+              Map<
+                  String,
+                  ReportImageAiAnalysis>.from(
+                imageAnalyses,
+              ),
+
+              finalAiAnalysis:
+              finalAiAnalysis,
+
+              aiAnalysis:
+              legacyAnalysis,
+            );
+          },
         ),
       );
 
       submitted =
-          result == true;
+          navigationResult ==
+              true;
 
       // ========================================================
-      // SUCCESSFUL SUBMISSION
-      //
-      // Do NOT restore the draft.
-      // Forward TRUE back to Details.
+      // 11. SUCCESSFUL SUBMISSION
       // ========================================================
 
       if (submitted) {
@@ -3273,12 +4294,9 @@ class _CreateReportEvidenceScreenState
       }
     } finally {
       // ========================================================
-      // NORMAL BACK NAVIGATION ONLY
+      // 12. NORMAL RETURN FROM LOCATION
       //
-      // If the citizen simply returned from Location,
-      // restore the unfinished draft.
-      //
-      // If submission succeeded, NEVER restore it.
+      // Preserve existing Smart Draft Recovery behaviour.
       // ========================================================
 
       if (!submitted &&
@@ -3293,9 +4311,11 @@ class _CreateReportEvidenceScreenState
     }
   }
 
-  // ============================================================
-  // INVALID LOCAL REPORT DIALOG
-  // ============================================================
+// ============================================================
+// INVALID LOCAL REPORT DIALOG
+//
+// Existing design preserved.
+// ============================================================
 
   Future<void> showInvalidReportDialog(
       String reason,
@@ -3305,20 +4325,18 @@ class _CreateReportEvidenceScreenState
     }
 
     await showDialog<void>(
-      context:
-      context,
+      context: context,
 
-      builder:
-          (
-          dialogContext,
+      builder: (
+          BuildContext dialogContext,
           ) {
         return AlertDialog(
           title:
           const Row(
             children: [
               Icon(
-                Icons
-                    .warning_amber_rounded,
+                Icons.warning_amber_rounded,
+
                 color:
                 Colors.orange,
               ),
@@ -3329,16 +4347,14 @@ class _CreateReportEvidenceScreenState
               ),
 
               Expanded(
-                child:
-                Text(
+                child: Text(
                   'Report Needs Improvement',
                 ),
               ),
             ],
           ),
 
-          content:
-          Text(
+          content: Text(
             '$reason\n\n'
                 'Please provide useful information so the '
                 'responding worker can understand the issue.',
@@ -3383,37 +4399,39 @@ class _CreateReportEvidenceScreenState
     );
   }
 
-  // ============================================================
-  // POOR FINAL REPORT DIALOG
-  // ============================================================
+// ============================================================
+// POOR FINAL REPORT DIALOG
+//
+// KEPT for compatibility with the rest of your existing UI.
+//
+// The new mandatory quality gate is stricter, but this method is
+// deliberately retained so no existing caller/design is broken.
+// ============================================================
 
   Future<void> showPoorReportDialog() async {
     final ReportFinalAiAnalysis?
     result =
         finalAiAnalysis;
 
-    if (
-    !mounted ||
-        result == null
-    ) {
+    if (!mounted ||
+        result ==
+            null) {
       return;
     }
 
     await showDialog<void>(
-      context:
-      context,
+      context: context,
 
-      builder:
-          (
-          dialogContext,
+      builder: (
+          BuildContext dialogContext,
           ) {
         return AlertDialog(
           title:
           const Row(
             children: [
               Icon(
-                Icons
-                    .warning_amber_rounded,
+                Icons.warning_amber_rounded,
+
                 color:
                 Colors.orange,
               ),
@@ -3424,8 +4442,7 @@ class _CreateReportEvidenceScreenState
               ),
 
               Expanded(
-                child:
-                Text(
+                child: Text(
                   'Report Information Is Unclear',
                 ),
               ),
@@ -3433,70 +4450,108 @@ class _CreateReportEvidenceScreenState
           ),
 
           content:
-          Column(
-            mainAxisSize:
-            MainAxisSize.min,
+          SingleChildScrollView(
+            child: Column(
+              mainAxisSize:
+              MainAxisSize.min,
 
-            crossAxisAlignment:
-            CrossAxisAlignment.start,
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
 
-            children: [
-              Text(
-                result.reportIssue ??
-                    'Smart Assist found that the report '
-                        'does not contain enough meaningful '
-                        'information.',
-              ),
-
-              if (
-              result
-                  .missingInformation
-                  .isNotEmpty
-              ) ...[
-                const SizedBox(
-                  height:
-                  12,
+              children: [
+                Text(
+                  result.reportIssue ??
+                      'Smart Assist found that the report does not '
+                          'contain enough meaningful information.',
                 ),
 
-                const Text(
-                  'Missing or unclear:',
-                  style:
-                  TextStyle(
-                    fontWeight:
-                    FontWeight.bold,
+                if (result.titleMeaningful ==
+                    false) ...[
+                  const SizedBox(
+                    height:
+                    10,
                   ),
-                ),
 
-                const SizedBox(
-                  height:
-                  4,
-                ),
+                  const Text(
+                    '• The report title is unclear or not meaningful.',
+                  ),
+                ],
 
-                ...result
+                if (result.descriptionMeaningful ==
+                    false) ...[
+                  const SizedBox(
+                    height:
+                    6,
+                  ),
+
+                  const Text(
+                    '• The report description is unclear or not meaningful.',
+                  ),
+                ],
+
+                if (_hasFinalCategoryMismatch(
+                  result,
+                )) ...[
+                  const SizedBox(
+                    height:
+                    6,
+                  ),
+
+                  Text(
+                    '• Selected category "$selectedCategory" does not '
+                        'match Smart Assist category '
+                        '"${result.category ?? 'Unknown'}".',
+                  ),
+                ],
+
+                if (result
                     .missingInformation
-                    .map(
-                      (
-                      item,
-                      ) =>
-                      Padding(
+                    .isNotEmpty) ...[
+                  const SizedBox(
+                    height:
+                    12,
+                  ),
+
+                  const Text(
+                    'Missing or unclear:',
+                    style:
+                    TextStyle(
+                      fontWeight:
+                      FontWeight.bold,
+                    ),
+                  ),
+
+                  const SizedBox(
+                    height:
+                    4,
+                  ),
+
+                  ...result
+                      .missingInformation
+                      .map(
+                        (
+                        String item,
+                        ) {
+                      return Padding(
                         padding:
                         const EdgeInsets.only(
                           bottom:
                           3,
                         ),
 
-                        child:
-                        Text(
+                        child: Text(
                           '• $item',
                         ),
-                      ),
-                ),
+                      );
+                    },
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
 
           actions: [
-            TextButton(
+            TextButton.icon(
               onPressed: () {
                 Navigator.pop(
                   dialogContext,
@@ -3505,26 +4560,25 @@ class _CreateReportEvidenceScreenState
                 editReport();
               },
 
-              child:
+              icon:
+              const Icon(
+                Icons.edit_outlined,
+              ),
+
+              label:
               const Text(
-                'Edit Report',
+                'Re-edit Report',
               ),
             ),
 
-            if (
-            result
-                .hasSuggestedReportText &&
-                result
-                    .issueDetected ==
-                    true
-            )
+            if (_hasUsableAiCorrection())
               ElevatedButton.icon(
-                onPressed: () {
+                onPressed: () async {
                   Navigator.pop(
                     dialogContext,
                   );
 
-                  applyAiSuggestions();
+                  await _applyBestAvailableAiCorrection();
                 },
 
                 icon:
