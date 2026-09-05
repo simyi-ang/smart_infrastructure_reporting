@@ -1,69 +1,14 @@
-// ================================================================
-// REPORT FINAL AI ANALYSIS
-//
-// Represents the FINAL combined Smart Assist result.
-//
-// This is different from ReportImageAiAnalysis:
-//
-// ReportImageAiAnalysis
-//     → one evidence image
-//
-// ReportFinalAiAnalysis
-//     → combines:
-//          • all individual image analyses
-//          • citizen title
-//          • citizen description
-//          • citizen category
-//          • citizen priority
-//
-// The final result is used for:
-//
-//     Keep Mine
-//     Apply AI
-//     final preview
-//     final database persistence
-//
-// It is NOT linked to one report_image_id.
-// ================================================================
-
 class ReportFinalAiAnalysis {
-  // ============================================================
-  // DATABASE IDENTIFIERS
-  //
-  // Empty during pre-submission analysis.
-  //
-  // These can be populated after the actual report row exists.
-  // ============================================================
 
   final String id;
 
   final String reportId;
 
-  // ============================================================
-  // AI STATUS
-  // ============================================================
-
   final String aiStatus;
-
-  // ============================================================
-  // SOURCE EVIDENCE INFORMATION
-  //
-  // Number of individual image analyses used to generate this
-  // final combined assessment.
-  // ============================================================
 
   final int analyzedImageCount;
 
-  // Optional local/source identifiers.
-  //
-  // During pre-submission these may be local image paths.
-  //
-  // Later they may be replaced with report_image IDs if needed.
   final List<String> sourceEvidenceIds;
-
-  // ============================================================
-  // FINAL COMBINED INFRASTRUCTURE RESULT
-  // ============================================================
 
   final bool? issueDetected;
 
@@ -81,41 +26,11 @@ class ReportFinalAiAnalysis {
 
   final String? safetyConcern;
 
-  // ============================================================
-  // MULTI-IMAGE CONSISTENCY
-  //
-  // Helps explain whether different evidence images agree with
-  // each other.
-  //
-  // Examples:
-  //
-  // Consistent
-  // Mostly Consistent
-  // Mixed
-  // Insufficient
-  // ============================================================
-
   final String? evidenceConsistency;
-
-  // ============================================================
-  // CONFLICT / DISAGREEMENT
-  //
-  // Example:
-  //
-  // Image 1 → pothole
-  // Image 2 → pothole
-  // Image 3 → unrelated image
-  //
-  // conflictingEvidence = true
-  // ============================================================
 
   final bool conflictingEvidence;
 
   final String? conflictingEvidenceReason;
-
-  // ============================================================
-  // REPORT VS AI COMPARISON
-  // ============================================================
 
   final bool? categoryMatchesUser;
 
@@ -123,27 +38,12 @@ class ReportFinalAiAnalysis {
 
   final String? recommendedPriority;
 
-  // ============================================================
-  // HUMAN REVIEW
-  // ============================================================
-
   final bool needsHumanReview;
 
   final String? humanReviewReason;
 
-  // ============================================================
-  // REPORT QUALITY CHECK
-  //
-  // Final report-quality decision considers:
-  //
-  // • citizen title
-  // • citizen description
-  // • all image analyses
-  // ============================================================
-
   final bool reportSufficient;
 
-  // Poor / Fair / Good
   final String? reportQuality;
 
   final bool? titleMeaningful;
@@ -154,27 +54,13 @@ class ReportFinalAiAnalysis {
 
   final List<String> missingInformation;
 
-  // ============================================================
-  // FINAL AI REPORT SUGGESTIONS
-  // ============================================================
-
   final String? suggestedTitle;
 
   final String? suggestedDescription;
 
-  // ============================================================
-  // HUMAN-IN-THE-LOOP DECISION
-  // ============================================================
-
   final bool suggestionsApplied;
 
   final bool reviewedByUser;
-
-  // ============================================================
-  // ORIGINAL USER INFORMATION
-  //
-  // Always preserve what the citizen originally entered.
-  // ============================================================
 
   final String? originalUserCategory;
 
@@ -184,19 +70,11 @@ class ReportFinalAiAnalysis {
 
   final String? originalUserDescription;
 
-  // ============================================================
-  // TIMESTAMPS
-  // ============================================================
-
   final DateTime? analyzedAt;
 
   final DateTime? createdAt;
 
   final DateTime? updatedAt;
-
-  // ============================================================
-  // CONSTRUCTOR
-  // ============================================================
 
   const ReportFinalAiAnalysis({
     this.id = '',

@@ -124,7 +124,7 @@ class _ReportDetailScreenState
 
       final InfrastructureReport? result =
       await reportService
-          .getReportById(
+          .getSharedReportById(
         widget.reportId,
       );
 

@@ -1,32 +1,12 @@
 class ReportDraft {
-  // ============================================================
-  // SENTINEL
-  //
-  // Allows copyWith() to distinguish:
-  //
-  // field not supplied  -> keep old value
-  // field: null         -> intentionally clear value
-  //
-  // This fixes the common nullable copyWith problem.
-  // ============================================================
 
   static const Object _unset = Object();
 
   final String? id;
-
-  // ============================================================
-  // REPORT DETAILS
-  // ============================================================
-
   final String category;
   final String priority;
   final String title;
   final String description;
-
-  // ============================================================
-  // LOCATION
-  // ============================================================
-
   final String? landmark;
   final String? manualAddress;
 
@@ -39,48 +19,17 @@ class ReportDraft {
   final String? locationVerificationStatus;
   final double? addressDistanceMeters;
 
-  // ============================================================
-  // VOICE QUICK REPORT
-  // ============================================================
-
   final String? voiceTranscript;
   final String? voiceLocationContext;
   final String? voiceSafetyConcern;
 
-  // ============================================================
-  // CURRENT CREATE-REPORT STEP
-  //
-  // Recommended:
-  //
-  // 1 = Details
-  // 2 = Evidence
-  // 3 = Location
-  // 4 = Preview
-  // ============================================================
-
   final int currentStep;
-
-  // ============================================================
-  // VERIFIED EVIDENCE
-  // ============================================================
 
   final bool hasCloseUpEvidence;
   final bool hasContextEvidence;
 
-  // ============================================================
-  // EVIDENCE
-  //
-  // IMPORTANT:
-  // These should contain persistent local application paths,
-  // NOT temporary image_picker paths.
-  // ============================================================
-
   final List<String> evidenceImagePaths;
   final List<String> evidenceVideoPaths;
-
-  // ============================================================
-  // TIMESTAMPS
-  // ============================================================
 
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -111,11 +60,7 @@ class ReportDraft {
     required this.updatedAt,
   });
 
-  // ============================================================
-  // EMPTY DRAFT
-  // ============================================================
-
-  factory ReportDraft.empty() {
+   factory ReportDraft.empty() {
     final DateTime now = DateTime.now();
 
     return ReportDraft(
@@ -123,10 +68,6 @@ class ReportDraft {
       updatedAt: now,
     );
   }
-
-  // ============================================================
-  // HAS ANY USEFUL DATA?
-  // ============================================================
 
   bool get hasData {
     return category.trim().isNotEmpty ||
@@ -143,10 +84,6 @@ class ReportDraft {
         evidenceVideoPaths.isNotEmpty;
   }
 
-  // ============================================================
-  // LOCATION HELPERS
-  // ============================================================
-
   bool get hasLocation {
     return latitude != null &&
         longitude != null;
@@ -158,10 +95,6 @@ class ReportDraft {
         .isNotEmpty ==
         true;
   }
-
-  // ============================================================
-  // EVIDENCE HELPERS
-  // ============================================================
 
   bool get hasEvidence {
     return evidenceImagePaths.isNotEmpty ||
@@ -188,13 +121,6 @@ class ReportDraft {
     return evidenceImagePaths.length +
         evidenceVideoPaths.length;
   }
-
-  // ============================================================
-  // COPY WITH
-  //
-  // Nullable fields use Object? + sentinel so they can
-  // intentionally be cleared.
-  // ============================================================
 
   ReportDraft copyWith({
     Object? id = _unset,
@@ -351,10 +277,6 @@ class ReportDraft {
     );
   }
 
-  // ============================================================
-  // TO JSON
-  // ============================================================
-
   Map<String, dynamic> toJson() {
     return {
       'id': id,
@@ -413,13 +335,6 @@ class ReportDraft {
       updatedAt.toIso8601String(),
     };
   }
-
-  // ============================================================
-  // FROM JSON
-  //
-  // Old drafts that do not yet contain evidenceVideoPaths
-  // are still supported automatically.
-  // ============================================================
 
   factory ReportDraft.fromJson(
       Map<String, dynamic> json,
@@ -534,10 +449,6 @@ class ReportDraft {
       ),
     );
   }
-
-  // ============================================================
-  // PARSING HELPERS
-  // ============================================================
 
   static double? _toDouble(
       dynamic value,

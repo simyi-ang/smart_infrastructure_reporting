@@ -1604,6 +1604,65 @@ class ReportService {
   }
 
   // ============================================================
+// GET SHARED REPORT BY ID
+//
+// Used by:
+// - Smart Map
+// - Community
+//
+// This is READ-ONLY access.
+// Editing and deleting remain owner-protected.
+// ============================================================
+
+  Future<InfrastructureReport?> getSharedReportById(
+      String reportId,
+      ) async {
+    final User? user = currentUser;
+
+    if (user == null) {
+      throw Exception(
+        'You must be logged in.',
+      );
+    }
+
+    final String cleanReportId =
+    reportId.trim();
+
+    if (cleanReportId.isEmpty) {
+      throw Exception(
+        'Report ID is required.',
+      );
+    }
+
+    try {
+      final Map<String, dynamic>? response =
+      await _supabase
+          .from(
+        reportsTable,
+      )
+          .select()
+          .eq(
+        'id',
+        cleanReportId,
+      )
+          .maybeSingle();
+
+      if (response == null) {
+        return null;
+      }
+
+      return InfrastructureReport.fromMap(
+        response,
+      );
+    } catch (e) {
+      throw Exception(
+        'Unable to load report: '
+            '${_cleanError(e)}',
+      );
+    }
+  }
+
+  // ============================================================
   // GET ALL REPORTS
   // ============================================================
 
