@@ -10,6 +10,7 @@ import '../citizen/profile_screen.dart';
 import 'create_report_details_screen.dart';
 import 'edit_report_screen.dart';
 import 'report_detail_screen.dart';
+import '../community/community_screen.dart';
 
 class MyReportsScreen extends StatefulWidget {
   const MyReportsScreen({
@@ -392,9 +393,19 @@ class _MyReportsScreenState
     // COMMUNITY
     // ========================================================
       case 3:
-        showMessage(
-          'Community feature is not included in the current approved scope.',
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) =>
+            const CommunityScreen(),
+          ),
         );
+
+        if (!mounted) {
+          return;
+        }
+
+        await loadReports();
         break;
 
     // ========================================================

@@ -14,6 +14,7 @@ import '../reports/my_reports_screen.dart';
 import 'account_activity_screen.dart';
 import 'infrastructure_map_screen.dart';
 import 'security_screen.dart';
+import '../community/community_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
@@ -618,15 +619,20 @@ class _ProfileScreenState
         break;
 
       case 3:
-        if (mounted) {
-          showMessage(
-            'Community is outside the current approved scope.',
-          );
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) =>
+            const CommunityScreen(),
+          ),
+        );
 
+        if (mounted) {
           setState(() {
             selectedNavigationIndex = 4;
           });
         }
+
         break;
 
       case 4:
