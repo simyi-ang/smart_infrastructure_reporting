@@ -1842,6 +1842,558 @@ class _SecurityScreenState
   }
 
   // ============================================================
+// PASSWORD STRENGTH
+// ============================================================
+
+  bool _passwordHasMinimumLength(
+      String password,
+      ) {
+    return password.length >= 8;
+  }
+
+  bool _passwordHasUppercase(
+      String password,
+      ) {
+    return RegExp(
+      r'[A-Z]',
+    ).hasMatch(
+      password,
+    );
+  }
+
+  bool _passwordHasLowercase(
+      String password,
+      ) {
+    return RegExp(
+      r'[a-z]',
+    ).hasMatch(
+      password,
+    );
+  }
+
+  bool _passwordHasNumber(
+      String password,
+      ) {
+    return RegExp(
+      r'[0-9]',
+    ).hasMatch(
+      password,
+    );
+  }
+
+  bool _passwordHasSpecialCharacter(
+      String password,
+      ) {
+    return RegExp(
+      r'[!@#$%^&*(),.?":{}|<>]',
+    ).hasMatch(
+      password,
+    );
+  }
+
+// ============================================================
+// PASSWORD STRENGTH SCORE
+//
+// Required rules:
+// 1. 8+ characters
+// 2. uppercase
+// 3. lowercase
+// 4. number
+// 5. special character
+//
+// Additional length improves the strength indicator,
+// but does NOT replace the required rules.
+// ============================================================
+
+  int _passwordStrengthScore(
+      String password,
+      ) {
+    if (password.isEmpty) {
+      return 0;
+    }
+
+    int score = 0;
+
+    if (_passwordHasMinimumLength(
+      password,
+    )) {
+      score++;
+    }
+
+    if (_passwordHasUppercase(
+      password,
+    )) {
+      score++;
+    }
+
+    if (_passwordHasLowercase(
+      password,
+    )) {
+      score++;
+    }
+
+    if (_passwordHasNumber(
+      password,
+    )) {
+      score++;
+    }
+
+    if (_passwordHasSpecialCharacter(
+      password,
+    )) {
+      score++;
+    }
+
+    return score;
+  }
+
+// ============================================================
+// PASSWORD STRENGTH LABEL
+// ============================================================
+
+  String _passwordStrengthLabel(
+      int score,
+      ) {
+    switch (score) {
+      case 0:
+        return 'Enter a password';
+
+      case 1:
+        return 'Very Weak';
+
+      case 2:
+        return 'Weak';
+
+      case 3:
+        return 'Fair';
+
+      case 4:
+        return 'Good';
+
+      case 5:
+        return 'Strong';
+
+      default:
+        return 'Strong';
+    }
+  }
+
+// ============================================================
+// PASSWORD STRENGTH COLOR
+// ============================================================
+
+  Color _passwordStrengthColor(
+      int score,
+      ) {
+    switch (score) {
+      case 0:
+        return AppColors.textSecondary;
+
+      case 1:
+        return AppColors.danger;
+
+      case 2:
+        return Colors.deepOrange;
+
+      case 3:
+        return AppColors.warning;
+
+      case 4:
+        return Colors.lightGreen;
+
+      case 5:
+        return AppColors.success;
+
+      default:
+        return AppColors.success;
+    }
+  }
+
+// ============================================================
+// PASSWORD IS FULLY VALID
+// ============================================================
+
+  bool _passwordMeetsAllRequirements(
+      String password,
+      ) {
+    return _passwordHasMinimumLength(
+      password,
+    ) &&
+        _passwordHasUppercase(
+          password,
+        ) &&
+        _passwordHasLowercase(
+          password,
+        ) &&
+        _passwordHasNumber(
+          password,
+        ) &&
+        _passwordHasSpecialCharacter(
+          password,
+        );
+  }
+
+// ============================================================
+// PASSWORD STRENGTH INDICATOR
+// ============================================================
+
+  Widget _buildPasswordStrengthIndicator() {
+    final String password =
+        newPasswordController.text;
+
+    final int score =
+    _passwordStrengthScore(
+      password,
+    );
+
+    final Color strengthColor =
+    _passwordStrengthColor(
+      score,
+    );
+
+    final String strengthLabel =
+    _passwordStrengthLabel(
+      score,
+    );
+
+    final double strengthProgress =
+        score / 5;
+
+    return AnimatedSwitcher(
+      duration:
+      const Duration(
+        milliseconds: 180,
+      ),
+
+      child:
+      password.isEmpty
+          ? const SizedBox.shrink()
+          : Container(
+        key:
+        ValueKey<String>(
+          password,
+        ),
+
+        width:
+        double.infinity,
+
+        margin:
+        const EdgeInsets.only(
+          top: 10,
+        ),
+
+        padding:
+        const EdgeInsets.all(
+          12,
+        ),
+
+        decoration:
+        BoxDecoration(
+          color:
+          strengthColor.withOpacity(
+            0.055,
+          ),
+
+          borderRadius:
+          BorderRadius.circular(
+            12,
+          ),
+
+          border:
+          Border.all(
+            color:
+            strengthColor.withOpacity(
+              0.28,
+            ),
+          ),
+        ),
+
+        child:
+        Column(
+          crossAxisAlignment:
+          CrossAxisAlignment.start,
+
+          children: [
+            // ==================================================
+            // STRENGTH HEADER
+            // ==================================================
+
+            Row(
+              children: [
+                const Text(
+                  'Password Strength',
+                  style:
+                  TextStyle(
+                    color:
+                    AppColors.textSecondary,
+
+                    fontSize:
+                    9,
+
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
+                ),
+
+                const Spacer(),
+
+                Text(
+                  strengthLabel,
+                  style:
+                  TextStyle(
+                    color:
+                    strengthColor,
+
+                    fontSize:
+                    9,
+
+                    fontWeight:
+                    FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 7,
+            ),
+
+            // ==================================================
+            // STRENGTH PROGRESS
+            // ==================================================
+
+            ClipRRect(
+              borderRadius:
+              BorderRadius.circular(
+                20,
+              ),
+
+              child:
+              LinearProgressIndicator(
+                value:
+                strengthProgress,
+
+                minHeight:
+                6,
+
+                backgroundColor:
+                AppColors.border,
+
+                color:
+                strengthColor,
+              ),
+            ),
+
+            const SizedBox(
+              height: 11,
+            ),
+
+            // ==================================================
+            // REQUIREMENTS
+            // ==================================================
+
+            _PasswordRequirement(
+              satisfied:
+              _passwordHasMinimumLength(
+                password,
+              ),
+
+              text:
+              'At least 8 characters',
+            ),
+
+            const SizedBox(
+              height: 5,
+            ),
+
+            _PasswordRequirement(
+              satisfied:
+              _passwordHasUppercase(
+                password,
+              ),
+
+              text:
+              'At least one uppercase letter',
+            ),
+
+            const SizedBox(
+              height: 5,
+            ),
+
+            _PasswordRequirement(
+              satisfied:
+              _passwordHasLowercase(
+                password,
+              ),
+
+              text:
+              'At least one lowercase letter',
+            ),
+
+            const SizedBox(
+              height: 5,
+            ),
+
+            _PasswordRequirement(
+              satisfied:
+              _passwordHasNumber(
+                password,
+              ),
+
+              text:
+              'At least one number',
+            ),
+
+            const SizedBox(
+              height: 5,
+            ),
+
+            _PasswordRequirement(
+              satisfied:
+              _passwordHasSpecialCharacter(
+                password,
+              ),
+
+              text:
+              'At least one special character',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+// ============================================================
+// CONFIRM PASSWORD MATCH INDICATOR
+// ============================================================
+
+  Widget _buildPasswordMatchIndicator() {
+    final String password =
+        newPasswordController.text;
+
+    final String confirmation =
+        confirmPasswordController.text;
+
+    if (confirmation.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final bool matches =
+        password ==
+            confirmation;
+
+    final bool passwordValid =
+    _passwordMeetsAllRequirements(
+      password,
+    );
+
+    final Color color =
+    matches &&
+        passwordValid
+        ? AppColors.success
+        : AppColors.danger;
+
+    final IconData icon =
+    matches &&
+        passwordValid
+        ? Icons.check_circle_outline_rounded
+        : Icons.error_outline_rounded;
+
+    final String message;
+
+    if (!matches) {
+      message =
+      'Passwords do not match.';
+    } else if (!passwordValid) {
+      message =
+      'Passwords match, but the new password does not meet all security requirements.';
+    } else {
+      message =
+      'Passwords match.';
+    }
+
+    return AnimatedContainer(
+      duration:
+      const Duration(
+        milliseconds: 180,
+      ),
+
+      margin:
+      const EdgeInsets.only(
+        top: 8,
+      ),
+
+      padding:
+      const EdgeInsets.symmetric(
+        horizontal: 10,
+        vertical: 8,
+      ),
+
+      decoration:
+      BoxDecoration(
+        color:
+        color.withOpacity(
+          0.06,
+        ),
+
+        borderRadius:
+        BorderRadius.circular(
+          10,
+        ),
+
+        border:
+        Border.all(
+          color:
+          color.withOpacity(
+            0.25,
+          ),
+        ),
+      ),
+
+      child:
+      Row(
+        children: [
+          Icon(
+            icon,
+
+            color:
+            color,
+
+            size:
+            16,
+          ),
+
+          const SizedBox(
+            width: 7,
+          ),
+
+          Expanded(
+            child:
+            Text(
+              message,
+
+              style:
+              TextStyle(
+                color:
+                color,
+
+                fontSize:
+                8.5,
+
+                fontWeight:
+                FontWeight.w600,
+
+                height:
+                1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
   // BUILD
   // ============================================================
 
@@ -3326,4 +3878,100 @@ InputDecoration _securityInput({
       ),
     ),
   );
+}
+
+// ============================================================
+// PASSWORD REQUIREMENT
+// ============================================================
+
+class _PasswordRequirement
+    extends StatelessWidget {
+  final bool satisfied;
+
+  final String text;
+
+  const _PasswordRequirement({
+    required this.satisfied,
+    required this.text,
+  });
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    final Color color =
+    satisfied
+        ? AppColors.success
+        : AppColors.textSecondary;
+
+    return Row(
+      children: [
+        AnimatedContainer(
+          duration:
+          const Duration(
+            milliseconds: 160,
+          ),
+
+          width:
+          17,
+
+          height:
+          17,
+
+          decoration:
+          BoxDecoration(
+            color:
+            satisfied
+                ? AppColors.success.withOpacity(
+              0.12,
+            )
+                : AppColors.border.withOpacity(
+              0.45,
+            ),
+
+            shape:
+            BoxShape.circle,
+          ),
+
+          child:
+          Icon(
+            satisfied
+                ? Icons.check_rounded
+                : Icons.close_rounded,
+
+            color:
+            color,
+
+            size:
+            11,
+          ),
+        ),
+
+        const SizedBox(
+          width: 7,
+        ),
+
+        Expanded(
+          child:
+          Text(
+            text,
+
+            style:
+            TextStyle(
+              color:
+              color,
+
+              fontSize:
+              8.5,
+
+              fontWeight:
+              satisfied
+                  ? FontWeight.w600
+                  : FontWeight.normal,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }

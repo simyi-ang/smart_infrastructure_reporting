@@ -2835,7 +2835,62 @@ class _EditProfileScreenState
                 }
 
                 if (name.length < 2) {
-                  return 'Enter a valid name.';
+                  return 'Full name is too short.';
+                }
+
+                if (name.length > 100) {
+                  return 'Full name is too long.';
+                }
+
+                // Must contain at least one real letter.
+                if (!RegExp(
+                  r"[A-Za-zÀ-ÖØ-öø-ÿĀ-ž\u4E00-\u9FFF]",
+                  unicode: true,
+                ).hasMatch(
+                  name,
+                )) {
+                  return 'Enter a valid full name.';
+                }
+
+                // Numbers should not be allowed in a person's name.
+                if (RegExp(
+                  r'\d',
+                ).hasMatch(
+                  name,
+                )) {
+                  return 'Full name cannot contain numbers.';
+                }
+
+                // Allow:
+                // letters
+                // spaces
+                // apostrophes
+                // hyphens
+                // periods
+                //
+                // Examples:
+                // Lee Mei Ling
+                // Nur Aisyah
+                // O'Connor
+                // Tan Wei-Jie
+                if (!RegExp(
+                  r"^[A-Za-zÀ-ÖØ-öø-ÿĀ-ž\u4E00-\u9FFF\s.'’-]+$",
+                  unicode: true,
+                ).hasMatch(
+                  name,
+                )) {
+                  return 'Full name contains invalid characters.';
+                }
+
+                // Prevent excessive repeated characters such as:
+                // aaaaaaaa
+                if (RegExp(
+                  r'(.)\1{4,}',
+                  caseSensitive: false,
+                ).hasMatch(
+                  name,
+                )) {
+                  return 'Enter a valid full name.';
                 }
 
                 return null;
@@ -2873,25 +2928,170 @@ class _EditProfileScreenState
               keyboardType:
               TextInputType.phone,
 
+              textInputAction:
+              TextInputAction.done,
+
+              autofillHints:
+              const <String>[
+                AutofillHints.telephoneNumber,
+              ],
+
               decoration:
               _profileInput(
                 hint:
-                'Your phone number',
+                'e.g. 0123456789 or +60123456789',
+
                 icon:
                 Icons.phone_outlined,
               ),
 
               validator:
                   (value) {
-                final String phone =
+                final String rawPhone =
                     value?.trim() ?? '';
 
-                if (phone.isEmpty) {
+                // ----------------------------------------------------------
+                // REQUIRED
+                // ----------------------------------------------------------
+
+                if (rawPhone.isEmpty) {
                   return 'Phone number is required.';
                 }
 
-                if (phone.length < 7) {
-                  return 'Enter a valid phone number.';
+                // ----------------------------------------------------------
+                // ONLY ALLOW PHONE CHARACTERS
+                //
+                // Accept:
+                // +60 12-345 6789
+                // 012-345 6789
+                // 03-1234 5678
+                //
+                // Reject:
+                // abc123
+                // 0123#456
+                // ----------------------------------------------------------
+
+                if (!RegExp(
+                  r'^[0-9+\-\s()]+$',
+                ).hasMatch(
+                  rawPhone,
+                )) {
+                  return 'Phone number contains invalid characters.';
+                }
+
+                // ----------------------------------------------------------
+                // NORMALIZE
+                //
+                // +60 12-345 6789
+                // becomes
+                // +60123456789
+                // ----------------------------------------------------------
+
+                String normalizedPhone =
+                rawPhone.replaceAll(
+                  RegExp(
+                    r'[\s\-()]',
+                  ),
+                  '',
+                );
+
+                // ----------------------------------------------------------
+                // PLUS SIGN RULE
+                // ----------------------------------------------------------
+
+                if (normalizedPhone.contains(
+                  '+',
+                )) {
+                  if (!normalizedPhone.startsWith(
+                    '+',
+                  )) {
+                    return 'The + symbol must be at the beginning.';
+                  }
+
+                  if ('+'.allMatches(
+                    normalizedPhone,
+                  ).length >
+                      1) {
+                    return 'Enter a valid phone number.';
+                  }
+                }
+
+                // ----------------------------------------------------------
+                // MALAYSIA INTERNATIONAL FORMAT
+                //
+                // +601XXXXXXXX
+                // +601XXXXXXXXX
+                //
+                // Malaysian mobile prefixes use 01.
+                // ----------------------------------------------------------
+
+                final bool malaysiaMobileInternational =
+                RegExp(
+                  r'^\+601\d{8,9}$',
+                ).hasMatch(
+                  normalizedPhone,
+                );
+
+                // ----------------------------------------------------------
+                // MALAYSIA LOCAL MOBILE FORMAT
+                //
+                // 01XXXXXXXX
+                // 01XXXXXXXXX
+                // ----------------------------------------------------------
+
+                final bool malaysiaMobileLocal =
+                RegExp(
+                  r'^01\d{8,9}$',
+                ).hasMatch(
+                  normalizedPhone,
+                );
+
+                // ----------------------------------------------------------
+                // MALAYSIA LANDLINE - LOCAL
+                //
+                // Examples:
+                // 03XXXXXXXX
+                // 04XXXXXXX
+                // 05XXXXXXX
+                // 06XXXXXXX
+                // 07XXXXXXX
+                // 08XXXXXXX
+                // 09XXXXXXX
+                // ----------------------------------------------------------
+
+                final bool malaysiaLandlineLocal =
+                RegExp(
+                  r'^0[3-9]\d{7,8}$',
+                ).hasMatch(
+                  normalizedPhone,
+                );
+
+                // ----------------------------------------------------------
+                // MALAYSIA LANDLINE - INTERNATIONAL
+                //
+                // Example:
+                // +60312345678
+                // ----------------------------------------------------------
+
+                final bool malaysiaLandlineInternational =
+                RegExp(
+                  r'^\+60[3-9]\d{7,8}$',
+                ).hasMatch(
+                  normalizedPhone,
+                );
+
+                // ----------------------------------------------------------
+                // FINAL VALIDATION
+                // ----------------------------------------------------------
+
+                final bool validPhone =
+                    malaysiaMobileLocal ||
+                        malaysiaMobileInternational ||
+                        malaysiaLandlineLocal ||
+                        malaysiaLandlineInternational;
+
+                if (!validPhone) {
+                  return 'Enter a valid Malaysian phone number.';
                 }
 
                 return null;
