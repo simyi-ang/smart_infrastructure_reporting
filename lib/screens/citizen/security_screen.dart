@@ -2871,8 +2871,7 @@ class _SecurityScreenState
                     decoration:
                     BoxDecoration(
                       color:
-                      AppColors.primary
-                          .withOpacity(
+                      AppColors.primary.withOpacity(
                         0.05,
                       ),
 
@@ -2901,7 +2900,9 @@ class _SecurityScreenState
                         Expanded(
                           child:
                           Text(
-                            'Your current password is required before a new password can be saved. Your device password manager may offer to update its saved credential.',
+                            'Your current password is required before a new password can be saved. '
+                                'Your device password manager may offer to update its saved credential.',
+
                             style:
                             TextStyle(
                               color:
@@ -2930,7 +2931,14 @@ class _SecurityScreenState
 
                       child:
                       Column(
+                        crossAxisAlignment:
+                        CrossAxisAlignment.start,
+
                         children: [
+                          // ======================================================
+                          // CURRENT PASSWORD
+                          // ======================================================
+
                           TextFormField(
                             controller:
                             currentPasswordController,
@@ -2946,6 +2954,9 @@ class _SecurityScreenState
                               AutofillHints.password,
                             ],
 
+                            textInputAction:
+                            TextInputAction.next,
+
                             decoration:
                             _securityInput(
                               hint:
@@ -2956,11 +2967,14 @@ class _SecurityScreenState
 
                               suffix:
                               IconButton(
-                                onPressed: () {
-                                  setState(() {
-                                    hideCurrentPassword =
-                                    !hideCurrentPassword;
-                                  });
+                                onPressed:
+                                    () {
+                                  setState(
+                                        () {
+                                      hideCurrentPassword =
+                                      !hideCurrentPassword;
+                                    },
+                                  );
                                 },
 
                                 icon:
@@ -2988,6 +3002,10 @@ class _SecurityScreenState
                             12,
                           ),
 
+                          // ======================================================
+                          // NEW PASSWORD
+                          // ======================================================
+
                           TextFormField(
                             controller:
                             newPasswordController,
@@ -3003,6 +3021,26 @@ class _SecurityScreenState
                               AutofillHints.newPassword,
                             ],
 
+                            textInputAction:
+                            TextInputAction.next,
+
+                            // IMPORTANT:
+                            // Rebuild strength indicator while typing.
+                            onChanged:
+                                (_) {
+                              setState(() {});
+
+                              // If confirmation already contains text,
+                              // revalidate it when the new password changes.
+                              if (confirmPasswordController
+                                  .text
+                                  .isNotEmpty) {
+                                passwordFormKey
+                                    .currentState
+                                    ?.validate();
+                              }
+                            },
+
                             decoration:
                             _securityInput(
                               hint:
@@ -3013,11 +3051,14 @@ class _SecurityScreenState
 
                               suffix:
                               IconButton(
-                                onPressed: () {
-                                  setState(() {
-                                    hideNewPassword =
-                                    !hideNewPassword;
-                                  });
+                                onPressed:
+                                    () {
+                                  setState(
+                                        () {
+                                      hideNewPassword =
+                                      !hideNewPassword;
+                                    },
+                                  );
                                 },
 
                                 icon:
@@ -3033,10 +3074,20 @@ class _SecurityScreenState
                             validatePassword,
                           ),
 
+                          // ======================================================
+                          // PASSWORD STRENGTH INDICATOR
+                          // ======================================================
+
+                          _buildPasswordStrengthIndicator(),
+
                           const SizedBox(
                             height:
                             12,
                           ),
+
+                          // ======================================================
+                          // CONFIRM PASSWORD
+                          // ======================================================
 
                           TextFormField(
                             controller:
@@ -3053,6 +3104,23 @@ class _SecurityScreenState
                               AutofillHints.newPassword,
                             ],
 
+                            textInputAction:
+                            TextInputAction.done,
+
+                            // IMPORTANT:
+                            // Rebuild match indicator while typing.
+                            onChanged:
+                                (_) {
+                              setState(() {});
+                            },
+
+                            onFieldSubmitted:
+                                (_) {
+                              if (!loading) {
+                                changePassword();
+                              }
+                            },
+
                             decoration:
                             _securityInput(
                               hint:
@@ -3063,11 +3131,14 @@ class _SecurityScreenState
 
                               suffix:
                               IconButton(
-                                onPressed: () {
-                                  setState(() {
-                                    hideConfirmPassword =
-                                    !hideConfirmPassword;
-                                  });
+                                onPressed:
+                                    () {
+                                  setState(
+                                        () {
+                                      hideConfirmPassword =
+                                      !hideConfirmPassword;
+                                    },
+                                  );
                                 },
 
                                 icon:
@@ -3091,14 +3162,34 @@ class _SecurityScreenState
                                 return 'Passwords do not match.';
                               }
 
+                              final String? passwordProblem =
+                              validatePassword(
+                                newPasswordController.text,
+                              );
+
+                              if (passwordProblem !=
+                                  null) {
+                                return 'New password does not meet all security requirements.';
+                              }
+
                               return null;
                             },
                           ),
+
+                          // ======================================================
+                          // PASSWORD MATCH INDICATOR
+                          // ======================================================
+
+                          _buildPasswordMatchIndicator(),
 
                           const SizedBox(
                             height:
                             15,
                           ),
+
+                          // ======================================================
+                          // CHANGE PASSWORD BUTTON
+                          // ======================================================
 
                           SizedBox(
                             width:
